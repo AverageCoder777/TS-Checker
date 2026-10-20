@@ -529,12 +529,7 @@ pub(crate) fn save_asset_xml(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let temp = tempfile::tempdir_in(parent).map_err(|error| {
-        format!(
-            "Не удалось создать временную папку рядом с {}: {error}",
-            source_path.display()
-        )
-    })?;
+    let temp = create_temporary_work_directory(parent)?;
     let xml_path = temp.path().join("edited.xml");
     fs::write(&xml_path, xml)
         .map_err(|error| format!("Не удалось записать временный XML: {error}"))?;

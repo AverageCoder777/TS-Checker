@@ -21,6 +21,29 @@ fn is_allowed_route_directory(name: &str, ignore_scenarios: bool) -> bool {
         && !is_skipped_route_scan_directory(name, ignore_scenarios)
 }
 
+/// Префикс рабочих каталогов программы, которые создаются рядом с файлами маршрута
+/// и ассетов. Такие каталоги не должны попадать в проверку маршрута, а после аварийного
+/// завершения их легко узнать и удалить вручную.
+pub(crate) const TEMP_WORK_DIRECTORY_PREFIX: &str = ".ts-checker-tmp-";
+
+pub(crate) fn is_temporary_work_directory(name: &str) -> bool {
+    name.starts_with(TEMP_WORK_DIRECTORY_PREFIX)
+}
+
+/// Создаёт рабочий каталог рядом с целевым файлом: переименование в пределах одного
+/// тома обязательно для `install_converted_asset`, поэтому системный `%TEMP%` не подходит.
+pub(crate) fn create_temporary_work_directory(parent: &Path) -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix(TEMP_WORK_DIRECTORY_PREFIX)
+        .tempdir_in(parent)
+        .map_err(|error| {
+            format!(
+                "Не удалось создать временные файлы рядом с {}: {error}",
+                parent.display()
+            )
+        })
+}
+
 pub(crate) fn collect_route_files(
     route_path: &Path,
     ignore_scenarios: bool,
@@ -28,6 +51,9 @@ pub(crate) fn collect_route_files(
     WalkDir::new(route_path)
         .into_iter()
         .filter_entry(|entry| {
+            if is_temporary_work_directory(&entry.file_name().to_string_lossy()) {
+                return false;
+            }
             entry.depth() == 0
                 || entry.depth() != 1
                 || !entry.file_type().is_dir()
@@ -92,6 +118,22 @@ pub(crate) fn unexpected_route_directories(route_path: &Path) -> Result<Vec<Stri
     }
     unexpected.sort_by_key(|name| name.to_lowercase());
     Ok(unexpected)
+}
+
+/// Находит рабочие каталоги программы, оставшиеся в маршруте после аварийного завершения.
+pub(crate) fn leftover_temporary_work_directories(route_path: &Path) -> Result<Vec<String>, String> {
+    let mut leftovers = Vec::new();
+    for entry in WalkDir::new(route_path).min_depth(1).max_depth(3) {
+        let entry = entry
+            .map_err(|error| format!("Ошибка при обходе {}: {error}", route_path.display()))?;
+        if entry.file_type().is_dir()
+            && is_temporary_work_directory(&entry.file_name().to_string_lossy())
+        {
+            leftovers.push(entry.path().display().to_string());
+        }
+    }
+    leftovers.sort();
+    Ok(leftovers)
 }
 
 pub(crate) fn preferred_serz_path(rw_path: &Path) -> PathBuf {
@@ -230,11 +272,16 @@ fn read_serz_xml(serz_path: &Path, asset_path: &Path) -> Result<String, String> 
         .map_err(|error| format!("Не удалось прочитать XML {}: {error}", xml_path.display()))
 }
 
+fn geometry_reference_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r#"(?is)>([^<>]*?\.(?:GeoPcDx|TgPcDx))\s*</[^>]+>"#)
+            .expect("Шаблон поиска ссылок на геометрию должен быть корректным")
+    })
+}
+
 fn referenced_geometry_paths(xml: &str) -> Vec<(String, std::ops::Range<usize>)> {
-    let Ok(regex) = Regex::new(r#"(?is)>([^<>]*?\.(?:GeoPcDx|TgPcDx))\s*</[^>]+>"#) else {
-        return Vec::new();
-    };
-    regex
+    geometry_reference_regex()
         .captures_iter(xml)
         .filter_map(|captures| {
             let matched = captures.get(1)?;
@@ -520,6 +567,13 @@ pub(crate) fn check_route(
         structure_issues.push(format!(
             "неизвестные папки маршрута не проверялись: {}",
             unexpected_directories.join(", ")
+        ));
+    }
+    let leftover_work_directories = leftover_temporary_work_directories(route_path)?;
+    if !leftover_work_directories.is_empty() {
+        structure_issues.push(format!(
+            "в маршруте остались рабочие каталоги программы (можно удалить): {}",
+            leftover_work_directories.join(", ")
         ));
     }
 
@@ -826,12 +880,7 @@ pub(crate) fn replace_missing_asset(
             ));
         }
         let source_parent = source_file.parent().unwrap_or(route_path);
-        let temp = tempfile::tempdir_in(source_parent).map_err(|error| {
-            format!(
-                "Не удалось подготовить временные файлы рядом с {}: {error}",
-                source_file.display()
-            )
-        })?;
+        let temp = create_temporary_work_directory(source_parent)?;
         let xml_path = temp.path().join("source.xml");
         if is_binary {
             let conversion =
@@ -1061,12 +1110,7 @@ fn stage_serz_xml(
     let parent = source
         .parent()
         .ok_or_else(|| format!("Некорректный путь к ассету: {}", source.display()))?;
-    let temp = tempfile::tempdir_in(parent).map_err(|error| {
-        format!(
-            "Не удалось подготовить временные файлы рядом с {}: {error}",
-            source.display()
-        )
-    })?;
+    let temp = create_temporary_work_directory(parent)?;
     let xml_path = temp.path().join("transliterated.xml");
     fs::write(&xml_path, xml)
         .map_err(|error| format!("Не удалось записать временный XML: {error}"))?;
@@ -1104,12 +1148,7 @@ fn stage_renamed_file(source: &Path, target: &Path) -> Result<StagedUmlautFile, 
     let parent = source
         .parent()
         .ok_or_else(|| format!("Некорректный путь к ассету: {}", source.display()))?;
-    let temp = tempfile::tempdir_in(parent).map_err(|error| {
-        format!(
-            "Не удалось подготовить временную копию {}: {error}",
-            source.display()
-        )
-    })?;
+    let temp = create_temporary_work_directory(parent)?;
     let staged = temp.path().join(
         source
             .file_name()
@@ -1412,8 +1451,7 @@ pub(crate) fn repair_umlaut_asset_chain(
                 source.display()
             ));
         }
-        let temp = tempfile::tempdir_in(source.parent().unwrap_or(&route_root))
-            .map_err(|error| format!("Не удалось подготовить маршрутный файл: {error}"))?;
+        let temp = create_temporary_work_directory(source.parent().unwrap_or(&route_root))?;
         let xml_path = temp.path().join("route.xml");
         if is_binary {
             let conversion = convert_bin_to_xml(serz_path, &source, &xml_path).or_else(|error| {
@@ -2013,13 +2051,104 @@ pub(crate) fn asset_kind(path: &str) -> AssetKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_kind, extract_asset_references_with_locations, has_umlauts, has_umlauts_in_xml,
-        inspect_umlaut_asset, referenced_geometry_paths, resolve_asset_path, route_tile_label,
-        transliterate_umlauts, transliterate_xml_umlauts, transliterated_asset_path, AssetKind,
-        AssetUse,
+        asset_kind, collect_route_files, extract_asset_references_with_locations, has_umlauts,
+        has_umlauts_in_xml, inspect_umlaut_asset, leftover_temporary_work_directories,
+        referenced_geometry_paths, resolve_asset_path, route_tile_label, transliterate_umlauts,
+        transliterate_xml_umlauts, transliterated_asset_path, AssetKind, AssetUse, UmlautAsset,
+        TEMP_WORK_DIRECTORY_PREFIX,
     };
+    use crate::app::{asset_inventory_rows, InventoryLayout};
+    use eframe::egui;
     use std::path::Path;
     use std::path::PathBuf;
+
+    /// Готовит строку таблицы инвентаря с заданным числом тайлов.
+    fn inventory_row(tile_count: usize) -> (Vec<AssetUse>, UmlautAsset) {
+        let uses: Vec<AssetUse> = (0..tile_count)
+            .map(|index| AssetUse {
+                source_file: PathBuf::from(format!("route/rail/{index}.bin")),
+                tile: format!("тайл {}", index + 1),
+            })
+            .collect();
+        let umlaut = UmlautAsset {
+            path: "Scenery/Prüfung.xml".to_string(),
+            uses: uses.clone(),
+            evidence: vec!["имя содержит умляут".to_string()],
+        };
+        (uses, umlaut)
+    }
+
+    /// Рисует таблицу инвентаря в headless-контексте egui и возвращает её высоту.
+    fn render_inventory_height(tile_count: usize) -> f32 {
+        let (uses, umlaut) = inventory_row(tile_count);
+        let rows: Vec<crate::app::InventoryRow<'_>> = vec![(
+            "Scenery/Prüfung.xml",
+            uses.as_slice(),
+            true,
+            Some(&umlaut),
+        )];
+
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let layout = InventoryLayout::new(880.0, 8.0, true);
+        let mut height = 0.0;
+        let _ = context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let mut repair_requested = None;
+                asset_inventory_rows(
+                    ui,
+                    &rows,
+                    Path::new("C:\\RailWorks\\Content\\Assets"),
+                    &layout,
+                    true,
+                    false,
+                    &mut repair_requested,
+                );
+                height = ui.min_rect().height();
+            });
+        });
+        height
+    }
+
+    #[test]
+    fn inventory_row_height_does_not_depend_on_tile_count() {
+        // Ассет со всей информацией должен занимать ровно одну строку таблицы.
+        let single = render_inventory_height(1);
+        let many = render_inventory_height(20);
+        assert!(single > 0.0);
+        assert!(
+            (single - many).abs() < 0.5,
+            "высота строки изменилась: {single} против {many}"
+        );
+    }
+
+    #[test]
+    fn excludes_leftover_work_directories_from_route_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let route = temp.path().join("route");
+        std::fs::create_dir_all(route.join("Scenery")).unwrap();
+        std::fs::write(route.join("Scenery").join("tile.bin"), b"data").unwrap();
+        let leftover = route
+            .join("Scenery")
+            .join(format!("{TEMP_WORK_DIRECTORY_PREFIX}abcd1234"));
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("source.xml"), b"<route />").unwrap();
+        std::fs::write(leftover.join("replacement.bin"), b"data").unwrap();
+
+        let files = collect_route_files(&route, false).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("Scenery\\tile.bin") || files[0].ends_with("Scenery/tile.bin"));
+        assert_eq!(
+            leftover_temporary_work_directories(&route).unwrap(),
+            [leftover.display().to_string()]
+        );
+    }
 
     #[test]
     fn extracts_locations_for_multiple_asset_references() {
@@ -2178,10 +2307,9 @@ mod tests {
         std::fs::create_dir_all(actual_path.parent().unwrap()).unwrap();
         std::fs::write(&actual_path, b"fixture").unwrap();
 
-        let xml = format!(
-            "<Provider>RWAustria_3</Provider><Product>Marchegger_Ostbahn</Product>\
+        let xml = "<Provider>RWAustria_3</Provider><Product>Marchegger_Ostbahn</Product>\
              <BlueprintID>Marchegg\\Bruecke Fu\u{FFDF}ganger 5.xml</BlueprintID>"
-        );
+            .to_string();
         let references = extract_asset_references_with_locations(&xml);
         assert_eq!(references.len(), 1);
         assert!(references[0].path.contains('\u{FFDF}'));

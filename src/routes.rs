@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// Реальные файлы в .ap сжимаются в десятки раз: в проверенных архивах максимум
+/// около 54x на текстурах и 6x на XML. «Бомба» даёт коэффициент в тысячи раз,
+/// поэтому порог в 200 оставляет большой запас для настоящих файлов.
+const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 200;
+/// Файлы меньше этого размера разжимать безопасно независимо от коэффициента.
+const ARCHIVE_RATIO_CHECK_MIN_BYTES: u64 = 8 * 1024 * 1024;
+/// Предел для элемента архива, который программа распаковывает в память.
+const MAX_ARCHIVE_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
+/// Иконка маршрута — это картинка, больше 64 МБ она быть не может.
+const MAX_ICON_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Возвращает true, если элемент архива выглядит как «бомба» и его не стоит распаковывать.
+pub(crate) fn is_suspicious_archive_member(size: u64, compressed_size: u64) -> bool {
+    if size > MAX_ARCHIVE_MEMBER_BYTES {
+        return true;
+    }
+    if size <= ARCHIVE_RATIO_CHECK_MIN_BYTES || compressed_size == 0 {
+        return false;
+    }
+    size > compressed_size.saturating_mul(MAX_ARCHIVE_COMPRESSION_RATIO)
+}
+
 pub(crate) fn route_scan_cache_file() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|app_data| {
         PathBuf::from(app_data)
@@ -18,7 +40,7 @@ pub(crate) fn invalidate_route_scan_cache() -> Result<(), String> {
 }
 
 pub(crate) fn invalidate_route_scan_cache_at(cache_path: &Path) -> Result<(), String> {
-    match fs::remove_file(&cache_path) {
+    match fs::remove_file(cache_path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
@@ -183,7 +205,7 @@ pub(crate) fn scan_routes_with_ignored(
         }
     }
 
-    let thread_count = route_folders.len().min(MAX_CONCURRENT_ROUTE_SCANS).max(1);
+    let thread_count = route_folders.len().clamp(1, MAX_CONCURRENT_ROUTE_SCANS);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
@@ -303,6 +325,7 @@ pub(crate) fn inspect_route_folder(
                     .rsplit('/')
                     .next()
                     .is_some_and(|name| name.eq_ignore_ascii_case("ScenarioProperties.xml"))
+                && !is_suspicious_archive_member(member.size(), member.compressed_size())
             {
                 let mut contents = String::new();
                 member.read_to_string(&mut contents).map_err(|error| {
@@ -321,6 +344,7 @@ pub(crate) fn inspect_route_folder(
                     .is_some_and(|name| name.eq_ignore_ascii_case("RouteProperties.xml"))
                     || (member_name.to_lowercase().contains("routeinformation")
                         && member_name.to_lowercase().ends_with(".xml")))
+                && !is_suspicious_archive_member(member.size(), member.compressed_size())
             {
                 let mut contents = String::new();
                 if member.read_to_string(&mut contents).is_ok() {
@@ -591,7 +615,7 @@ pub(crate) fn find_route_icon_with_cache(
     let Some((_, archive_path, member_name)) = archived_images.into_iter().next() else {
         return Ok(None);
     };
-    extract_archived_route_icon(&archive_path, &member_name, cache_directory).map(Some)
+    extract_archived_route_icon(&archive_path, &member_name, cache_directory)
 }
 
 fn is_route_image(extension: Option<&std::ffi::OsStr>) -> bool {
@@ -628,19 +652,24 @@ fn extract_archived_route_icon(
     archive_path: &Path,
     member_name: &str,
     cache_directory: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<Option<PathBuf>, String> {
     let file = fs::File::open(archive_path)
         .map_err(|error| format!("Не удалось открыть {}: {error}", archive_path.display()))?;
     let mut archive = ZipArchive::new(file)
         .map_err(|error| format!("Не удалось прочитать {}: {error}", archive_path.display()))?;
-    let mut member = archive.by_name(member_name).map_err(|error| {
+    let member = archive.by_name(member_name).map_err(|error| {
         format!(
             "Не удалось найти {member_name} в {}: {error}",
             archive_path.display()
         )
     })?;
+    if member.size() > MAX_ICON_MEMBER_BYTES
+        || is_suspicious_archive_member(member.size(), member.compressed_size())
+    {
+        return Ok(None);
+    }
 
-    fs::create_dir_all(&cache_directory).map_err(|error| {
+    fs::create_dir_all(cache_directory).map_err(|error| {
         format!(
             "Не удалось создать кэш миниатюр {}: {error}",
             cache_directory.display()
@@ -658,13 +687,13 @@ fn extract_archived_route_icon(
             output_path.display()
         )
     })?;
-    io::copy(&mut member, &mut output).map_err(|error| {
+    io::copy(&mut member.take(MAX_ICON_MEMBER_BYTES), &mut output).map_err(|error| {
         format!(
             "Не удалось извлечь {member_name} из {}: {error}",
             archive_path.display()
         )
     })?;
-    Ok(output_path)
+    Ok(Some(output_path))
 }
 
 fn stable_icon_cache_key(archive_path: &Path, member_name: &str) -> String {
@@ -871,6 +900,7 @@ pub(crate) fn read_route_name(route_path: &Path, fallback: &str) -> Result<Strin
                             .rsplit(['/', '\\'])
                             .next()
                             .is_some_and(|name| name.eq_ignore_ascii_case("RouteProperties.xml"))
+                        || is_suspicious_archive_member(member.size(), member.compressed_size())
                     {
                         continue;
                     }

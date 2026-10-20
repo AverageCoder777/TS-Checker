@@ -436,7 +436,7 @@ mod tests {
         let incomplete = routes_root.join("leftovers");
         let emptier = routes_root.join("empty-folder");
         fs::create_dir_all(&valid_route).unwrap();
-        fs::create_dir_all(&incomplete.join("Scenery")).unwrap();
+        fs::create_dir_all(incomplete.join("Scenery")).unwrap();
         fs::create_dir_all(&emptier).unwrap();
         fs::write(
             valid_route.join("RouteProperties.xml"),
@@ -609,6 +609,24 @@ mod tests {
     }
 
     #[test]
+    fn treats_only_extreme_compression_ratios_as_suspicious() {
+        // Настоящие файлы в .ap сжимаются в десятки раз, а не в тысячи.
+        assert!(!super::is_suspicious_archive_member(
+            50 * 1024 * 1024,
+            2 * 1024 * 1024
+        ));
+        assert!(!super::is_suspicious_archive_member(1024, 10));
+        assert!(super::is_suspicious_archive_member(
+            1024 * 1024 * 1024,
+            1024 * 1024
+        ));
+        assert!(super::is_suspicious_archive_member(
+            1024 * 1024 * 1024,
+            0
+        ));
+    }
+
+    #[test]
     fn finds_route_icon_in_route_information() {
         let temp = tempfile::tempdir().unwrap();
         let route = temp.path().join("incomplete-route");
@@ -734,8 +752,11 @@ mod tests {
         fs::create_dir_all(&routes_root).unwrap();
         fs::create_dir_all(&outside).unwrap();
 
-        let error =
-            super::move_folders_to_recycle_bin(&routes_root, &[outside.clone()]).unwrap_err();
+        let error = super::move_folders_to_recycle_bin(
+            &routes_root,
+            std::slice::from_ref(&outside),
+        )
+        .unwrap_err();
 
         assert!(error.contains("вне папки"));
         assert!(outside.is_dir());

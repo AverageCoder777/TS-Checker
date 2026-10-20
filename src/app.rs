@@ -43,6 +43,270 @@ pub(crate) fn route_panel_widths(
     (routes_width, check_width)
 }
 
+/// Строка таблицы инвентаря: путь ассета, список использований, признак отсутствия
+/// на диске и ассет с умляутами, если его нужно починить.
+pub(crate) type InventoryRow<'a> = (
+    &'a str,
+    &'a [AssetUse],
+    bool,
+    Option<&'a UmlautAsset>,
+);
+
+/// Ширины столбцов таблицы инвентаря.
+///
+/// Считаются один раз для шапки и для строк, чтобы подписи и данные стояли
+/// в одних и тех же местах.
+#[derive(Clone, Copy)]
+pub(crate) struct InventoryLayout {
+    path_width: f32,
+    usage_width: f32,
+    tiles_width: f32,
+    status_width: f32,
+}
+
+impl InventoryLayout {
+    /// Раскладывает таблицу по ширине окна. `table_width` берётся с запасом на
+    /// полосу прокрутки, чтобы шапка и строки совпадали при прокрутке.
+    pub(crate) fn new(table_width: f32, column_spacing: f32, show_tiles: bool) -> Self {
+        let column_count = if show_tiles { 4 } else { 3 };
+        let usage_width = 112.0;
+        let status_width = 200.0;
+        let tiles_width = if show_tiles {
+            (table_width * 0.28).clamp(120.0, 400.0)
+        } else {
+            0.0
+        };
+        let path_width = (table_width
+            - column_spacing * (column_count - 1) as f32
+            - usage_width
+            - status_width
+            - tiles_width)
+            .max(180.0);
+        Self {
+            path_width,
+            usage_width,
+            tiles_width,
+            status_width,
+        }
+    }
+
+    fn columns(&self, show_tiles: bool) -> usize {
+        if show_tiles {
+            4
+        } else {
+            3
+        }
+    }
+}
+
+/// Измеряет ширину текста в стиле мелкого шрифта.
+fn measure_small_text(ui: &egui::Ui, font_id: &egui::FontId, text: &str) -> f32 {
+    let font_id = font_id.clone();
+    ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(text.to_string(), font_id, ui.visuals().text_color())
+            .size()
+            .x
+    })
+}
+
+/// Делит список тайлов на часть, помещающуюся в ячейку, и часть, уходящую в подсказку.
+///
+/// Так список тайлов не показывается дважды: в ячейке видно начало, в подсказке — продолжение.
+fn split_tiles_for_cell(
+    ui: &egui::Ui,
+    tiles_width: f32,
+    tiles: &[(&str, usize)],
+) -> (String, String) {
+    let font_id = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Small)
+        .cloned()
+        .unwrap_or_default();
+    let mut visible = String::new();
+    let mut hidden: Vec<String> = Vec::new();
+    let mut used = 0.0;
+    for (tile, count) in tiles {
+        let token = format!("{} ({count})", tile.trim_start_matches("тайл "));
+        let separator = if visible.is_empty() {
+            0.0
+        } else {
+            measure_small_text(ui, &font_id, ", ")
+        };
+        let width = measure_small_text(ui, &font_id, &token) + separator;
+        if visible.is_empty() || used + width <= tiles_width {
+            if !visible.is_empty() {
+                visible.push_str(", ");
+            }
+            visible.push_str(&token);
+            used += width;
+        } else {
+            hidden.push(format!("{tile} — {count}"));
+        }
+    }
+    let hint = if hidden.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Ещё {} {}:\n{}",
+            hidden.len(),
+            plural_tiles(hidden.len()),
+            hidden.join("\n")
+        )
+    };
+    (visible, hint)
+}
+
+/// Склонение слова «тайл» по числу.
+fn plural_tiles(count: usize) -> &'static str {
+    match count % 10 {
+        1 if count % 100 != 11 => "тайл",
+        2..=4 if !(12..=14).contains(&(count % 100)) => "тайла",
+        _ => "тайлов",
+    }
+}
+
+/// Шапка таблицы инвентаря: подписи столбцов объясняют значения в строках.
+pub(crate) fn asset_inventory_header(
+    ui: &mut egui::Ui,
+    layout: &InventoryLayout,
+    show_tiles: bool,
+) -> egui::Rect {
+    egui::Grid::new("asset_inventory_header")
+        .num_columns(layout.columns(show_tiles))
+        .show(ui, |ui| {
+            ui.add_sized(
+                [layout.path_width, 18.0],
+                egui::Label::new(egui::RichText::new("Ассет").strong()).truncate(),
+            );
+            ui.add_sized(
+                [layout.usage_width, 18.0],
+                egui::Label::new(egui::RichText::new("Использований").strong()).truncate(),
+            )
+            .on_hover_text("Сколько раз ассет встречается в файлах маршрута");
+            if show_tiles {
+                ui.add_sized(
+                    [layout.tiles_width, 18.0],
+                    egui::Label::new(egui::RichText::new("Тайлы").strong()).truncate(),
+                )
+                .on_hover_text("Сколько объектов ассета размещено на каждом тайле");
+            }
+            ui.add_sized(
+                [layout.status_width, 18.0],
+                egui::Label::new(egui::RichText::new("Состояние").strong()).truncate(),
+            );
+            ui.end_row();
+        })
+        .response
+        .rect
+}
+
+/// Строки таблицы инвентаря.
+///
+/// Каждый ассет занимает ровно одну строку: путь, счётчик использований, тайлы и
+/// состояние стоят в отдельных столбцах.
+pub(crate) fn asset_inventory_rows(
+    ui: &mut egui::Ui,
+    rows: &[InventoryRow<'_>],
+    assets_root: &Path,
+    layout: &InventoryLayout,
+    show_tiles: bool,
+    repair_busy: bool,
+    repair_requested: &mut Option<UmlautAsset>,
+) -> egui::Rect {
+    ui.spacing_mut().item_spacing.y = 1.0;
+    egui::Grid::new("asset_inventory_grid")
+        .num_columns(layout.columns(show_tiles))
+        .striped(true)
+        .show(ui, |ui| {
+            for (path, uses, missing, repair_asset) in rows {
+                let color = if *missing {
+                    egui::Color32::LIGHT_RED
+                } else if repair_asset.is_some() {
+                    egui::Color32::YELLOW
+                } else {
+                    ui.visuals().text_color()
+                };
+                // Полный путь внутри Assets и подробности проверки уходят в подсказку,
+                // чтобы строка оставалась в одну линию.
+                let mut hover = assets_root
+                    .join(path.replace('/', "\\"))
+                    .display()
+                    .to_string();
+                if let Some(asset) = repair_asset {
+                    for evidence in &asset.evidence {
+                        hover.push_str("\n\nОбнаружение: ");
+                        hover.push_str(evidence);
+                    }
+                }
+                ui.add_sized(
+                    [layout.path_width, 18.0],
+                    egui::Label::new(egui::RichText::new(*path).color(color)).truncate(),
+                )
+                .on_hover_text(hover);
+
+                ui.add_sized(
+                    [layout.usage_width, 18.0],
+                    egui::Label::new(egui::RichText::new(format!("×{}", uses.len()))),
+                )
+                .on_hover_text(format!(
+                    "Использований: {} (см. столбец «Использований»)",
+                    uses.len()
+                ));
+
+                if show_tiles {
+                    let mut by_tile: HashMap<&str, usize> = HashMap::new();
+                    for usage in *uses {
+                        by_tile
+                            .entry(&usage.tile)
+                            .and_modify(|count| *count += 1)
+                            .or_insert(1);
+                    }
+                    let mut tiles: Vec<_> = by_tile.into_iter().collect();
+                    tiles.sort_by(|left, right| left.0.cmp(right.0));
+                    let (summary, tile_hint) =
+                        split_tiles_for_cell(ui, layout.tiles_width, &tiles);
+                    let response = ui.add_sized(
+                        [layout.tiles_width, 18.0],
+                        egui::Label::new(egui::RichText::new(summary).small()).truncate(),
+                    );
+                    if !tile_hint.is_empty() {
+                        response.on_hover_text(tile_hint);
+                    }
+                }
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(layout.status_width, 18.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        if *missing {
+                            ui.colored_label(egui::Color32::LIGHT_RED, "ОТСУТСТВУЕТ");
+                        }
+                        if let Some(asset) = repair_asset {
+                            if ui
+                                .add_enabled(!repair_busy, egui::Button::new("Исправить…"))
+                                .on_hover_text("Транслитерировать цепочку имён с умляутами")
+                                .clicked()
+                            {
+                                *repair_requested = Some((*asset).clone());
+                            }
+                        }
+                    },
+                );
+                ui.end_row();
+            }
+        })
+        .response
+        .rect
+}
+
+/// Результат сохранения ассета: исходный путь, XML и путь резервной копии.
+type SavedAsset = (PathBuf, String, Option<PathBuf>);
+
+/// Результат проверки ассетов на умляуты: найденные ассеты и список ошибок.
+type InventoryScanOutcome = (Vec<UmlautAsset>, Vec<String>);
+
 pub(crate) struct CheckerApp {
     rw_path: String,
     startup_scan_started: bool,
@@ -72,7 +336,7 @@ pub(crate) struct CheckerApp {
     asset_editor_only: bool,
     asset_viewer_document: Option<EditorDocument>,
     asset_viewer_load: Option<Receiver<Result<EditorDocument, String>>>,
-    asset_viewer_save: Option<Receiver<Result<(PathBuf, String, Option<PathBuf>), String>>>,
+    asset_viewer_save: Option<Receiver<Result<SavedAsset, String>>>,
     route_thumbnails_enabled: bool,
     serz_process_limit: usize,
     route_icon_textures: HashMap<PathBuf, egui::TextureHandle>,
@@ -80,7 +344,7 @@ pub(crate) struct CheckerApp {
     asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
     inventory_action_tx: Sender<InventoryAction>,
     inventory_action_rx: Receiver<InventoryAction>,
-    inventory_scan: Option<Receiver<Result<(Vec<UmlautAsset>, Vec<String>), String>>>,
+    inventory_scan: Option<Receiver<Result<InventoryScanOutcome, String>>>,
 }
 
 impl Default for CheckerApp {
@@ -106,11 +370,11 @@ impl Default for CheckerApp {
         };
         let (inventory_action_tx, inventory_action_rx) = mpsc::channel();
         if let Some(warning) = settings_warning {
-            status.push_str(" ");
+            status.push(' ');
             status.push_str(&warning);
         }
         if let Some(warning) = serz_settings_warning {
-            status.push_str(" ");
+            status.push(' ');
             status.push_str(&warning);
         }
         Self {
@@ -252,7 +516,7 @@ impl CheckerApp {
                     ui.separator();
 
                     let search = state.search.to_lowercase();
-                    let rows: Vec<(&str, &[AssetUse], bool, Option<&UmlautAsset>)> =
+                    let rows: Vec<InventoryRow<'_>> =
                         if state.show_umlauts {
                             state
                                 .umlaut_assets
@@ -316,74 +580,32 @@ impl CheckerApp {
                         };
 
                     let mut repair_requested = None;
+                    let show_tiles = state.show_tiles;
+                    // Ширина таблицы считается с запасом на полосу прокрутки, чтобы
+                    // шапка и строки оставались в одних и тех же границах.
+                    let table_width =
+                        (ui.available_width() - ui.spacing().scroll.allocated_width()).max(320.0);
+                    let layout = InventoryLayout::new(
+                        table_width,
+                        ui.spacing().item_spacing.x,
+                        show_tiles,
+                    );
+                    asset_inventory_header(ui, &layout, show_tiles);
+                    ui.separator();
                     egui::ScrollArea::vertical()
                         .id_salt("asset_inventory_rows")
                         .auto_shrink([false, false])
+                        .scroll_bar_visibility(egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible)
                         .show(ui, |ui| {
-                            for (path, uses, missing, repair_asset) in &rows {
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        let color = if *missing {
-                                            egui::Color32::LIGHT_RED
-                                        } else if repair_asset.is_some() {
-                                            egui::Color32::YELLOW
-                                        } else {
-                                            ui.visuals().text_color()
-                                        };
-                                        ui.colored_label(color, *path);
-                                        ui.small(
-                                            assets_root
-                                                .join(path.replace('/', "\\"))
-                                                .display()
-                                                .to_string(),
-                                        );
-                                        if *missing {
-                                            ui.colored_label(
-                                                egui::Color32::LIGHT_RED,
-                                                "ОТСУТСТВУЕТ",
-                                            );
-                                        }
-                                        if let Some(asset) = repair_asset.as_ref() {
-                                            if ui
-                                                .add_enabled(
-                                                    !repair_busy,
-                                                    egui::Button::new(
-                                                        "Транслитерировать цепочку...",
-                                                    ),
-                                                )
-                                                .clicked()
-                                            {
-                                                repair_requested = Some((*asset).clone());
-                                            }
-                                        }
-                                    });
-                                    ui.small(format!("Использований: {}", uses.len()));
-                                    let mut by_tile: HashMap<&str, usize> = HashMap::new();
-                                    for usage in *uses {
-                                        by_tile
-                                            .entry(&usage.tile)
-                                            .and_modify(|count| *count += 1)
-                                            .or_insert(1);
-                                    }
-                                    if state.show_tiles {
-                                        let mut tiles: Vec<_> = by_tile.into_iter().collect();
-                                        tiles.sort_by(|left, right| left.0.cmp(right.0));
-                                        for (tile, count) in tiles {
-                                            ui.label(format!("• {tile} — {count} объектов"));
-                                        }
-                                    } else {
-                                        ui.small(format!(
-                                            "Используется на {} тайлах",
-                                            by_tile.len()
-                                        ));
-                                    }
-                                    if let Some(asset) = repair_asset {
-                                        for evidence in &asset.evidence {
-                                            ui.small(format!("Обнаружение: {evidence}"));
-                                        }
-                                    }
-                                });
-                            }
+                            asset_inventory_rows(
+                                ui,
+                                &rows,
+                                &assets_root,
+                                &layout,
+                                show_tiles,
+                                repair_busy,
+                                &mut repair_requested,
+                            );
                         });
                     drop(rows);
                     if let Some(asset) = repair_requested {
@@ -578,20 +800,23 @@ impl CheckerApp {
     }
 
     pub(crate) fn asset_only(path: PathBuf) -> Self {
-        let mut app = Self::default();
-        app.startup_scan_started = true;
-        app.asset_editor_only = true;
+        let mut app = Self {
+            startup_scan_started: true,
+            asset_editor_only: true,
+            ..Self::default()
+        };
         app.start_asset_view(path);
         app
     }
 
     pub(crate) fn asset_only_error(error: String) -> Self {
-        let mut app = Self::default();
-        app.startup_scan_started = true;
-        app.asset_editor_only = true;
-        app.asset_viewer_open = true;
-        app.status = error;
-        app
+        Self {
+            startup_scan_started: true,
+            asset_editor_only: true,
+            asset_viewer_open: true,
+            status: error,
+            ..Self::default()
+        }
     }
 
     fn start_asset_view(&mut self, path: PathBuf) {
@@ -1185,7 +1410,7 @@ impl CheckerApp {
                     );
                     self.status.push_str(source);
                     if let Some(notice) = outcome.notice {
-                        self.status.push_str(" ");
+                        self.status.push(' ');
                         self.status.push_str(&notice);
                     }
                     self.routes = routes.routes;

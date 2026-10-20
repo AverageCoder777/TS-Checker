@@ -292,13 +292,10 @@ mod tests {
         assert_eq!(records[0]["missing_asset"], "A/B/Scenery/old.bin");
         assert_eq!(records[0]["replacement_asset"], "A/B/Scenery/new.bin");
         assert_eq!(records[0]["uses"][0]["tile"], "тайл X=+000001 Z=-000002");
-        assert_eq!(
-            records[0]["backups"][0]
-                .as_str()
-                .unwrap()
-                .ends_with(".bak1"),
-            true
-        );
+        assert!(records[0]["backups"][0]
+            .as_str()
+            .unwrap()
+            .ends_with(".bak1"));
         assert!(records[0]["timestamp_unix_seconds"].as_u64().unwrap() > 0);
     }
 }
