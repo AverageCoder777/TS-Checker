@@ -52,13 +52,25 @@ pub(crate) type InventoryRow<'a> = (
     Option<&'a UmlautAsset>,
 );
 
+/// Действия, запрошенные строками таблицы инвентаря.
+#[derive(Default)]
+pub(crate) struct InventoryRowActions {
+    /// Ассет с умляутами, который нужно транслитерировать.
+    pub(crate) repair: Option<UmlautAsset>,
+    /// Папка с ассетом, которую нужно открыть в Проводнике.
+    pub(crate) open_folder: Option<PathBuf>,
+    /// Прямоугольники ячеек с путём ассетов: нужны только в тестах.
+    #[cfg(test)]
+    pub(crate) path_rects: Vec<egui::Rect>,
+}
+
 /// Ширины столбцов таблицы инвентаря.
 ///
 /// Считаются один раз для шапки и для строк, чтобы подписи и данные стояли
 /// в одних и тех же местах.
 #[derive(Clone, Copy)]
 pub(crate) struct InventoryLayout {
-    path_width: f32,
+    pub(crate) path_width: f32,
     usage_width: f32,
     tiles_width: f32,
     status_width: f32,
@@ -167,39 +179,177 @@ fn plural_tiles(count: usize) -> &'static str {
     }
 }
 
+/// Положение текста по горизонтали внутри ячейки.
+pub(crate) fn text_offset_x(align: egui::Align, rect: egui::Rect, text_width: f32) -> f32 {
+    match align {
+        egui::Align::Min => rect.left(),
+        egui::Align::Center => rect.center().x - text_width / 2.0,
+        egui::Align::Max => rect.right() - text_width,
+    }
+}
+
+/// Рисует текст в ячейке таблицы, выравнивая его по краю ячейки.
+///
+/// Текст рисуется вручную, а не виджетом: сетка измеряет столбцы по содержимому
+/// ячеек, и обычная подпись сжала бы столбец до ширины текста.
+fn paint_cell_text(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    text: &str,
+    color: egui::Color32,
+    font_id: egui::FontId,
+    align: egui::Align,
+) {
+    let galley = ui.fonts(|fonts| fonts.layout_no_wrap(text.to_owned(), font_id, color));
+    let x = text_offset_x(align, rect, galley.size().x);
+    let y = rect.center().y - galley.size().y / 2.0;
+    ui.painter().galley(egui::pos2(x, y), galley, color);
+}
+
+/// Рисует кнопку в ячейке таблицы и возвращает её ответ.
+///
+/// Кнопка рисуется вручную, чтобы занять в ячейке ровно своё место и не сдвигать
+/// соседние столбцы.
+fn paint_action_button(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    text: &str,
+    font_id: &egui::FontId,
+    enabled: bool,
+    id: egui::Id,
+) -> egui::Response {
+    let response = ui.interact(rect, id, egui::Sense::click());
+    let background = if !enabled {
+        ui.visuals().widgets.noninteractive.bg_fill
+    } else if response.is_pointer_button_down_on() {
+        ui.visuals().widgets.active.bg_fill
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        ui.visuals().widgets.inactive.bg_fill
+    };
+    ui.painter().rect_filled(rect, 3.0, background);
+    ui.painter().rect_stroke(
+        rect,
+        3.0,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let color = if enabled {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    paint_cell_text(ui, rect, text, color, font_id.clone(), egui::Align::Center);
+    response
+}
+
+/// Ширина текста в ячейке таблицы.
+pub(crate) fn measure_cell_text(ui: &egui::Ui, text: &str, font_id: &egui::FontId) -> f32 {
+    let font_id = font_id.clone();
+    ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(text.to_owned(), font_id, ui.visuals().text_color())
+            .size()
+            .x
+    })
+}
+
+/// Ячейки строки таблицы инвентаря вместе с ответами виджетов.
+pub(crate) struct InventoryCells {
+    /// Столбец с путём ассета.
+    pub(crate) path: (egui::Rect, egui::Response),
+    /// Столбец с числом использований.
+    pub(crate) usage: (egui::Rect, egui::Response),
+    /// Столбец с тайлами, если он показан.
+    pub(crate) tiles: Option<(egui::Rect, egui::Response)>,
+    /// Столбец со состоянием ассета.
+    pub(crate) status: egui::Rect,
+}
+
+/// Выделяет ячейки строки таблицы инвентаря.
+///
+/// Каждая ячейка занимает ровно свою ширину: сетка меряет столбцы по содержимому
+/// ячеек, и обычная подпись сжала бы столбец до ширины текста. Шапка и строки
+/// берут ячейки из одной функции, поэтому их столбцы совпадают.
+pub(crate) fn allocate_inventory_cells(
+    ui: &mut egui::Ui,
+    layout: &InventoryLayout,
+    show_tiles: bool,
+) -> InventoryCells {
+    let (path, path_response) =
+        ui.allocate_exact_size(egui::vec2(layout.path_width, 18.0), egui::Sense::click());
+    let (usage, usage_response) =
+        ui.allocate_exact_size(egui::vec2(layout.usage_width, 18.0), egui::Sense::hover());
+    let tiles = if show_tiles {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(layout.tiles_width, 18.0), egui::Sense::hover());
+        Some((rect, response))
+    } else {
+        None
+    };
+    let (status, _) = ui.allocate_exact_size(egui::vec2(layout.status_width, 18.0), egui::Sense::hover());
+    InventoryCells {
+        path: (path, path_response),
+        usage: (usage, usage_response),
+        tiles,
+        status,
+    }
+}
+
 /// Шапка таблицы инвентаря: подписи столбцов объясняют значения в строках.
 pub(crate) fn asset_inventory_header(
     ui: &mut egui::Ui,
     layout: &InventoryLayout,
     show_tiles: bool,
-) -> egui::Rect {
+) -> Option<InventoryCells> {
+    let body = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
+    let color = ui.visuals().strong_text_color();
+    let mut cells = None;
     egui::Grid::new("asset_inventory_header")
         .num_columns(layout.columns(show_tiles))
         .show(ui, |ui| {
-            ui.add_sized(
-                [layout.path_width, 18.0],
-                egui::Label::new(egui::RichText::new("Ассет").strong()).truncate(),
+            let allocated = allocate_inventory_cells(ui, layout, show_tiles);
+            // Подписи столбцов стоят по центру своих ячеек.
+            paint_cell_text(
+                ui,
+                allocated.path.0,
+                "Ассет",
+                color,
+                body.clone(),
+                egui::Align::Center,
             );
-            ui.add_sized(
-                [layout.usage_width, 18.0],
-                egui::Label::new(egui::RichText::new("Использований").strong()).truncate(),
-            )
-            .on_hover_text("Сколько раз ассет встречается в файлах маршрута");
-            if show_tiles {
-                ui.add_sized(
-                    [layout.tiles_width, 18.0],
-                    egui::Label::new(egui::RichText::new("Тайлы").strong()).truncate(),
-                )
-                .on_hover_text("Сколько объектов ассета размещено на каждом тайле");
+            paint_cell_text(
+                ui,
+                allocated.usage.0,
+                "Использований",
+                color,
+                body.clone(),
+                egui::Align::Center,
+            );
+            allocated
+                .usage
+                .1
+                .clone()
+                .on_hover_text("Сколько раз ассет встречается в файлах маршрута");
+            if let Some((rect, response)) = allocated.tiles.as_ref() {
+                paint_cell_text(ui, *rect, "Тайлы", color, body.clone(), egui::Align::Center);
+                response
+                    .clone()
+                    .on_hover_text("Сколько объектов ассета размещено на каждом тайле");
             }
-            ui.add_sized(
-                [layout.status_width, 18.0],
-                egui::Label::new(egui::RichText::new("Состояние").strong()).truncate(),
+            paint_cell_text(
+                ui,
+                allocated.status,
+                "Состояние",
+                color,
+                body,
+                egui::Align::Center,
             );
             ui.end_row();
-        })
-        .response
-        .rect
+            cells = Some(allocated);
+        });
+    cells
 }
 
 /// Папка, в которой должен лежать ассет по его пути внутри Assets.
@@ -224,8 +374,63 @@ fn existing_directory_upwards(path: &std::path::Path) -> Option<std::path::PathB
     None
 }
 
-/// Строки таблицы инвентаря.
+/// Папка, которую открывают по двойному клику на ассете.
+pub(crate) fn asset_folder_to_open(
+    assets_root: &std::path::Path,
+    asset_path: &str,
+) -> Option<std::path::PathBuf> {
+    existing_directory_upwards(&asset_directory(assets_root, asset_path))
+}
 
+/// Обрезает путь ассета слева, оставляя имя файла: длинные пути не помещаются
+/// в столбец, а имя файла в нём важнее папок.
+///
+/// Возвращает обрезанный текст и признак того, что путь не поместился целиком:
+/// только в этом случае показываем подсказку с полным названием ассета.
+pub(crate) fn elide_asset_path(ui: &egui::Ui, path: &str, max_width: f32) -> (String, bool) {
+    let font_id = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
+    let width = |text: &str| -> f32 {
+        let font_id = font_id.clone();
+        ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font_id, ui.visuals().text_color())
+                .size()
+                .x
+        })
+    };
+    let characters: Vec<char> = path.chars().collect();
+    // Ширина считается по факту: раскладка текста в egui кэшируется, поэтому
+    // повторные измерения одних и тех же строк почти ничего не стоят.
+    if width(path) <= max_width {
+        return (path.to_owned(), false);
+    }
+    let mut best = 0usize;
+    let mut low = 1usize;
+    let mut high = characters.len();
+    while low <= high {
+        let middle = (low + high) / 2;
+        let candidate: String = std::iter::once('…')
+            .chain(characters[characters.len() - middle..].iter().copied())
+            .collect();
+        if width(&candidate) <= max_width {
+            best = middle;
+            low = middle + 1;
+        } else {
+            high = middle.saturating_sub(1);
+        }
+    }
+    if best == 0 {
+        // Даже имя файла не помещается: показываем его целиком, текст обрежет
+        // сам виджет.
+        return (path.rsplit('/').next().unwrap_or(path).to_owned(), true);
+    }
+    let text: String = std::iter::once('…')
+        .chain(characters[characters.len() - best..].iter().copied())
+        .collect();
+    (text, true)
+}
+
+/// Строки таблицы инвентаря.
 pub(crate) fn asset_inventory_rows(
     ui: &mut egui::Ui,
     rows: &[InventoryRow<'_>],
@@ -233,8 +438,10 @@ pub(crate) fn asset_inventory_rows(
     layout: &InventoryLayout,
     show_tiles: bool,
     repair_busy: bool,
-    repair_requested: &mut Option<UmlautAsset>,
+    actions: &mut InventoryRowActions,
 ) -> egui::Rect {
+    let body = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
+    let small = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Small));
     ui.spacing_mut().item_spacing.y = 1.0;
     egui::Grid::new("asset_inventory_grid")
         .num_columns(layout.columns(show_tiles))
@@ -248,34 +455,36 @@ pub(crate) fn asset_inventory_rows(
                 } else {
                     ui.visuals().text_color()
                 };
-                // Полный путь внутри Assets и подробности проверки уходят в подсказку,
-                // чтобы строка оставалась в одну линию.
-                let mut hover = assets_root
-                    .join(path.replace('/', "\\"))
-                    .display()
-                    .to_string();
-                if let Some(asset) = repair_asset {
-                    for evidence in &asset.evidence {
-                        hover.push_str("\n\nОбнаружение: ");
-                        hover.push_str(evidence);
-                    }
+                // Путь ассета стоит по левому краю своей ячейки. Подсказка с полным
+                // названием появляется только тогда, когда текст обрезан.
+                let cells = allocate_inventory_cells(ui, layout, show_tiles);
+                let (rect, path_response) = cells.path;
+                let (text, truncated) = elide_asset_path(ui, path, layout.path_width);
+                paint_cell_text(ui, rect, &text, color, body.clone(), egui::Align::Min);
+                if path_response.double_clicked() {
+                    actions.open_folder = asset_folder_to_open(assets_root, path);
                 }
-                ui.add_sized(
-                    [layout.path_width, 18.0],
-                    egui::Label::new(egui::RichText::new(*path).color(color)).truncate(),
-                )
-                .on_hover_text(hover);
+                if truncated {
+                    path_response.clone().on_hover_text(*path);
+                }
+                #[cfg(test)]
+                actions.path_rects.push(rect);
 
-                ui.add_sized(
-                    [layout.usage_width, 18.0],
-                    egui::Label::new(egui::RichText::new(format!("×{}", uses.len()))),
-                )
-                .on_hover_text(format!(
+                let (rect, response) = cells.usage;
+                paint_cell_text(
+                    ui,
+                    rect,
+                    &format!("×{}", uses.len()),
+                    ui.visuals().text_color(),
+                    body.clone(),
+                    egui::Align::Center,
+                );
+                response.on_hover_text(format!(
                     "Использований: {} (см. столбец «Использований»)",
                     uses.len()
                 ));
 
-                if show_tiles {
+                if let Some((rect, response)) = cells.tiles {
                     let mut by_tile: HashMap<&str, usize> = HashMap::new();
                     for usage in *uses {
                         by_tile
@@ -287,33 +496,67 @@ pub(crate) fn asset_inventory_rows(
                     tiles.sort_by(|left, right| left.0.cmp(right.0));
                     let (summary, tile_hint) =
                         split_tiles_for_cell(ui, layout.tiles_width, &tiles);
-                    let response = ui.add_sized(
-                        [layout.tiles_width, 18.0],
-                        egui::Label::new(egui::RichText::new(summary).small()).truncate(),
+                    // Названия тайлов стоят по левому краю своей ячейки.
+                    paint_cell_text(
+                        ui,
+                        rect,
+                        &summary,
+                        ui.visuals().text_color(),
+                        small.clone(),
+                        egui::Align::Min,
                     );
                     if !tile_hint.is_empty() {
                         response.on_hover_text(tile_hint);
                     }
                 }
 
-                ui.allocate_ui_with_layout(
-                    egui::vec2(layout.status_width, 18.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        if *missing {
-                            ui.colored_label(egui::Color32::LIGHT_RED, "ОТСУТСТВУЕТ");
+                // Состояние ассета: метка об отсутствии и кнопка починки.
+                let status_rect = cells.status;
+                let mut cursor = status_rect.left();
+                if *missing {
+                    let text = "ОТСУТСТВУЕТ";
+                    paint_cell_text(
+                        ui,
+                        egui::Rect::from_min_size(
+                            egui::pos2(cursor, status_rect.top()),
+                            egui::vec2(status_rect.width(), 18.0),
+                        ),
+                        text,
+                        egui::Color32::LIGHT_RED,
+                        body.clone(),
+                        egui::Align::Min,
+                    );
+                    cursor += measure_cell_text(ui, text, &body) + 12.0;
+                }
+                if let Some(asset) = repair_asset {
+                    let text = "Исправить…";
+                    let width = measure_cell_text(ui, text, &body) + 16.0;
+                    let button_rect = egui::Rect::from_min_size(
+                        egui::pos2(cursor, status_rect.center().y - 9.0),
+                        egui::vec2(width, 18.0),
+                    );
+                    let response = paint_action_button(
+                        ui,
+                        button_rect,
+                        text,
+                        &body,
+                        !repair_busy,
+                        ui.id().with(("repair", *path)),
+                    );
+                    let mut hint = String::from("Транслитерировать цепочку имён с умляутами");
+                    for (index, evidence) in asset.evidence.iter().enumerate() {
+                        if index == 0 {
+                            hint.push_str("\n\nОбнаружение: ");
+                        } else {
+                            hint.push('\n');
                         }
-                        if let Some(asset) = repair_asset {
-                            if ui
-                                .add_enabled(!repair_busy, egui::Button::new("Исправить…"))
-                                .on_hover_text("Транслитерировать цепочку имён с умляутами")
-                                .clicked()
-                            {
-                                *repair_requested = Some((*asset).clone());
-                            }
-                        }
-                    },
-                );
+                        hint.push_str(evidence);
+                    }
+                    response.clone().on_hover_text(hint);
+                    if !repair_busy && response.clicked() {
+                        actions.repair = Some((*asset).clone());
+                    }
+                }
                 ui.end_row();
             }
         })
@@ -599,7 +842,7 @@ impl CheckerApp {
                                 .collect()
                         };
 
-                    let mut repair_requested = None;
+                    let mut actions = InventoryRowActions::default();
                     let show_tiles = state.show_tiles;
                     // Ширина таблицы считается с запасом на полосу прокрутки, чтобы
                     // шапка и строки оставались в одних и тех же границах.
@@ -624,11 +867,16 @@ impl CheckerApp {
                                 &layout,
                                 show_tiles,
                                 repair_busy,
-                                &mut repair_requested,
+                                &mut actions,
                             );
                         });
                     drop(rows);
-                    if let Some(asset) = repair_requested {
+                    if let Some(folder) = actions.open_folder {
+                        if let Err(error) = open_in_file_explorer(&folder) {
+                            state.error = Some(error);
+                        }
+                    }
+                    if let Some(asset) = actions.repair {
                         if let Err(error) = action_tx.send(InventoryAction::Repair(asset)) {
                             state.error =
                                 Some(format!("Не удалось запустить транслитерацию: {error}"));

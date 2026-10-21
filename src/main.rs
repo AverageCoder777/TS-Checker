@@ -60,10 +60,6 @@ enum RouteScanItem {
 struct CheckResult {
     route_files: usize,
     converted_bin_files: usize,
-    /// Файлы BIN, пропущенные без конвертации: в них заведомо нет ссылок.
-    skipped_bin_files: usize,
-    /// Файлы, чей разбор взят из кэша: они не менялись с прошлой проверки.
-    cached_files: usize,
     referenced_assets: usize,
     missing_assets: Vec<MissingAsset>,
     asset_inventory: Vec<ReferencedAsset>,
@@ -76,8 +72,6 @@ struct CheckResult {
 struct MissingAsset {
     path: String,
     uses: Vec<AssetUse>,
-    /// Файлы с очень похожим именем, найденные в той же папке.
-    similar_files: Vec<SimilarAssetFile>,
 }
 
 #[derive(Clone)]

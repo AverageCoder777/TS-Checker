@@ -158,7 +158,6 @@ pub(crate) fn fallback_serz_path(serz_path: &Path) -> Option<PathBuf> {
 
 struct FileAnalysis {
     converted_bin: bool,
-    skipped_bin: bool,
     /// Разбор взят из кэша: файл не менялся с прошлой проверки.
     from_cache: bool,
     file_path: PathBuf,
@@ -256,6 +255,7 @@ fn replace_broken_characters_combinations(name: &str, replacements: &[&str]) -> 
 
 /// Похожий файл, найденный рядом с утерянным ассетом.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) struct SimilarAssetFile {
     /// Путь относительно папки Assets.
     pub path: String,
@@ -267,6 +267,7 @@ pub(crate) struct SimilarAssetFile {
 ///
 /// Сломанный символ U+FFFD в ожидаемом имени совпадает с любым символом,
 /// регистр не учитывается. Возвращает `None`, если имена слишком разные.
+#[allow(dead_code)]
 fn name_distance(expected: &str, candidate: &str) -> Option<usize> {
     let expected: Vec<char> = expected.chars().collect();
     let candidate: Vec<char> = candidate.chars().collect();
@@ -297,6 +298,7 @@ fn name_distance(expected: &str, candidate: &str) -> Option<usize> {
 /// Ищутся только файлы BIN в той же папке, что и ожидался ассет. Подсказка
 /// нужна для ссылок со сломанным символом: из-за него имя может отличаться от
 /// имени файла на диске.
+#[allow(dead_code)]
 pub(crate) fn find_similar_asset_files(
     assets_path: &Path,
     relative_asset: &str,
@@ -662,7 +664,6 @@ fn analyze_route_file(
         if !may_contain_asset_reference(file_path) {
             return FileAnalysis {
                 converted_bin: false,
-                skipped_bin: true,
                 from_cache: false,
                 file_path: file_path.to_path_buf(),
                 uses: Vec::new(),
@@ -686,7 +687,6 @@ fn analyze_route_file(
         if let Err(error) = conversion_result {
             return FileAnalysis {
                 converted_bin: false,
-                skipped_bin: false,
                 from_cache: false,
                 file_path: file_path.to_path_buf(),
                 uses: Vec::new(),
@@ -698,8 +698,7 @@ fn analyze_route_file(
             Err(error) => {
                 return FileAnalysis {
                     converted_bin: true,
-                    skipped_bin: false,
-                    from_cache: false,
+                        from_cache: false,
                     file_path: file_path.to_path_buf(),
                     uses: Vec::new(),
                     error: Some(format!(
@@ -716,8 +715,7 @@ fn analyze_route_file(
             Err(error) => {
                 return FileAnalysis {
                     converted_bin: false,
-                    skipped_bin: false,
-                    from_cache: false,
+                        from_cache: false,
                     file_path: file_path.to_path_buf(),
                     uses: Vec::new(),
                     error: Some(format!(
@@ -738,7 +736,7 @@ fn analyze_route_file(
 
     FileAnalysis {
         converted_bin: is_binary,
-        skipped_bin: false,
+
         from_cache: false,
         file_path: file_path.to_path_buf(),
         uses: count_asset_uses(references),
@@ -877,8 +875,7 @@ pub(crate) fn check_route(
                         if let Some(cached) = cache.get(name, stamp) {
                             return FileAnalysis {
                                 converted_bin: false,
-                                skipped_bin: false,
-                                from_cache: true,
+                                                from_cache: true,
                                 file_path: file_path.to_path_buf(),
                                 uses: cached.uses.clone(),
                                 error: None,
@@ -894,14 +891,9 @@ pub(crate) fn check_route(
     let mut asset_uses: HashMap<String, Vec<AssetUse>> = HashMap::new();
     let mut conversion_errors = Vec::new();
     let mut converted_bin_files = 0;
-    let mut skipped_bin_files = 0;
-    let mut cached_files = 0usize;
     for analysis in analyses {
-        if analysis.from_cache {
-            cached_files += 1;
-        } else {
+        if !analysis.from_cache {
             converted_bin_files += usize::from(analysis.converted_bin);
-            skipped_bin_files += usize::from(analysis.skipped_bin);
             // В кэш попадают только заново разобранные файлы: для остальных
             // прежняя запись и так актуальна.
             if let Some(name) = route_file_name(route_path, &analysis.file_path) {
@@ -1024,7 +1016,6 @@ pub(crate) fn check_route(
     conversion_errors.extend(umlaut_errors);
     conversion_errors.sort();
 
-    let referenced_assets_count = asset_uses.len();
     let mut asset_inventory = Vec::with_capacity(asset_uses.len());
     let mut missing_assets = Vec::new();
     for (relative_asset, uses) in asset_uses {
@@ -1054,13 +1045,9 @@ pub(crate) fn check_route(
         };
         let missing = full_asset_path.is_none() && !in_archive;
         if missing {
-            // Для ссылки со сломанным символом ищем рядом файлы с похожим именем,
-            // чтобы пользователь мог сразу предложить замену.
-            let similar_files = find_similar_asset_files(assets_path, &relative_asset, 3);
             missing_assets.push(MissingAsset {
                 path: relative_asset.clone(),
                 uses: uses.clone(),
-                similar_files,
             });
         }
         asset_inventory.push(ReferencedAsset {
@@ -1075,9 +1062,7 @@ pub(crate) fn check_route(
     Ok(CheckResult {
         route_files: route_files.len(),
         converted_bin_files,
-        skipped_bin_files,
-        cached_files,
-        referenced_assets: referenced_assets_count,
+        referenced_assets: asset_inventory.len(),
         missing_assets,
         asset_inventory,
         umlaut_assets,
@@ -2642,7 +2627,6 @@ mod tests {
 
         let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
         assert_eq!(check.route_files, 2);
-        assert_eq!(check.cached_files, 0);
         assert_eq!(check.referenced_assets, 2);
         assert!(crate::analysis_cache::cache_path(&route).is_file());
         // Счётчик использований считает каждое вхождение, а не только файлы.
@@ -2655,7 +2639,6 @@ mod tests {
 
         // Файлы не менялись — всё берётся из кэша.
         let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
-        assert_eq!(check.cached_files, 2);
         assert_eq!(check.referenced_assets, 2);
         let first_asset = check
             .asset_inventory
@@ -2671,9 +2654,8 @@ mod tests {
         )
         .unwrap();
         let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
-        assert_eq!(check.cached_files, 1);
         assert_eq!(check.referenced_assets, 2);
-        let paths: Vec<&str> = check
+         let paths: Vec<&str> = check
             .asset_inventory
             .iter()
             .map(|asset| asset.path.as_str())
@@ -2880,7 +2862,7 @@ mod tests {
         let mut height = 0.0;
         let _ = context.run(input, |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                let mut repair_requested = None;
+                let mut actions = crate::app::InventoryRowActions::default();
                 asset_inventory_rows(
                     ui,
                     &rows,
@@ -2888,7 +2870,7 @@ mod tests {
                     &layout,
                     true,
                     false,
-                    &mut repair_requested,
+                    &mut actions,
                 );
                 height = ui.min_rect().height();
             });
@@ -2906,6 +2888,196 @@ mod tests {
             (single - many).abs() < 0.5,
             "высота строки изменилась: {single} против {many}"
         );
+    }
+
+    #[test]
+    fn asset_column_starts_at_the_left_edge_of_the_table() {
+        let (uses, umlaut) = inventory_row(1);
+        let rows: Vec<crate::app::InventoryRow<'_>> =
+            vec![("Scenery/Prüfung.xml", uses.as_slice(), true, Some(&umlaut))];
+
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let layout = InventoryLayout::new(880.0, 8.0, true);
+        let mut actions = crate::app::InventoryRowActions::default();
+        let mut grid_rect = egui::Rect::ZERO;
+        let _ = context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                grid_rect = asset_inventory_rows(
+                    ui,
+                    &rows,
+                    Path::new("C:\\RailWorks\\Content\\Assets"),
+                    &layout,
+                    true,
+                    false,
+                    &mut actions,
+                );
+            });
+        });
+
+        let cell = actions.path_rects[0];
+        assert!(
+            (cell.left() - grid_rect.left()).abs() < 1.0,
+            "столбец ассетов должен начинаться с левого края таблицы: {:?} против {:?}",
+            cell.left(),
+            grid_rect.left()
+        );
+        assert!(
+            (cell.width() - layout.path_width).abs() < 1.0,
+            "столбец ассетов должен быть заданной ширины: {:?}",
+            cell.width()
+        );
+    }
+
+    /// Текст в ячейке выравнивается по заданному краю.
+    #[test]
+    fn cell_text_is_aligned_by_the_requested_edge() {
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 0.0), egui::vec2(200.0, 18.0));
+        assert_eq!(crate::app::text_offset_x(egui::Align::Min, rect, 50.0), 100.0);
+        assert_eq!(crate::app::text_offset_x(egui::Align::Center, rect, 50.0), 175.0);
+        assert_eq!(crate::app::text_offset_x(egui::Align::Max, rect, 50.0), 250.0);
+    }
+
+    /// Столбцы шапки и строк должны совпадать, иначе подписи съезжают.
+    #[test]
+    fn inventory_header_columns_match_row_columns() {
+        let (uses, umlaut) = inventory_row(1);
+        let rows: Vec<crate::app::InventoryRow<'_>> =
+            vec![("Scenery/Prüfung.xml", uses.as_slice(), true, Some(&umlaut))];
+
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let layout = InventoryLayout::new(880.0, 8.0, true);
+        let mut actions = crate::app::InventoryRowActions::default();
+        let mut header_cells = None;
+        let _ = context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                header_cells = crate::app::asset_inventory_header(ui, &layout, true);
+                asset_inventory_rows(
+                    ui,
+                    &rows,
+                    Path::new("C:\\RailWorks\\Content\\Assets"),
+                    &layout,
+                    true,
+                    false,
+                    &mut actions,
+                );
+            });
+        });
+
+        let header = header_cells.expect("шапка должна вернуть ячейки");
+        let row = actions.path_rects[0];
+        assert!(
+            (header.path.0.left() - row.left()).abs() < 1.0
+                && (header.path.0.right() - row.right()).abs() < 1.0,
+            "столбец ассетов в шапке и в строке должен совпадать: {:?} против {:?}",
+            header.path.0,
+            row
+        );
+        assert!(
+            header.usage.0.left() > header.path.0.right(),
+            "столбец использований должен идти после столбца ассетов: {:?}",
+            header.usage.0
+        );
+    }
+
+    /// По двойному клику открывается папка, в которой лежит ассет.
+    #[test]
+    fn opens_the_folder_that_contains_the_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path().join("Assets");
+        std::fs::create_dir_all(assets.join("Scenery")).unwrap();
+        let folder = crate::app::asset_folder_to_open(&assets, "Scenery/Prüfung.xml").unwrap();
+        assert_eq!(folder, assets.join("Scenery"));
+    }
+
+    /// Если папки ассета нет, открывается ближайшая существующая папка выше.
+    #[test]
+    fn opens_the_nearest_existing_folder_when_asset_folder_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path().join("Assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        let folder = crate::app::asset_folder_to_open(&assets, "Scenery/Missing/Prüfung.xml").unwrap();
+        assert_eq!(folder, assets);
+    }
+
+    /// Длинный путь обрезается слева, чтобы имя файла оставалось видимым.
+    #[test]
+    fn long_asset_path_is_shortened_from_the_left() {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let mut shortened = String::new();
+        let mut truncated = false;
+        let mut width = 0.0;
+        let _ = context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let (text, was_truncated) = crate::app::elide_asset_path(
+                    ui,
+                    "CS_Addon/HeKl/Vegetace/Stromy3D/Akat3D/170SmrekZiomennyPen0001.bin",
+                    300.0,
+                );
+                shortened = text;
+                truncated = was_truncated;
+                width = crate::app::measure_cell_text(
+                    ui,
+                    &shortened,
+                    &egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body)),
+                );
+            });
+        });
+        assert!(shortened.starts_with('…'), "путь должен обрезаться слева: {shortened}");
+        assert!(
+            shortened.ends_with("170SmrekZiomennyPen0001.bin"),
+            "имя файла должно остаться: {shortened}"
+        );
+        assert!(truncated, "обрезанный путь должен помечать себя как обрезанный");
+        assert!(
+            width <= 300.0,
+            "обрезанный путь должен помещаться в столбец: {width}"
+        );
+    }
+
+    /// Короткий путь не обрезается, и подсказка с полным названием не нужна.
+    #[test]
+    fn short_asset_path_is_not_truncated() {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let mut shortened = String::new();
+        let mut truncated = true;
+        let _ = context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let (text, was_truncated) =
+                    crate::app::elide_asset_path(ui, "Scenery/Prüfung.xml", 400.0);
+                shortened = text;
+                truncated = was_truncated;
+            });
+        });
+        assert_eq!(shortened, "Scenery/Prüfung.xml");
+        assert!(!truncated, "короткий путь не должен обрезаться");
     }
 
     #[test]
@@ -3312,14 +3484,12 @@ mod tests {
             eprintln!("PROFILE attempt {attempt}: {:?}", start.elapsed());
             let check = result.expect("проверка маршрута должна пройти");
             eprintln!(
-                "PROFILE attempt {attempt}: files: {}, converted: {}, skipped: {}, cached: {}, referenced: {}, missing: {}, errors: {}",
+                "PROFILE attempt {attempt}: files: {}, converted: {}, referenced: {}, missing: {}, errors: {}",
                 check.route_files,
                 check.converted_bin_files,
-                check.skipped_bin_files,
-                check.cached_files,
                 check.referenced_assets,
                 check.missing_assets.len(),
-                check.conversion_errors.len()
+                check.conversion_errors.len(),
             );
         }
     }
