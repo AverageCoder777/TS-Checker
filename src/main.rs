@@ -16,7 +16,12 @@ use tempfile::tempdir;
 use walkdir::WalkDir;
 use zip::ZipArchive;
 
-const DEFAULT_CONCURRENT_SERZ: usize = 4;
+/// Сколько процессов Serz запускать по умолчанию.
+///
+/// Конвертация файлов идёт параллельно и упирается в процессор, поэтому
+/// полезно задействовать все ядра. Значение всё равно ограничивается
+/// числом доступных процессоров.
+const DEFAULT_CONCURRENT_SERZ: usize = 8;
 const MAX_CONCURRENT_ROUTE_SCANS: usize = 4;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -55,6 +60,10 @@ enum RouteScanItem {
 struct CheckResult {
     route_files: usize,
     converted_bin_files: usize,
+    /// Файлы BIN, пропущенные без конвертации: в них заведомо нет ссылок.
+    skipped_bin_files: usize,
+    /// Файлы, чей разбор взят из кэша: они не менялись с прошлой проверки.
+    cached_files: usize,
     referenced_assets: usize,
     missing_assets: Vec<MissingAsset>,
     asset_inventory: Vec<ReferencedAsset>,
@@ -67,6 +76,8 @@ struct CheckResult {
 struct MissingAsset {
     path: String,
     uses: Vec<AssetUse>,
+    /// Файлы с очень похожим именем, найденные в той же папке.
+    similar_files: Vec<SimilarAssetFile>,
 }
 
 #[derive(Clone)]
@@ -153,6 +164,7 @@ struct RouteScanCache {
     result: RouteScanResult,
 }
 
+mod analysis_cache;
 mod app;
 mod assets;
 mod editor;

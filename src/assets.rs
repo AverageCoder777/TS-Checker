@@ -158,8 +158,12 @@ pub(crate) fn fallback_serz_path(serz_path: &Path) -> Option<PathBuf> {
 
 struct FileAnalysis {
     converted_bin: bool,
+    skipped_bin: bool,
+    /// Разбор взят из кэша: файл не менялся с прошлой проверки.
+    from_cache: bool,
     file_path: PathBuf,
-    references: Vec<AssetReference>,
+    /// Сколько раз каждый ассет встречается в файле.
+    uses: Vec<(String, u32)>,
     error: Option<String>,
 }
 
@@ -170,6 +174,24 @@ struct AssetReference {
     product_range: std::ops::Range<usize>,
     blueprint_range: std::ops::Range<usize>,
 }
+
+/// Испорченные символы, которые встречаются в ссылках маршрута вместо умляута.
+///
+/// U+FFFD — стандартный символ замены, U+FFDF — такой же непечатаемый символ,
+/// который раньше встречался в ссылках маршрутов.
+pub(crate) const BROKEN_CHARACTERS: [char; 2] = ['\u{FFFD}', '\u{FFDF}'];
+
+/// Настоящие умляуты, которыми может быть назван файл ассета.
+const UMLAUT_CHARACTERS: [&str; 8] = ["ä", "Ä", "ö", "Ö", "ü", "Ü", "ß", "ẞ"];
+
+/// Транслитерации умляутов, которыми могли оказаться переименованы файлы.
+const TRANSLITERATED_CHARACTERS: [&str; 8] = ["ae", "Ae", "oe", "Oe", "ue", "Ue", "ss", "SS"];
+
+/// Сколько испорченных символов в ссылке ещё разбираются.
+const MAX_BROKEN_CHARACTERS: usize = 3;
+
+/// Имя элемента, без которого в файле нет ни одной ссылки на ассет.
+const BLUEPRINT_ID_MARKER: &str = "BlueprintID";
 
 fn transliterate_umlauts(value: &str) -> String {
     value
@@ -182,44 +204,198 @@ fn transliterate_umlauts(value: &str) -> String {
         .replace('ß', "ss")
         .replace('ẞ', "SS")
         .replace('\u{FFDF}', "ss")
+        .replace('\u{FFFD}', "ss")
 }
 
 fn has_umlauts(value: &str) -> bool {
     value.chars().any(|character| {
-        matches!(
-            character,
-            'ä' | 'Ä' | 'ö' | 'Ö' | 'ü' | 'Ü' | 'ß' | 'ẞ' | '\u{FFDF}'
-        )
+        matches!(character, 'ä' | 'Ä' | 'ö' | 'Ö' | 'ü' | 'Ü' | 'ß' | 'ẞ')
+            || BROKEN_CHARACTERS.contains(&character)
     })
 }
 
+/// Есть ли в строке испорченный символ.
+fn has_broken_character(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| BROKEN_CHARACTERS.contains(&character))
+}
+
+/// Заменяет испорченные символы в имени на переданную подстановку.
+fn replace_broken_characters(name: &str, replacement: &str) -> String {
+    BROKEN_CHARACTERS
+        .iter()
+        .fold(name.to_owned(), |value, character| {
+            value.replace(*character, replacement)
+        })
+}
+
+/// Варианты имени, где каждый испорченный символ заменён по отдельности.
+///
+/// Например, `Br\u{FFFD}cke Fu\u{FFFD}g\u{FFFD}nger` превращается в
+/// `Brücke Fußgänger`, `Brücke Fussganger` и другие комбинации. Число вариантов
+/// растёт как степень количества подстановок, поэтому ссылка с большим числом
+/// испорченных символов не разбирается вовсе.
+fn replace_broken_characters_combinations(name: &str, replacements: &[&str]) -> Vec<String> {
+    let mut variants = vec![String::new()];
+    for character in name.chars() {
+        let mut next = Vec::new();
+        for variant in &variants {
+            if BROKEN_CHARACTERS.contains(&character) {
+                for replacement in replacements {
+                    next.push(format!("{variant}{replacement}"));
+                }
+            } else {
+                next.push(format!("{variant}{character}"));
+            }
+        }
+        variants = next;
+    }
+    variants
+}
+
+/// Похожий файл, найденный рядом с утерянным ассетом.
+#[derive(Clone)]
+pub(crate) struct SimilarAssetFile {
+    /// Путь относительно папки Assets.
+    pub path: String,
+    /// Сколько символов в имени отличается от ожидаемого.
+    pub distance: usize,
+}
+
+/// Сколько символов отличается в двух именах.
+///
+/// Сломанный символ U+FFFD в ожидаемом имени совпадает с любым символом,
+/// регистр не учитывается. Возвращает `None`, если имена слишком разные.
+fn name_distance(expected: &str, candidate: &str) -> Option<usize> {
+    let expected: Vec<char> = expected.chars().collect();
+    let candidate: Vec<char> = candidate.chars().collect();
+    let mut previous: Vec<usize> = (0..=candidate.len()).collect();
+    let mut current = vec![0usize; candidate.len() + 1];
+    for (row, left) in expected.iter().enumerate() {
+        current[0] = row + 1;
+        for (column, right) in candidate.iter().enumerate() {
+            let substitution =
+                if BROKEN_CHARACTERS.contains(left) || left.eq_ignore_ascii_case(right) {
+                    0
+                } else {
+                    1
+                };
+            current[column + 1] = (previous[column + 1] + 1)
+                .min(current[column] + 1)
+                .min(previous[column] + substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    let distance = previous[candidate.len()];
+    let limit = if expected.len() <= 10 { 1 } else { 2 };
+    (distance <= limit).then_some(distance)
+}
+
+/// Ищет рядом с утерянным ассетом файлы с очень похожим именем.
+///
+/// Ищутся только файлы BIN в той же папке, что и ожидался ассет. Подсказка
+/// нужна для ссылок со сломанным символом: из-за него имя может отличаться от
+/// имени файла на диске.
+pub(crate) fn find_similar_asset_files(
+    assets_path: &Path,
+    relative_asset: &str,
+    limit: usize,
+) -> Vec<SimilarAssetFile> {
+    if !has_broken_character(relative_asset) {
+        return Vec::new();
+    }
+    let expected = Path::new(relative_asset);
+    let Some(file_name) = expected.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let Some(parent) = expected.parent() else {
+        return Vec::new();
+    };
+    let folder = assets_path.join(parent);
+    let Ok(entries) = fs::read_dir(&folder) else {
+        return Vec::new();
+    };
+    let mut found: Vec<SimilarAssetFile> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
+        })
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let distance = name_distance(file_name, &name)?;
+            let path = entry
+                .path()
+                .strip_prefix(assets_path)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some(SimilarAssetFile { path, distance })
+        })
+        .collect();
+    found.sort_by(|left, right| {
+        left.distance
+            .cmp(&right.distance)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    found.truncate(limit);
+    found
+}
+
+/// Ищет файл ассета по ссылке из маршрута.
+///
+/// Ссылка может содержать испорченные символы: сначала проверяются имена с
+/// транслитерацией, затем — с настоящим умляутом. Так ассет, который на диске
+/// называется с умляутом, не считается утерянным, а попадает в список на
+/// переименование.
 fn resolve_asset_path(assets_path: &Path, relative_asset: &str) -> Result<Option<PathBuf>, String> {
     let exact = assets_path.join(relative_asset.replace('/', "\\"));
     if exact.is_file() {
         return Ok(Some(exact));
     }
-    if !relative_asset.contains('\u{FFDF}') {
+    if !has_broken_character(relative_asset) {
+        return Ok(None);
+    }
+    let broken_count = relative_asset
+        .chars()
+        .filter(|character| BROKEN_CHARACTERS.contains(character))
+        .count();
+    if broken_count > MAX_BROKEN_CHARACTERS {
         return Ok(None);
     }
 
-    let umlaut_variant =
-        assets_path.join(relative_asset.replace('/', "\\").replace('\u{FFDF}', "ß"));
-    let transliterated_variant =
-        assets_path.join(relative_asset.replace('/', "\\").replace('\u{FFDF}', "ss"));
-    let mut candidates: Vec<_> = [umlaut_variant, transliterated_variant]
-        .into_iter()
-        .filter(|candidate| candidate.is_file())
-        .collect();
-    candidates.sort();
-    candidates.dedup();
+    let tiers = [
+        replace_broken_characters_combinations(relative_asset, &TRANSLITERATED_CHARACTERS),
+        replace_broken_characters_combinations(relative_asset, &UMLAUT_CHARACTERS),
+    ];
+
+    // Windows считает «ä» и «Ä» одним и тем же именем файла, поэтому одинаковые
+    // файлы из разных вариантов отсекаются по каноническому пути.
+    let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for tier in tiers {
+        for variant in tier {
+            let candidate = assets_path.join(variant.replace('/', "\\"));
+            if !candidate.is_file() {
+                continue;
+            }
+            let identity = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+            if !candidates.iter().any(|(_, existing)| *existing == identity) {
+                candidates.push((candidate, identity));
+            }
+        }
+    }
     match candidates.len() {
         0 => Ok(None),
-        1 => Ok(candidates.pop()),
+        1 => Ok(Some(candidates.remove(0).0)),
         _ => Err(format!(
-            "Ссылка содержит испорченный символ U+FFDF и совпадает с несколькими файлами: {}",
+            "Ссылка содержит испорченный символ и совпадает с несколькими файлами: {}",
             candidates
                 .iter()
-                .map(|path| path.display().to_string())
+                .map(|(path, _)| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
@@ -400,6 +576,18 @@ fn inspect_umlaut_asset(
             None
         }
     };
+    if let Some(asset_path) = full_asset_path.as_ref() {
+        // Файл может лежать по верному пути, но называться иначе, чем в ссылке:
+        // тогда его нужно переименовать, а не искать замену.
+        let expected_name = Path::new(relative_asset).file_name();
+        let actual_name = asset_path.file_name();
+        if expected_name != actual_name {
+            evidence.push(format!(
+                "Файл на диске называется иначе: {}",
+                asset_path.display()
+            ));
+        }
+    }
     if let Some(asset_path) = full_asset_path.filter(|path| {
         path.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
@@ -468,6 +656,19 @@ fn analyze_route_file(
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"));
     let xml_data = if is_binary {
+        // Serz хранит имена элементов обычными строками, поэтому файл без
+        // `BlueprintID` заведомо не содержит ссылок на ассеты. Такие файлы не
+        // конвертируются: на больших маршрутах это основная часть работы.
+        if !may_contain_asset_reference(file_path) {
+            return FileAnalysis {
+                converted_bin: false,
+                skipped_bin: true,
+                from_cache: false,
+                file_path: file_path.to_path_buf(),
+                uses: Vec::new(),
+                error: None,
+            };
+        }
         let xml_path = temp_dir.join(format!("{index:08}.xml"));
         let conversion_result = convert_bin_to_xml(serz_path, file_path, &xml_path).or_else(
             |primary_error| {
@@ -485,33 +686,40 @@ fn analyze_route_file(
         if let Err(error) = conversion_result {
             return FileAnalysis {
                 converted_bin: false,
+                skipped_bin: false,
+                from_cache: false,
                 file_path: file_path.to_path_buf(),
-                references: Vec::new(),
+                uses: Vec::new(),
                 error: Some(format!("{}: {error}", file_path.display())),
             };
         }
-        match fs::read(xml_path) {
+        let data = match fs::read(xml_path) {
             Ok(data) => data,
             Err(error) => {
                 return FileAnalysis {
                     converted_bin: true,
+                    skipped_bin: false,
+                    from_cache: false,
                     file_path: file_path.to_path_buf(),
-                    references: Vec::new(),
+                    uses: Vec::new(),
                     error: Some(format!(
                         "{}: не удалось прочитать результат Serz: {error}",
                         file_path.display()
                     )),
                 };
             }
-        }
+        };
+        data
     } else {
         match fs::read(file_path) {
             Ok(data) => data,
             Err(error) => {
                 return FileAnalysis {
                     converted_bin: false,
+                    skipped_bin: false,
+                    from_cache: false,
                     file_path: file_path.to_path_buf(),
-                    references: Vec::new(),
+                    uses: Vec::new(),
                     error: Some(format!(
                         "{}: не удалось прочитать XML: {error}",
                         file_path.display()
@@ -526,12 +734,62 @@ fn analyze_route_file(
         Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
     };
 
+    let references = extract_asset_references_with_locations(&xml_text);
+
     FileAnalysis {
         converted_bin: is_binary,
+        skipped_bin: false,
+        from_cache: false,
         file_path: file_path.to_path_buf(),
-        references: extract_asset_references_with_locations(&xml_text),
+        uses: count_asset_uses(references),
         error: None,
     }
+}
+
+/// Считает, сколько раз каждый ассет встречается в файле.
+///
+/// Порядок первого появления сохраняется: по нему собирается список
+/// использований в инвентаре.
+fn count_asset_uses(references: Vec<AssetReference>) -> Vec<(String, u32)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for reference in references {
+        let counter = counts.entry(reference.path.clone()).or_insert_with(|| {
+            order.push(reference.path.clone());
+            0
+        });
+        *counter += 1;
+    }
+    order
+        .into_iter()
+        .map(|path| {
+            let count = counts.get(&path).copied().unwrap_or_default();
+            (path, count)
+        })
+        .collect()
+}
+
+/// Имя файла маршрута относительно его папки.
+///
+/// Используется как ключ кэша разбора: одинаковые имена в разных маршрутах
+/// не должны путать друг с другом.
+fn route_file_name(route_path: &Path, file_path: &Path) -> Option<String> {
+    let relative = file_path.strip_prefix(route_path).ok()?;
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// Может ли файл содержать ссылку на ассет.
+///
+/// Serz хранит имена элементов обычными строками, поэтому файл без подстроки
+/// `BlueprintID` не содержит ни одной ссылки на ассет: его конвертация в XML
+/// не нужна. При неудачном чтении файл считается подозрительным и проверяется
+/// обычным порядком.
+fn may_contain_asset_reference(file_path: &Path) -> bool {
+    let Ok(data) = fs::read(file_path) else {
+        return true;
+    };
+    data.windows(BLUEPRINT_ID_MARKER.len())
+        .any(|window| window == BLUEPRINT_ID_MARKER.as_bytes())
 }
 
 pub(crate) fn check_route(
@@ -597,6 +855,9 @@ pub(crate) fn check_route(
         .map_err(|error| format!("Не удалось создать пул проверки файлов: {error}"))?;
 
     let mut analyses = Vec::with_capacity(route_files.len());
+    // Кэш разбора лежит в папке маршрута: неизменившиеся файлы берутся из
+    // него, а заново разбираются только те, что изменились или появились.
+    let mut cache = crate::analysis_cache::AnalysisCache::load(route_path);
     for (chunk_index, chunk) in route_files.chunks(32).enumerate() {
         let start_index = chunk_index * 32;
         report_progress(&format!(
@@ -610,6 +871,20 @@ pub(crate) fn check_route(
                 .par_iter()
                 .enumerate()
                 .map(|(offset, file_path)| {
+                    let name = route_file_name(route_path, file_path);
+                    let stamp = crate::analysis_cache::FileStamp::of(file_path);
+                    if let (Some(name), Some(stamp)) = (&name, stamp) {
+                        if let Some(cached) = cache.get(name, stamp) {
+                            return FileAnalysis {
+                                converted_bin: false,
+                                skipped_bin: false,
+                                from_cache: true,
+                                file_path: file_path.to_path_buf(),
+                                uses: cached.uses.clone(),
+                                error: None,
+                            };
+                        }
+                    }
                     analyze_route_file(file_path, start_index + offset, temp_dir.path(), serz_path)
                 })
                 .collect()
@@ -619,23 +894,54 @@ pub(crate) fn check_route(
     let mut asset_uses: HashMap<String, Vec<AssetUse>> = HashMap::new();
     let mut conversion_errors = Vec::new();
     let mut converted_bin_files = 0;
+    let mut skipped_bin_files = 0;
+    let mut cached_files = 0usize;
     for analysis in analyses {
-        converted_bin_files += usize::from(analysis.converted_bin);
+        if analysis.from_cache {
+            cached_files += 1;
+        } else {
+            converted_bin_files += usize::from(analysis.converted_bin);
+            skipped_bin_files += usize::from(analysis.skipped_bin);
+            // В кэш попадают только заново разобранные файлы: для остальных
+            // прежняя запись и так актуальна.
+            if let Some(name) = route_file_name(route_path, &analysis.file_path) {
+                if let Some(stamp) = crate::analysis_cache::FileStamp::of(&analysis.file_path) {
+                    cache.put(
+                        name,
+                        crate::analysis_cache::CachedFile {
+                            stamp,
+                            uses: analysis.uses.clone(),
+                        },
+                    );
+                }
+            }
+        }
         let tile = route_tile_label(route_path, &analysis.file_path);
-        for reference in analysis.references {
-            asset_uses
-                .entry(reference.path)
-                .or_default()
-                .push(AssetUse {
+        for (asset, count) in analysis.uses {
+            let uses = asset_uses.entry(asset).or_default();
+            for _ in 0..count {
+                uses.push(AssetUse {
                     source_file: analysis.file_path.clone(),
                     tile: tile.clone(),
                 });
+            }
         }
         if let Some(error) = analysis.error {
             conversion_errors.push(error);
         }
     }
     conversion_errors.sort();
+
+    // Удаляем из кэша файлы, которых в маршруте больше нет, и сохраняем кэш.
+    let current_files: HashMap<String, ()> = route_files
+        .iter()
+        .filter_map(|path| route_file_name(route_path, path))
+        .map(|name| (name, ()))
+        .collect();
+    cache.retain(&current_files);
+    if let Err(error) = cache.save(route_path) {
+        structure_issues.push(format!("Кэш разбора не сохранён: {error}"));
+    }
 
     report_progress(&format!(
         "Уникальных ссылок: {}. Проверка файлов и архивов .ap...",
@@ -737,8 +1043,8 @@ pub(crate) fn check_route(
             let inner_path = parts[2..].join("/").to_lowercase();
             let variants = [
                 inner_path.clone(),
-                inner_path.replace('\u{FFDF}', "ss"),
-                inner_path.replace('\u{FFDF}', "ß"),
+                replace_broken_characters(&inner_path, "ss"),
+                replace_broken_characters(&inner_path, "ß"),
             ];
             ap_cache
                 .get(&product_dir)
@@ -748,9 +1054,13 @@ pub(crate) fn check_route(
         };
         let missing = full_asset_path.is_none() && !in_archive;
         if missing {
+            // Для ссылки со сломанным символом ищем рядом файлы с похожим именем,
+            // чтобы пользователь мог сразу предложить замену.
+            let similar_files = find_similar_asset_files(assets_path, &relative_asset, 3);
             missing_assets.push(MissingAsset {
                 path: relative_asset.clone(),
                 uses: uses.clone(),
+                similar_files,
             });
         }
         asset_inventory.push(ReferencedAsset {
@@ -765,6 +1075,8 @@ pub(crate) fn check_route(
     Ok(CheckResult {
         route_files: route_files.len(),
         converted_bin_files,
+        skipped_bin_files,
+        cached_files,
         referenced_assets: referenced_assets_count,
         missing_assets,
         asset_inventory,
@@ -1809,6 +2121,141 @@ fn capture_value_range(capture: &regex::Match<'_>) -> std::ops::Range<usize> {
     capture.start() + leading..capture.start() + leading + trimmed.len()
 }
 
+/// Ищет первое вхождение подстроки без учёта регистра ASCII.
+///
+/// Нужен для ручного разбора XML: регулярное выражение с ленивым `.*?` заново
+/// просматривает остаток файла для каждого найденного блока, из-за чего разбор
+/// маршрута дорожает квадратично.
+fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    let first = needle[0];
+    let last = haystack.len() - needle.len();
+    let mut index = from;
+    while index <= last {
+        let offset = haystack[index..=last]
+            .iter()
+            .position(|byte| *byte == first)?;
+        let start = index + offset;
+        if haystack[start..start + needle.len()].eq_ignore_ascii_case(needle) {
+            return Some(start);
+        }
+        index = start + 1;
+    }
+    None
+}
+
+/// Ищет элемент `<Тег ...>значение</Тег>` начиная с заданного места.
+///
+/// Возвращает диапазон значения без окружающих пробелов и позицию сразу за
+/// закрывающим тегом. Значение не может содержать `<`, как и в исходном
+/// шаблоне `([^<]*)`.
+fn parse_tagged_value(
+    haystack: &[u8],
+    tag: &str,
+    start: usize,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    let tag_bytes = tag.as_bytes();
+    let after_open = start.checked_add(1)?;
+    if haystack.get(start)? != &b'<' {
+        return None;
+    }
+    if !haystack
+        .get(after_open..after_open.checked_add(tag_bytes.len())?)?
+        .eq_ignore_ascii_case(tag_bytes)
+    {
+        return None;
+    }
+    let tag_start = after_open + tag_bytes.len();
+    let tag_end = tag_start
+        + haystack
+            .get(tag_start..)?
+            .iter()
+            .position(|byte| *byte == b'>')?;
+    let value_start = tag_end + 1;
+    let value_end = value_start
+        + haystack
+            .get(value_start..)?
+            .iter()
+            .position(|byte| *byte == b'<')?;
+    if haystack.get(value_end)? != &b'<' || haystack.get(value_end + 1)? != &b'/' {
+        return None;
+    }
+    let close_tag_start = value_end + 2;
+    if !haystack
+        .get(close_tag_start..close_tag_start.checked_add(tag_bytes.len())?)?
+        .eq_ignore_ascii_case(tag_bytes)
+    {
+        return None;
+    }
+    let close_end = close_tag_start + tag_bytes.len();
+    if haystack.get(close_end)? != &b'>' {
+        return None;
+    }
+    let value = &haystack[value_start..value_end];
+    let leading = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let trimmed = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|last| last + 1)
+        .unwrap_or(leading);
+    Some((value_start + leading..value_start + trimmed, close_end + 1))
+}
+
+/// Позиция следующего открывающего тега после заданного места.
+fn next_tag_start(haystack: &[u8], from: usize) -> Option<usize> {
+    haystack
+        .get(from..)?
+        .iter()
+        .position(|byte| *byte == b'<')
+        .map(|offset| from + offset)
+}
+
+/// Ищет элемент по имени в заданном диапазоне файла.
+fn find_tagged_value(
+    haystack: &[u8],
+    tag: &str,
+    from: usize,
+    limit: usize,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    let mut cursor = from;
+    while cursor < limit {
+        let position = next_tag_start(haystack, cursor)?;
+        if position >= limit {
+            return None;
+        }
+        if let Some((range, end)) = parse_tagged_value(haystack, tag, position) {
+            if end <= limit {
+                return Some((range, end));
+            }
+        }
+        cursor = position + 1;
+    }
+    None
+}
+
+/// Блоки `iBlueprintLibrary-cAbsoluteBlueprintID` с границами разметки.
+fn absolute_blueprint_blocks(haystack: &[u8]) -> Vec<(usize, usize, usize, usize)> {
+    let open = b"<iBlueprintLibrary-cAbsoluteBlueprintID>";
+    let close = b"</iBlueprintLibrary-cAbsoluteBlueprintID>";
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open_at) = find_ignore_ascii_case(haystack, open, cursor) {
+        let content_start = open_at + open.len();
+        let Some(close_at) = find_ignore_ascii_case(haystack, close, content_start) else {
+            break;
+        };
+        blocks.push((open_at, close_at + close.len(), content_start, close_at));
+        cursor = close_at + close.len();
+    }
+    blocks
+}
+
+#[cfg(test)]
 fn absolute_blueprint_regex() -> &'static Regex {
     static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     REGEX.get_or_init(|| {
@@ -1819,6 +2266,7 @@ fn absolute_blueprint_regex() -> &'static Regex {
     })
 }
 
+#[cfg(test)]
 fn provider_regex() -> &'static Regex {
     static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     REGEX.get_or_init(|| {
@@ -1827,6 +2275,7 @@ fn provider_regex() -> &'static Regex {
     })
 }
 
+#[cfg(test)]
 fn product_regex() -> &'static Regex {
     static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     REGEX.get_or_init(|| {
@@ -1835,6 +2284,7 @@ fn product_regex() -> &'static Regex {
     })
 }
 
+#[cfg(test)]
 fn blueprint_id_regex() -> &'static Regex {
     static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     REGEX.get_or_init(|| {
@@ -1843,6 +2293,7 @@ fn blueprint_id_regex() -> &'static Regex {
     })
 }
 
+#[cfg(test)]
 fn bare_blueprint_regex() -> &'static Regex {
     static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     REGEX.get_or_init(|| {
@@ -1853,6 +2304,7 @@ fn bare_blueprint_regex() -> &'static Regex {
     })
 }
 
+#[cfg(test)]
 fn trimmed_range(capture: &regex::Match<'_>, offset: usize) -> std::ops::Range<usize> {
     let value = capture.as_str();
     let leading = value.len() - value.trim_start().len();
@@ -1911,7 +2363,116 @@ fn build_asset_reference(
 /// Основной источник — блоки `iBlueprintLibrary-cAbsoluteBlueprintID`, внутри которых
 /// Provider, Product и путь к блюпринту принадлежат одной ссылке. Такой разбор не даёт
 /// пустым заготовкам `ReskinBlueprintID` «съесть» ссылку следующего за ними объекта.
+///
+/// Разбор идёт вручную, без регулярных выражений с ленивым `.*?`: такие шаблоны
+/// просматривают остаток файла заново для каждого блока и делают проверку маршрута
+/// квадратичной по размеру XML.
 fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetReference> {
+    let haystack = xml.as_bytes();
+    let mut references: Vec<(usize, AssetReference)> = Vec::new();
+    let mut covered: Vec<std::ops::Range<usize>> = Vec::new();
+
+    for (open_at, block_end, content_start, content_end) in absolute_blueprint_blocks(haystack) {
+        covered.push(open_at..block_end);
+        let Some((provider_range, _)) =
+            find_tagged_value(haystack, "Provider", content_start, content_end)
+        else {
+            continue;
+        };
+        let Some((product_range, _)) =
+            find_tagged_value(haystack, "Product", content_start, content_end)
+        else {
+            continue;
+        };
+        let Some((blueprint_range, _)) =
+            find_tagged_value(haystack, "BlueprintID", content_start, content_end)
+        else {
+            continue;
+        };
+        let Some(reference) = build_asset_reference(
+            &xml[provider_range.clone()],
+            &xml[product_range.clone()],
+            &xml[blueprint_range.clone()],
+            provider_range,
+            product_range,
+            blueprint_range,
+        ) else {
+            continue;
+        };
+        references.push((open_at, reference));
+    }
+
+    // Запасной вариант для файлов без обёртки `iBlueprintLibrary-cAbsoluteBlueprintID`.
+    let mut covered_index = 0usize;
+    let mut cursor = 0usize;
+    while let Some(position) = find_ignore_ascii_case(haystack, b"<Provider", cursor) {
+        let Some((provider_range, product_range, blueprint_range, end)) =
+            match_bare_blueprint(haystack, position)
+        else {
+            cursor = position + 1;
+            continue;
+        };
+        cursor = end;
+        while covered_index < covered.len() && covered[covered_index].end <= position {
+            covered_index += 1;
+        }
+        if covered_index < covered.len() && covered[covered_index].contains(&position) {
+            continue;
+        }
+        let Some(reference) = build_asset_reference(
+            &xml[provider_range.clone()],
+            &xml[product_range.clone()],
+            &xml[blueprint_range.clone()],
+            provider_range,
+            product_range,
+            blueprint_range,
+        ) else {
+            continue;
+        };
+        references.push((position, reference));
+    }
+
+    references.sort_by_key(|(position, _)| *position);
+    references
+        .into_iter()
+        .map(|(_, reference)| reference)
+        .collect()
+}
+
+/// Разбирает «голую» ссылку `<Provider>…</Provider><Product>…</Product><BlueprintID>…</BlueprintID>`.
+///
+/// Между элементами допускается только текст: как и в исходном шаблоне
+/// `[^<]*`, никакой другой тег между ними стоять не может.
+fn match_bare_blueprint(
+    haystack: &[u8],
+    start: usize,
+) -> Option<(
+    std::ops::Range<usize>,
+    std::ops::Range<usize>,
+    std::ops::Range<usize>,
+    usize,
+)> {
+    let (provider_range, after_provider) = parse_tagged_value(haystack, "Provider", start)?;
+    let product_start = next_tag_start(haystack, after_provider)?;
+    let (product_range, after_product) = parse_tagged_value(haystack, "Product", product_start)?;
+    let blueprint_start = next_tag_start(haystack, after_product)?;
+    let (blueprint_range, end) = parse_tagged_value(haystack, "BlueprintID", blueprint_start)?;
+    Some((provider_range, product_range, blueprint_range, end))
+}
+
+#[cfg(test)]
+pub(crate) fn extract_asset_references(xml: &str) -> HashSet<String> {
+    extract_asset_references_with_locations(xml)
+        .into_iter()
+        .map(|reference| reference.path)
+        .collect()
+}
+
+/// Прежняя реализация разбора на регулярных выражениях.
+///
+/// Оставлена для сверки: ручной разбор обязан давать ровно тот же результат.
+#[cfg(test)]
+fn extract_asset_references_with_locations_regex(xml: &str) -> Vec<AssetReference> {
     let mut references: Vec<(usize, AssetReference)> = Vec::new();
     let mut covered: Vec<std::ops::Range<usize>> = Vec::new();
 
@@ -1956,7 +2517,6 @@ fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetReference> {
         references.push((whole.start(), reference));
     }
 
-    // Запасной вариант для файлов без обёртки `iBlueprintLibrary-cAbsoluteBlueprintID`.
     let mut covered_index = 0usize;
     for captures in bare_blueprint_regex().captures_iter(xml) {
         let Some(whole) = captures.get(0) else {
@@ -1994,14 +2554,6 @@ fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetReference> {
     references
         .into_iter()
         .map(|(_, reference)| reference)
-        .collect()
-}
-
-#[cfg(test)]
-pub(crate) fn extract_asset_references(xml: &str) -> HashSet<String> {
-    extract_asset_references_with_locations(xml)
-        .into_iter()
-        .map(|reference| reference.path)
         .collect()
 }
 
@@ -2051,16 +2603,248 @@ pub(crate) fn asset_kind(path: &str) -> AssetKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_kind, collect_route_files, extract_asset_references_with_locations, has_umlauts,
-        has_umlauts_in_xml, inspect_umlaut_asset, leftover_temporary_work_directories,
-        referenced_geometry_paths, resolve_asset_path, route_tile_label, transliterate_umlauts,
-        transliterate_xml_umlauts, transliterated_asset_path, AssetKind, AssetUse, UmlautAsset,
-        TEMP_WORK_DIRECTORY_PREFIX,
+        asset_kind, collect_route_files, extract_asset_references_with_locations,
+        find_similar_asset_files, has_umlauts, has_umlauts_in_xml, inspect_umlaut_asset,
+        leftover_temporary_work_directories, name_distance, referenced_geometry_paths,
+        resolve_asset_path, route_tile_label, transliterate_umlauts, transliterate_xml_umlauts,
+        transliterated_asset_path, AssetKind, AssetUse, UmlautAsset, TEMP_WORK_DIRECTORY_PREFIX,
     };
     use crate::app::{asset_inventory_rows, InventoryLayout};
     use eframe::egui;
     use std::path::Path;
     use std::path::PathBuf;
+
+    /// Кэш разбора: повторная проверка берёт неизменившиеся файлы из кэша.
+    #[test]
+    fn rechecks_route_using_analysis_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let route = temp.path().join("route");
+        let scenery = route.join("Scenery");
+        std::fs::create_dir_all(&scenery).unwrap();
+        let first = scenery.join("+000000+000000.xml");
+        let second = scenery.join("+000000+000001.xml");
+        std::fs::write(
+            &first,
+            "<Provider>First</Provider><Product>ProductA</Product><BlueprintID>Scenery\\one.xml</BlueprintID>\
+             <Provider>First</Provider><Product>ProductA</Product><BlueprintID>Scenery\\one.xml</BlueprintID>",
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            "<Provider>Second</Provider><Product>ProductB</Product><BlueprintID>Scenery\\two.xml</BlueprintID>",
+        )
+        .unwrap();
+        // Serz для XML-файлов не нужен, но путь должен существовать.
+        let serz = temp.path().join("serz.exe");
+        std::fs::write(&serz, b"stub").unwrap();
+        let assets = temp.path().join("Assets");
+        std::fs::create_dir_all(&assets).unwrap();
+
+        let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
+        assert_eq!(check.route_files, 2);
+        assert_eq!(check.cached_files, 0);
+        assert_eq!(check.referenced_assets, 2);
+        assert!(crate::analysis_cache::cache_path(&route).is_file());
+        // Счётчик использований считает каждое вхождение, а не только файлы.
+        let first_asset = check
+            .asset_inventory
+            .iter()
+            .find(|asset| asset.path == "First/ProductA/Scenery/one.bin")
+            .expect("ассет должен попасть в инвентарь");
+        assert_eq!(first_asset.uses.len(), 2);
+
+        // Файлы не менялись — всё берётся из кэша.
+        let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
+        assert_eq!(check.cached_files, 2);
+        assert_eq!(check.referenced_assets, 2);
+        let first_asset = check
+            .asset_inventory
+            .iter()
+            .find(|asset| asset.path == "First/ProductA/Scenery/one.bin")
+            .expect("ассет должен попасть в инвентарь");
+        assert_eq!(first_asset.uses.len(), 2);
+
+        // Один файл изменился: пересобирается только он.
+        std::fs::write(
+            &second,
+            "<Provider>Second</Provider><Product>ProductB</Product><BlueprintID>Scenery\\two-new.xml</BlueprintID>",
+        )
+        .unwrap();
+        let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
+        assert_eq!(check.cached_files, 1);
+        assert_eq!(check.referenced_assets, 2);
+        let paths: Vec<&str> = check
+            .asset_inventory
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"Second/ProductB/Scenery/two-new.bin"),
+            "{paths:?}"
+        );
+    }
+
+    #[test]
+    fn measures_similarity_of_asset_names() {
+        // Сломанный символ подходит к любому символу.
+        assert_eq!(
+            name_distance("Bruecke Fu\u{FFDF}ganger 5.bin", "Bruecke Fussganger 5.bin"),
+            Some(1)
+        );
+        assert_eq!(
+            name_distance("Bruecke Fu\u{FFDF}ganger 5.bin", "Bruecke Fuganger 5.bin"),
+            Some(1)
+        );
+        // Регистр не учитывается, отличающиеся числа считаются одним отличием.
+        assert_eq!(
+            name_distance("Prop X=+0000000.bin", "prop x=+0000000.bin"),
+            Some(0)
+        );
+        assert_eq!(
+            name_distance("Prop X=+0000000.bin", "Prop X=+0000001.bin"),
+            Some(1)
+        );
+        // Совсем другие имена похожими не считаются.
+        assert_eq!(
+            name_distance("Bruecke Fu\u{FFDF}ganger 5.bin", "Tunnel Tunnel 2.bin"),
+            None
+        );
+    }
+
+    #[test]
+    fn finds_similar_files_next_to_missing_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("Provider/Product/Scenery");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Bruecke Fussganger 6.bin"), b"data").unwrap();
+        std::fs::write(folder.join("Bruecke Fussganger 5.bin"), b"data").unwrap();
+        std::fs::write(folder.join("Completely Other.bin"), b"data").unwrap();
+
+        let similar = find_similar_asset_files(
+            assets,
+            "Provider/Product/Scenery/Bruecke Fu\u{FFDF}ganger 5.bin",
+            3,
+        );
+        assert_eq!(similar.len(), 2);
+        assert_eq!(
+            similar[0].path,
+            "Provider/Product/Scenery/Bruecke Fussganger 5.bin"
+        );
+        assert_eq!(similar[0].distance, 1);
+        assert_eq!(
+            similar[1].path,
+            "Provider/Product/Scenery/Bruecke Fussganger 6.bin"
+        );
+    }
+
+    #[test]
+    fn does_not_search_similar_files_without_broken_character() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("Provider/Product/Scenery");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Bruecke Fussganger 5.bin"), b"data").unwrap();
+
+        assert!(find_similar_asset_files(
+            assets,
+            "Provider/Product/Scenery/Bruecke Fussganger 5.bin",
+            3
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn resolves_asset_file_named_with_umlaut() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("Provider/Product/Scenery");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Brücke Fußgänger 5.bin"), b"data").unwrap();
+
+        // Точное имя файла находится сразу.
+        let resolved =
+            resolve_asset_path(assets, "Provider/Product/Scenery/Brücke Fußgänger 5.bin").unwrap();
+        assert_eq!(
+            resolved.map(|path| path.file_name().unwrap().to_string_lossy().into_owned()),
+            Some("Brücke Fußgänger 5.bin".to_string())
+        );
+
+        // Ссылка со сломанными символами должна находить файл с настоящими умляутами.
+        let resolved = resolve_asset_path(
+            assets,
+            "Provider/Product/Scenery/Br\u{FFDF}cke Fu\u{FFDF}g\u{FFDF}nger 5.bin",
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.map(|path| path.file_name().unwrap().to_string_lossy().into_owned()),
+            Some("Brücke Fußgänger 5.bin".to_string())
+        );
+    }
+
+    #[test]
+    fn prefers_transliterated_file_over_umlaut_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("Provider/Product/Scenery");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Brücke Fussgänger 5.bin"), b"data").unwrap();
+
+        // Ссылка со сломанным символом находит файл с настоящим умляутом.
+        let resolved = resolve_asset_path(
+            assets,
+            "Provider/Product/Scenery/Br\u{FFDF}cke Fussg\u{FFDF}nger 5.bin",
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.map(|path| path.file_name().unwrap().to_string_lossy().into_owned()),
+            Some("Brücke Fussgänger 5.bin".to_string())
+        );
+    }
+
+    #[test]
+    fn reports_ambiguity_when_several_files_match_broken_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("Provider/Product/Scenery");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Bruecke Fußganger 5.bin"), b"data").unwrap();
+        std::fs::write(folder.join("Bruecke Fussganger 5.bin"), b"data").unwrap();
+
+        let error = resolve_asset_path(
+            assets,
+            "Provider/Product/Scenery/Bruecke Fu\u{FFDF}ganger 5.bin",
+        )
+        .unwrap_err();
+        assert!(error.contains("несколькими файлами"), "{error}");
+    }
+
+    #[test]
+    fn offers_rename_for_asset_file_named_with_umlaut() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("Provider/Product/Scenery");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Bruecke Fußganger 5.bin"), b"data").unwrap();
+
+        // Ссылка в маршруте повреждена, но файл лежит по верному пути.
+        let reference = "Provider/Product/Scenery/Bruecke Fu\u{FFDF}ganger 5.bin";
+        let resolved = resolve_asset_path(assets, reference).unwrap();
+        assert!(resolved.is_some(), "файл с умляутом должен находиться");
+
+        // Поэтому ассет не считается потерянным, а предлагается переименование.
+        let uses = [AssetUse {
+            source_file: PathBuf::from(r"C:\Route\Scenery\+000041+000009.bin"),
+            tile: "тайл X=+000041 Z=+000009".to_owned(),
+        }];
+        let (asset, _) =
+            inspect_umlaut_asset(reference, &uses, assets, Path::new("missing-serz.exe"));
+        let asset = asset.expect("ассет с умляутом должен попасть в список на исправление");
+        assert!(asset
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("называется иначе")));
+    }
 
     /// Готовит строку таблицы инвентаря с заданным числом тайлов.
     fn inventory_row(tile_count: usize) -> (Vec<AssetUse>, UmlautAsset) {
@@ -2081,12 +2865,8 @@ mod tests {
     /// Рисует таблицу инвентаря в headless-контексте egui и возвращает её высоту.
     fn render_inventory_height(tile_count: usize) -> f32 {
         let (uses, umlaut) = inventory_row(tile_count);
-        let rows: Vec<crate::app::InventoryRow<'_>> = vec![(
-            "Scenery/Prüfung.xml",
-            uses.as_slice(),
-            true,
-            Some(&umlaut),
-        )];
+        let rows: Vec<crate::app::InventoryRow<'_>> =
+            vec![("Scenery/Prüfung.xml", uses.as_slice(), true, Some(&umlaut))];
 
         let context = egui::Context::default();
         let input = egui::RawInput {
@@ -2273,6 +3053,66 @@ mod tests {
         assert!(has_umlauts(&references[0].path));
     }
 
+    /// Ручной разбор должен совпадать с разбором по шаблонам на любой разметке.
+    #[test]
+    fn manual_parser_matches_regex_parser_on_varied_markup() {
+        let samples = [
+            r#"<Provider>A</Provider><Product>B</Product><BlueprintID>C\D.xml</BlueprintID>"#,
+            r#"<provider>A</provider><product>B</product><blueprintid>C\D.xml</blueprintid>"#,
+            r#"<Provider d:type="cDeltaString">A</Provider><Product d:type="cDeltaString">B</Product><BlueprintID d:type="cDeltaString">C\D.xml</BlueprintID>"#,
+            r#"<Provider> A </Provider><Product> B </Product><BlueprintID> C\D.xml </BlueprintID>"#,
+            r#"<Provider>A</Provider> <Product>B</Product> <BlueprintID>C\D.xml</BlueprintID>"#,
+            r#"<Provider>A</Provider><Other>x</Other><Product>B</Product><BlueprintID>C\D.xml</BlueprintID>"#,
+            r#"<Provider></Provider><Product>B</Product><BlueprintID>C\D.xml</BlueprintID>"#,
+            r#"<Provider>A</Provider><Product>B</Product><BlueprintID></BlueprintID>"#,
+            r#"<Provider>A</Provider><Product>B</Product>"#,
+            r#"<iBlueprintLibrary-cAbsoluteBlueprintID><Provider>A</Provider><Product>B</Product><BlueprintID>C\D.xml</BlueprintID></iBlueprintLibrary-cAbsoluteBlueprintID>"#,
+            r#"<iBlueprintLibrary-cAbsoluteBlueprintID><Provider>A</Provider><Product>B</Product><BlueprintID>C\D.xml</BlueprintID></iBlueprintLibrary-cAbsoluteBlueprintID><Provider>E</Provider><Product>F</Product><BlueprintID>G\H.xml</BlueprintID>"#,
+            r#"<Provider>A</Provider><Product>B</Product><BlueprintID>C\D.xml</BlueprintID><iBlueprintLibrary-cAbsoluteBlueprintID><Provider>E</Provider><Product>F</Product><BlueprintID>G\H.xml</BlueprintID></iBlueprintLibrary-cAbsoluteBlueprintID>"#,
+            r#"<ReskinBlueprintID><iBlueprintLibrary-cAbsoluteBlueprintID><Provider></Provider><Product></Product><BlueprintID></BlueprintID></iBlueprintLibrary-cAbsoluteBlueprintID></ReskinBlueprintID><Provider>A</Provider><Product>B</Product><BlueprintID>C\D.xml</BlueprintID>"#,
+            r#"текст <Provider>A</Provider> текст <Product>B</Product> текст <BlueprintID>C\D.xml</BlueprintID> текст"#,
+            r#"<Provider>A</Provider><Product>B</Product><BlueprintID>C\D.bin</BlueprintID>"#,
+            r#"<Provider>A</Provider><Product>B</Product><BlueprintID>C\D.GeoPcDx</BlueprintID>"#,
+        ];
+        for sample in samples {
+            let expected = super::extract_asset_references_with_locations_regex(sample);
+            let actual = extract_asset_references_with_locations(sample);
+            assert_eq!(
+                expected.len(),
+                actual.len(),
+                "разное число ссылок для {sample}"
+            );
+            for (left, right) in expected.iter().zip(actual.iter()) {
+                assert_eq!(left.path, right.path, "разные пути для {sample}");
+                assert_eq!(
+                    left.provider_range, right.provider_range,
+                    "разные диапазоны Provider для {sample}"
+                );
+                assert_eq!(
+                    left.product_range, right.product_range,
+                    "разные диапазоны Product для {sample}"
+                );
+                assert_eq!(
+                    left.blueprint_range, right.blueprint_range,
+                    "разные диапазоны BlueprintID для {sample}"
+                );
+            }
+        }
+    }
+
+    /// Файл без `BlueprintID` не конвертируется: ссылок в нём быть не может.
+    #[test]
+    fn skips_bin_files_without_blueprint_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let without_marker = temp.path().join("plain.bin");
+        std::fs::write(&without_marker, b"SERZ\x00\x00\x01\x00some payload").unwrap();
+        let with_marker = temp.path().join("with.bin");
+        std::fs::write(&with_marker, b"SERZ\x00\x00\x01\x00BlueprintID payload").unwrap();
+
+        assert!(!super::may_contain_asset_reference(&without_marker));
+        assert!(super::may_contain_asset_reference(&with_marker));
+    }
+
     #[test]
     fn detects_the_reported_bruecke_fussganger_asset_path() {
         let asset_path = r"X:\SteamLibrary\steamapps\common\RailWorks\Assets\RWAustria_3\Marchegger_Ostbahn\Marchegg\Bruecke Fußganger 5.bin";
@@ -2448,5 +3288,111 @@ mod tests {
             .join("Bäume")
             .join("bridge.bin");
         assert!(transliterated_asset_path(&assets, &nested_directory).is_err());
+    }
+
+    /// Проверка настоящего маршрута: замеряет время и сверяет итог.
+    ///
+    /// Тест требует установленной игры, поэтому запускается только вручную.
+    #[test]
+    #[ignore]
+    fn checks_real_route() {
+        let route = PathBuf::from(
+            r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\d5c7f5a1-dfba-4589-95e7-269af0d26b97",
+        );
+        let assets = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\Assets");
+        let serz = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\serz64.exe");
+        for attempt in 1..=3 {
+            if attempt == 3 {
+                // Один из файлов меняется — пересобираться должен только он.
+                let changed = route.join("RouteInformation").join("route.properties.xml");
+                let _ = changed;
+            }
+            let start = std::time::Instant::now();
+            let result = super::check_route(&route, &assets, &serz, true, 8, |_| {});
+            eprintln!("PROFILE attempt {attempt}: {:?}", start.elapsed());
+            let check = result.expect("проверка маршрута должна пройти");
+            eprintln!(
+                "PROFILE attempt {attempt}: files: {}, converted: {}, skipped: {}, cached: {}, referenced: {}, missing: {}, errors: {}",
+                check.route_files,
+                check.converted_bin_files,
+                check.skipped_bin_files,
+                check.cached_files,
+                check.referenced_assets,
+                check.missing_assets.len(),
+                check.conversion_errors.len()
+            );
+        }
+    }
+
+    /// Сверяет ручной разбор с прежним разбором на регулярных выражениях.
+    ///
+    /// Файлы берутся из настоящего маршрута: там встречаются разные варианты
+    /// разметки, которые не встретишь в коротком примере.
+    #[test]
+    #[ignore]
+    fn manual_parser_matches_regex_parser_on_real_route() {
+        let route = PathBuf::from(
+            r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\d5c7f5a1-dfba-4589-95e7-269af0d26b97",
+        );
+        let serz = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\serz64.exe");
+        let temp = tempfile::tempdir().unwrap();
+        let mut checked = 0usize;
+        let mut mismatches = 0usize;
+        let mut regex_time = std::time::Duration::ZERO;
+        let mut manual_time = std::time::Duration::ZERO;
+
+        let all_files: Vec<PathBuf> = walkdir::WalkDir::new(&route)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "bin"))
+            .map(|entry| entry.path().to_path_buf())
+            .collect();
+        let stride = (all_files.len() / 500).max(1);
+        for entry in all_files.iter().step_by(stride) {
+            let xml_path = temp.path().join(format!("{checked:08}.xml"));
+            if super::convert_bin_to_xml(&serz, entry, &xml_path).is_err() {
+                continue;
+            }
+            let Ok(xml) = std::fs::read_to_string(&xml_path) else {
+                continue;
+            };
+            let start = std::time::Instant::now();
+            let expected = super::extract_asset_references_with_locations_regex(&xml);
+            regex_time += start.elapsed();
+            let start = std::time::Instant::now();
+            let actual = super::extract_asset_references_with_locations(&xml);
+            manual_time += start.elapsed();
+            let same = expected.len() == actual.len()
+                && expected.iter().zip(actual.iter()).all(|(left, right)| {
+                    left.path == right.path
+                        && left.provider_range == right.provider_range
+                        && left.product_range == right.product_range
+                        && left.blueprint_range == right.blueprint_range
+                });
+            if !same {
+                mismatches += 1;
+                eprintln!("MISMATCH in {}", entry.display());
+                for (left, right) in expected.iter().zip(actual.iter()) {
+                    eprintln!(
+                        "  regex {} {:?} {:?} {:?}",
+                        left.path, left.provider_range, left.product_range, left.blueprint_range
+                    );
+                    eprintln!(
+                        "  manual {} {:?} {:?} {:?}",
+                        right.path,
+                        right.provider_range,
+                        right.product_range,
+                        right.blueprint_range
+                    );
+                }
+            }
+            checked += 1;
+        }
+        eprintln!("PROFILE compared {checked} files, mismatches: {mismatches}");
+        eprintln!("PROFILE regex {regex_time:?} vs manual {manual_time:?}");
+        assert_eq!(
+            mismatches, 0,
+            "ручной разбор должен совпадать с разбором по шаблонам"
+        );
     }
 }

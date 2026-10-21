@@ -45,12 +45,7 @@ pub(crate) fn route_panel_widths(
 
 /// Строка таблицы инвентаря: путь ассета, список использований, признак отсутствия
 /// на диске и ассет с умляутами, если его нужно починить.
-pub(crate) type InventoryRow<'a> = (
-    &'a str,
-    &'a [AssetUse],
-    bool,
-    Option<&'a UmlautAsset>,
-);
+pub(crate) type InventoryRow<'a> = (&'a str, &'a [AssetUse], bool, Option<&'a UmlautAsset>);
 
 /// Ширины столбцов таблицы инвентаря.
 ///
@@ -265,8 +260,7 @@ pub(crate) fn asset_inventory_rows(
                     }
                     let mut tiles: Vec<_> = by_tile.into_iter().collect();
                     tiles.sort_by(|left, right| left.0.cmp(right.0));
-                    let (summary, tile_hint) =
-                        split_tiles_for_cell(ui, layout.tiles_width, &tiles);
+                    let (summary, tile_hint) = split_tiles_for_cell(ui, layout.tiles_width, &tiles);
                     let response = ui.add_sized(
                         [layout.tiles_width, 18.0],
                         egui::Label::new(egui::RichText::new(summary).small()).truncate(),
@@ -299,6 +293,27 @@ pub(crate) fn asset_inventory_rows(
         })
         .response
         .rect
+}
+
+/// Папка, в которой должен лежать ассет по его пути внутри Assets.
+fn asset_directory(assets_path: &Path, asset_path: &str) -> PathBuf {
+    let relative = Path::new(&asset_path.replace('/', "\\"));
+    match relative.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => assets_path.join(parent),
+        _ => assets_path.to_path_buf(),
+    }
+}
+
+/// Ближайшая существующая папка по пути: если нужной папки нет, поднимаемся выше.
+fn existing_directory_upwards(path: &Path) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate.is_dir() {
+            return Some(candidate.to_path_buf());
+        }
+        current = candidate.parent();
+    }
+    None
 }
 
 /// Результат сохранения ассета: исходный путь, XML и путь резервной копии.
@@ -516,68 +531,67 @@ impl CheckerApp {
                     ui.separator();
 
                     let search = state.search.to_lowercase();
-                    let rows: Vec<InventoryRow<'_>> =
-                        if state.show_umlauts {
-                            state
-                                .umlaut_assets
-                                .iter()
-                                .filter(|asset| {
-                                    search.is_empty()
-                                        || asset.path.to_lowercase().contains(&search)
-                                        || asset.uses.iter().any(|usage| {
-                                            usage.tile.to_lowercase().contains(&search)
-                                                || usage
-                                                    .source_file
-                                                    .display()
-                                                    .to_string()
-                                                    .to_lowercase()
-                                                    .contains(&search)
-                                        })
-                                })
-                                .map(|asset| {
-                                    let missing = state
-                                        .assets
+                    let rows: Vec<InventoryRow<'_>> = if state.show_umlauts {
+                        state
+                            .umlaut_assets
+                            .iter()
+                            .filter(|asset| {
+                                search.is_empty()
+                                    || asset.path.to_lowercase().contains(&search)
+                                    || asset.uses.iter().any(|usage| {
+                                        usage.tile.to_lowercase().contains(&search)
+                                            || usage
+                                                .source_file
+                                                .display()
+                                                .to_string()
+                                                .to_lowercase()
+                                                .contains(&search)
+                                    })
+                            })
+                            .map(|asset| {
+                                let missing = state
+                                    .assets
+                                    .iter()
+                                    .find(|item| item.path == asset.path)
+                                    .is_some_and(|item| item.missing);
+                                (
+                                    asset.path.as_str(),
+                                    asset.uses.as_slice(),
+                                    missing,
+                                    Some(asset),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        state
+                            .assets
+                            .iter()
+                            .filter(|asset| {
+                                search.is_empty()
+                                    || asset.path.to_lowercase().contains(&search)
+                                    || asset.uses.iter().any(|usage| {
+                                        usage.tile.to_lowercase().contains(&search)
+                                            || usage
+                                                .source_file
+                                                .display()
+                                                .to_string()
+                                                .to_lowercase()
+                                                .contains(&search)
+                                    })
+                            })
+                            .map(|asset| {
+                                (
+                                    asset.path.as_str(),
+                                    asset.uses.as_slice(),
+                                    asset.missing,
+                                    state
+                                        .umlaut_assets
                                         .iter()
-                                        .find(|item| item.path == asset.path)
-                                        .is_some_and(|item| item.missing);
-                                    (
-                                        asset.path.as_str(),
-                                        asset.uses.as_slice(),
-                                        missing,
-                                        Some(asset),
-                                    )
-                                })
-                                .collect()
-                        } else {
-                            state
-                                .assets
-                                .iter()
-                                .filter(|asset| {
-                                    search.is_empty()
-                                        || asset.path.to_lowercase().contains(&search)
-                                        || asset.uses.iter().any(|usage| {
-                                            usage.tile.to_lowercase().contains(&search)
-                                                || usage
-                                                    .source_file
-                                                    .display()
-                                                    .to_string()
-                                                    .to_lowercase()
-                                                    .contains(&search)
-                                        })
-                                })
-                                .map(|asset| {
-                                    (
-                                        asset.path.as_str(),
-                                        asset.uses.as_slice(),
-                                        asset.missing,
-                                        state
-                                            .umlaut_assets
-                                            .iter()
-                                            .find(|item| item.path == asset.path),
-                                    )
-                                })
-                                .collect()
-                        };
+                                        .find(|item| item.path == asset.path),
+                                )
+                            })
+                            .collect()
+                    };
 
                     let mut repair_requested = None;
                     let show_tiles = state.show_tiles;
@@ -585,17 +599,16 @@ impl CheckerApp {
                     // шапка и строки оставались в одних и тех же границах.
                     let table_width =
                         (ui.available_width() - ui.spacing().scroll.allocated_width()).max(320.0);
-                    let layout = InventoryLayout::new(
-                        table_width,
-                        ui.spacing().item_spacing.x,
-                        show_tiles,
-                    );
+                    let layout =
+                        InventoryLayout::new(table_width, ui.spacing().item_spacing.x, show_tiles);
                     asset_inventory_header(ui, &layout, show_tiles);
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .id_salt("asset_inventory_rows")
                         .auto_shrink([false, false])
-                        .scroll_bar_visibility(egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                        .scroll_bar_visibility(
+                            egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
                         .show(ui, |ui| {
                             asset_inventory_rows(
                                 ui,
@@ -619,6 +632,33 @@ impl CheckerApp {
                 });
             },
         );
+    }
+
+    /// Удаляет кэш разбора текущего маршрута.
+    fn clear_analysis_cache(&mut self) {
+        let Some(route_path) = self
+            .selected_route
+            .and_then(|index| self.routes.get(index))
+            .map(|route| route.path.clone())
+        else {
+            self.status = "Маршрут не выбран.".to_owned();
+            return;
+        };
+        let cache_path = crate::analysis_cache::cache_path(&route_path);
+        match std::fs::remove_file(&cache_path) {
+            Ok(()) => {
+                self.status = "Кэш разбора маршрута удалён.".to_owned();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.status = "Кэш разбора маршрута и так отсутствует.".to_owned();
+            }
+            Err(error) => {
+                self.status = format!(
+                    "Не удалось удалить кэш разбора {}: {error}",
+                    cache_path.display()
+                );
+            }
+        }
     }
 
     fn open_asset_inventory(&mut self) {
@@ -1679,8 +1719,10 @@ impl eframe::App for CheckerApp {
         let mut ignore_route_request = None;
         let mut remove_ignored_route = None;
         let mut replace_asset_request = None;
+        let mut replace_asset_with_similar = None;
         let mut repair_umlaut_request = None;
         let mut open_inventory_request = false;
+        let mut clear_cache_request = false;
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.label(&self.status);
         });
@@ -1991,13 +2033,17 @@ impl eframe::App for CheckerApp {
                                     ui.separator();
                                     if let Some(result) = &self.result {
                                         ui.label(format!(
-                        "Файлов маршрута: {}  |  Конвертировано BIN: {}  |  Уникальных ссылок: {}",
+                        "Файлов маршрута: {}  |  Разобрано заново: {}  |  Из кэша: {}  |  Уникальных ссылок: {}",
                         result.route_files,
-                        result.converted_bin_files,
+                        result.converted_bin_files + result.skipped_bin_files,
+                        result.cached_files,
                         result.referenced_assets
                     ));
                                         if ui.button("Открыть список всех ассетов маршрута...").clicked() {
                                             open_inventory_request = true;
+                                        }
+                                        if ui.button("Очистить кэш разбора маршрута").clicked() {
+                                            clear_cache_request = true;
                                         }
                                         for issue in &result.structure_issues {
                                             ui.colored_label(
@@ -2025,6 +2071,95 @@ impl eframe::App for CheckerApp {
                                                         });
                                                 },
                                             );
+                                        }
+                                        if result.umlaut_assets.is_empty() {
+                                            ui.colored_label(
+                                                egui::Color32::LIGHT_GREEN,
+                                                "Ассетов с умляутами или подозрительным U+FFFD не обнаружено.",
+                                            );
+                                        } else {
+                                            let assets = result.umlaut_assets.clone();
+                                            ui.colored_label(
+                                                egui::Color32::YELLOW,
+                                                format!(
+                                                    "Ассеты с умляутами или подозрительным U+FFFD — требуют проверки: {}",
+                                                    assets.len()
+                                                ),
+                                            );
+                                            egui::ScrollArea::vertical()
+                                                .id_salt("umlaut_assets")
+                                                .max_height(180.0)
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    for asset in assets {
+                                                        ui.horizontal(|ui| {
+                                                            ui.colored_label(
+                                                                egui::Color32::YELLOW,
+                                                                &asset.path,
+                                                            );
+                                                            let busy = checking
+                                                                || self.inventory_scan.is_some()
+                                                                || self.asset_replacement.is_some()
+                                                                || self.umlaut_repair.is_some()
+                                                                || self.pending_umlaut_repair.is_some()
+                                                                || self.selected_route.is_none();
+                                                            if ui
+                                                                .add_enabled(
+                                                                    !busy,
+                                                                    egui::Button::new(
+                                                                        "Транслитерировать цепочку...",
+                                                                    ),
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                repair_umlaut_request =
+                                                                    Some(asset.clone());
+                                                            }
+                                                        });
+                                                        for evidence in &asset.evidence {
+                                                            ui.small(format!("• {evidence}"));
+                                                        }
+                                                        let mut uses_by_tile: HashMap<
+                                                            String,
+                                                            Vec<String>,
+                                                        > = HashMap::new();
+                                                        for usage in &asset.uses {
+                                                            let path = self
+                                                                .selected_route
+                                                                .and_then(|index| self.routes.get(index))
+                                                                .and_then(|route| usage.source_file.strip_prefix(&route.path).ok())
+                                                                .map(|path| path.display().to_string())
+                                                                .unwrap_or_else(|| usage.source_file.display().to_string());
+                                                            uses_by_tile
+                                                                .entry(usage.tile.clone())
+                                                                .or_default()
+                                                                .push(path);
+                                                        }
+                                                        let mut tiles: Vec<_> =
+                                                            uses_by_tile.into_iter().collect();
+                                                        tiles.sort_by(|left, right| {
+                                                            left.0.cmp(&right.0)
+                                                        });
+                                                        ui.indent(
+                                                            ("umlaut_asset_uses", &asset.path),
+                                                            |ui| {
+                                                                for (tile, files) in tiles {
+                                                                    let label = format!(
+                                                                        "• {} ({})",
+                                                                        tile.trim_start_matches("тайл "),
+                                                                        files.len()
+                                                                    );
+                                                                    ui.label(label).on_hover_text(
+                                                                        format!(
+                                                                            "Файлы маршрута:\n{}",
+                                                                            files.join("\n")
+                                                                        ),
+                                                                    );
+                                                                }
+                                                            },
+                                                        );
+                                                    }
+                                                });
                                         }
                                         if result.missing_assets.is_empty() {
                                             ui.colored_label(
@@ -2093,6 +2228,50 @@ impl eframe::App for CheckerApp {
                                                                                 Some(asset.clone());
                                                                         }
                                                                     });
+                                                                    if !asset.similar_files.is_empty() {
+                                                                        ui.indent(
+                                                                            ("similar_files", &asset.path),
+                                                                            |ui| {
+                                                                                ui.small(
+                                                                                    "Похожие файлы в той же папке:",
+                                                                                );
+                                                                                for similar in
+                                                                                    &asset.similar_files
+                                                                                {
+                                                                                    let name = Path::new(
+                                                                                        &similar.path,
+                                                                                    )
+                                                                                    .file_name()
+                                                                                    .map(|name| {
+                                                                                        name.to_string_lossy()
+                                                                                            .into_owned()
+                                                                                    })
+                                                                                    .unwrap_or_else(|| {
+                                                                                        similar.path.clone()
+                                                                                    });
+                                                                                    ui.horizontal(|ui| {
+                                                                                        ui.small(format!(
+                                                                                            "{name} (отличий: {})",
+                                                                                            similar.distance
+                                                                                        ));
+                                                                                        if ui
+                                                                                            .add_enabled(
+                                                                                                !replacement_busy,
+                                                                                                egui::Button::new("Заменить на него"),
+                                                                                            )
+                                                                                            .clicked()
+                                                                                        {
+                                                                                            replace_asset_with_similar =
+                                                                                                Some((
+                                                                                                    asset.clone(),
+                                                                                                    similar.path.clone(),
+                                                                                                ));
+                                                                                        }
+                                                                                    });
+                                                                                }
+                                                                            },
+                                                                        );
+                                                                    }
                                                                     let mut uses_by_tile: HashMap<
                                                                         String,
                                                                         Vec<String>,
@@ -2119,11 +2298,18 @@ impl eframe::App for CheckerApp {
                                                                                 "Использований: {}",
                                                                                 asset.uses.len()
                                                                             ));
+                                                                            // Тайл пишется один раз, а сбоку — сколько раз
+                                                                            // ассет стоит именно на нём.
                                                                             for (tile, files) in tiles {
-                                                                                ui.label(format!("• {tile}"));
-                                                                                for file in files {
-                                                                                    ui.small(file);
-                                                                                }
+                                                                                let label = format!(
+                                                                                    "• {} ({})",
+                                                                                    tile.trim_start_matches("тайл "),
+                                                                                    files.len()
+                                                                                );
+                                                                                ui.label(label).on_hover_text(format!(
+                                                                                    "Файлы маршрута:\n{}",
+                                                                                    files.join("\n")
+                                                                                ));
                                                                             }
                                                                         },
                                                                     );
@@ -2133,89 +2319,6 @@ impl eframe::App for CheckerApp {
                                                     }
                                                 });
                                         }
-
-                                        if result.umlaut_assets.is_empty() {
-                                            ui.colored_label(
-                                                egui::Color32::LIGHT_GREEN,
-                                                "Ассетов с умляутами или подозрительным U+FFDF не обнаружено.",
-                                            );
-                                        } else {
-                                            let assets = result.umlaut_assets.clone();
-                                            ui.colored_label(
-                                                egui::Color32::YELLOW,
-                                                format!(
-                                                    "Ассеты с умляутами или подозрительным U+FFDF — требуют проверки: {}",
-                                                    assets.len()
-                                                ),
-                                            );
-                                            egui::ScrollArea::vertical()
-                                                .id_salt("umlaut_assets")
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    for asset in assets {
-                                                        ui.horizontal(|ui| {
-                                                            ui.colored_label(
-                                                                egui::Color32::YELLOW,
-                                                                &asset.path,
-                                                            );
-                                                            let busy = checking
-                                                                || self.inventory_scan.is_some()
-                                                                || self.asset_replacement.is_some()
-                                                                || self.umlaut_repair.is_some()
-                                                                || self.pending_umlaut_repair.is_some()
-                                                                || self.selected_route.is_none();
-                                                            if ui
-                                                                .add_enabled(
-                                                                    !busy,
-                                                                    egui::Button::new(
-                                                                        "Транслитерировать цепочку...",
-                                                                    ),
-                                                                )
-                                                                .clicked()
-                                                            {
-                                                                repair_umlaut_request =
-                                                                    Some(asset.clone());
-                                                            }
-                                                        });
-                                                        for evidence in &asset.evidence {
-                                                            ui.small(format!("• {evidence}"));
-                                                        }
-                                                        let mut uses_by_tile: HashMap<
-                                                            String,
-                                                            Vec<String>,
-                                                        > = HashMap::new();
-                                                        for usage in &asset.uses {
-                                                            let path = self
-                                                                .selected_route
-                                                                .and_then(|index| self.routes.get(index))
-                                                                .and_then(|route| usage.source_file.strip_prefix(&route.path).ok())
-                                                                .map(|path| path.display().to_string())
-                                                                .unwrap_or_else(|| usage.source_file.display().to_string());
-                                                            uses_by_tile
-                                                                .entry(usage.tile.clone())
-                                                                .or_default()
-                                                                .push(path);
-                                                        }
-                                                        let mut tiles: Vec<_> =
-                                                            uses_by_tile.into_iter().collect();
-                                                        tiles.sort_by(|left, right| {
-                                                            left.0.cmp(&right.0)
-                                                        });
-                                                        ui.indent(
-                                                            ("umlaut_asset_uses", &asset.path),
-                                                            |ui| {
-                                                                for (tile, files) in tiles {
-                                                                    ui.label(format!("• {tile}"));
-                                                                    for file in files {
-                                                                        ui.small(file);
-                                                                    }
-                                                                }
-                                                            },
-                                                        );
-                                                    }
-                                                });
-                                        }
-                                    }
                                 });
                         });
                     },
@@ -2226,15 +2329,30 @@ impl eframe::App for CheckerApp {
         if open_inventory_request {
             self.open_asset_inventory();
         }
+        if clear_cache_request {
+            self.clear_analysis_cache();
+        }
         if let Some(missing) = replace_asset_request {
             let assets_path = PathBuf::from(self.rw_path.trim()).join("Assets");
+            // Диалог открывается в той папке, где ассет должен лежать.
+            let start_dir = existing_directory_upwards(&asset_directory(&assets_path, &missing.path))
+                .unwrap_or_else(|| assets_path.clone());
             let selected = rfd::FileDialog::new()
                 .set_title("Выберите BIN нового объекта")
                 .add_filter("RailWorks BIN", &["bin"])
-                .set_directory(&assets_path)
+                .set_directory(&start_dir)
                 .pick_file();
             if let Some(replacement) = selected {
                 self.start_asset_replacement(missing, replacement);
+            }
+        }
+        if let Some((missing, similar_path)) = replace_asset_with_similar {
+            let assets_path = PathBuf::from(self.rw_path.trim()).join("Assets");
+            let replacement = assets_path.join(similar_path.replace('/', "\\"));
+            if replacement.is_file() {
+                self.start_asset_replacement(missing, replacement);
+            } else {
+                self.status = format!("Файл не найден: {}", replacement.display());
             }
         }
         if let Some(asset) = repair_umlaut_request {
