@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use eframe::egui;
 use image::GenericImageView;
 use rayon::prelude::*;

@@ -82,6 +82,8 @@ pub(crate) struct CheckerApp {
     /// Результат проверки наличия файлов для составов открытого сценария,
     /// считается один раз, чтобы не пересчитывать при каждом кадре egui.
     scenario_consist_info: Option<Vec<(String, bool)>>,
+    /// Кэш наличия файлов для техники: [состав][вагон] = файл_на_месте.
+    scenario_vehicle_files: Option<Vec<Vec<bool>>>,
     search_query: String,
     ignore_scenarios: bool,
     result: Option<CheckResult>,
@@ -168,6 +170,7 @@ impl Default for CheckerApp {
             scenario_window_open: false,
             blueprint_cache: RefCell::new(HashMap::new()),
             scenario_consist_info: None,
+            scenario_vehicle_files: None,
             search_query: String::new(),
             ignore_scenarios: true,
             result: None,
@@ -941,6 +944,7 @@ impl CheckerApp {
         self.selected_scenario = None;
         self.selected_consist = None;
         self.scenario_consist_info = None;
+        self.scenario_vehicle_files = None;
     }
 
     /// Все ли файлы техники выбранного состава разрешаются в реальные файлы на диске.
@@ -1412,30 +1416,30 @@ impl CheckerApp {
 }
 
 thread_local! {
-    static ASSETS_INDEX: RefCell<Option<HashMap<String, PathBuf>>> = RefCell::new(None);
+    static BLUEPRINT_CACHE: RefCell<HashMap<(String, String, String), Option<PathBuf>>> =
+        RefCell::new(HashMap::new());
 }
 
-/// Строит (один раз) индекс файлов в папке Assets: имя файла без расширения
-/// (в нижнем регистре) → полный путь. Используется для быстрого поиска
-/// блюпринта по имени без обхода всего дерева Assets при каждом запросе.
-fn build_assets_index(assets_path: &Path) -> HashMap<String, PathBuf> {
-    ASSETS_INDEX.with(|cell| {
-        if let Some(index) = cell.borrow().as_ref() {
-            return index.clone();
+/// Кэшированная версия resolve_blueprint_file.
+fn resolve_blueprint_file_cached_free(
+    rw_path: &Path,
+    route_path: &Path,
+    blueprint: &str,
+    provider: &str,
+    product: &str,
+) -> Option<PathBuf> {
+    let key = (
+        blueprint.to_owned(),
+        provider.to_owned(),
+        product.to_owned(),
+    );
+    BLUEPRINT_CACHE.with(|cell| {
+        if let Some(cached) = cell.borrow().get(&key) {
+            return cached.clone();
         }
-        let mut index = HashMap::new();
-        for entry in walkdir::WalkDir::new(assets_path)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-        {
-            if let Some(stem) = entry.path().file_stem() {
-                let key = stem.to_string_lossy().to_lowercase();
-                index.entry(key).or_insert_with(|| entry.into_path());
-            }
-        }
-        cell.borrow_mut().replace(index.clone());
-        index
+        let found = resolve_blueprint_file(rw_path, route_path, blueprint, provider, product);
+        cell.borrow_mut().insert(key, found.clone());
+        found
     })
 }
 
@@ -1520,6 +1524,7 @@ fn resolve_blueprint_file(
     }
 
     for root in &search_roots {
+        // Проверяем файлы на диске.
         if let Some(found) = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
@@ -1532,6 +1537,38 @@ fn resolve_blueprint_file(
             })
         {
             return Some(found.into_path());
+        }
+        // Проверяем архивы .ap в этой папке.
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file()
+                    || !path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("ap"))
+                {
+                    continue;
+                }
+                if let Ok(file) = fs::File::open(&path) {
+                    if let Ok(mut zip) = zip::ZipArchive::new(file) {
+                        for i in 0..zip.len() {
+                            if let Ok(member) = zip.by_index(i) {
+                                if member.is_file() {
+                                    let member_name = member.name().map(|c| c.to_string()).unwrap_or_default();
+                                    let member_stem = Path::new(&member_name)
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    if member_stem.eq_ignore_ascii_case(&file_stem) {
+                                        // Файл найден в .ap архиве.
+                                        return Some(path.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1708,6 +1745,7 @@ fn render_asset_editor(
 
 impl eframe::App for CheckerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.style_mut().interaction.selectable_labels = true;
         if !self.startup_scan_started {
             self.startup_scan_started = true;
             if is_valid_game_path(Path::new(self.rw_path.trim())) {
@@ -2003,6 +2041,7 @@ impl eframe::App for CheckerApp {
                                                         self.selected_scenario = Some(index);
                                                         self.selected_consist = None;
                                                         self.scenario_consist_info = None;
+                                                        self.scenario_vehicle_files = None;
                                                         self.scenario_window_open = true;
                                                     }
                                         }
@@ -2607,7 +2646,7 @@ impl eframe::App for CheckerApp {
                 if let Some(scenario) = self.scenarios.get(scenario_index) {
                     let scenario_path = scenario.path.clone();
                     let serz_path = preferred_serz_path(Path::new(self.rw_path.trim()));
-                    let consists = crate::scenario::load_consists(&scenario_path, &serz_path, &scenario.drivers);
+                    let consists = crate::scenario::load_consists(&scenario_path, &serz_path);
                     if let Some(s) = self.scenarios.get_mut(scenario_index) {
                         s.consists = Some(consists);
                     }
@@ -2670,6 +2709,37 @@ impl eframe::App for CheckerApp {
                                     None => Vec::new(),
                                 };
                             self.scenario_consist_info = Some(info.clone());
+                            // Кэш наличия файлов для техники.
+                            if self.scenario_vehicle_files.is_none() {
+                                if let Some(consists) = scenario_ref.consists.as_ref() {
+                                    let vf: Vec<Vec<bool>> = consists
+                                        .iter()
+                                        .map(|consist| {
+                                            consist
+                                                .vehicles
+                                                .iter()
+                                                .map(|v| {
+                                                    if v.blueprint.is_empty() {
+                                                        true
+                                                    } else {
+                                                        route_path.as_deref().map_or(false, |rp| {
+                                                            resolve_blueprint_file_cached_free(
+                                                                &rw_path,
+                                                                rp,
+                                                                &v.blueprint,
+                                                                &v.provider,
+                                                                &v.product,
+                                                            )
+                                                            .is_some()
+                                                        })
+                                                    }
+                                                })
+                                                .collect()
+                                        })
+                                        .collect();
+                                    self.scenario_vehicle_files = Some(vf);
+                                }
+                            }
                             info
                         }
                     }
@@ -2693,6 +2763,7 @@ impl eframe::App for CheckerApp {
                     .default_size([900.0, 560.0]);
 
                 window.show(ui.ctx(), |ui| {
+                    ui.style_mut().interaction.selectable_labels = true;
                     ui.label(format!("Идентификатор: {}", scenario.id));
                     ui.small(scenario.path.display().to_string());
                     if !scenario.date.is_empty() {
@@ -2786,40 +2857,65 @@ impl eframe::App for CheckerApp {
                                     if consist.vehicles.is_empty() {
                                         ui.label("Техника не найдена.");
                                     }
-                                    for vehicle in &consist.vehicles {
-                                        ui.group(|ui| {
-                                            ui.label(&vehicle.name);
-                                            let blueprint_response = ui.add(
-                                                egui::Label::new(&vehicle.blueprint)
-                                                    .sense(egui::Sense::click())
-                                                    .wrap_mode(egui::TextWrapMode::Wrap),
-                                            );
-                                            if blueprint_response.double_clicked() {
-                                                if let Some(route_path) = route_path.as_deref() {
-                                                    if let Some(file_path) =
-                                                        resolve_blueprint_file(
-                                                            &rw_path,
-                                                            route_path,
-                                                            &vehicle.blueprint,
-                                                            &vehicle.provider,
-                                                            &vehicle.product,
-                                                        )
-                                                    {
-                                                        let folder = file_path
-                                                            .parent()
-                                                            .unwrap_or(&file_path)
-                                                            .to_path_buf();
-                                                        if let Err(error) =
-                                                            open_in_file_explorer(&folder)
-                                                        {
-                                                            ui.colored_label(
-                                                                egui::Color32::LIGHT_RED,
-                                                                error,
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                     for (vi, vehicle) in consist.vehicles.iter().enumerate() {
+                                         let file_exists = self
+                                             .scenario_vehicle_files
+                                             .as_ref()
+                                             .and_then(|vf| vf.get(consist_index))
+                                             .and_then(|v| v.get(vi))
+                                             .copied()
+                                             .unwrap_or(true);
+                                         let name_color = if file_exists {
+                                             egui::Color32::LIGHT_GREEN
+                                         } else {
+                                             egui::Color32::LIGHT_RED
+                                         };
+                                         ui.group(|ui| {
+                                             let name_resp = ui.colored_label(name_color, &vehicle.name);
+                                             name_resp.context_menu(|ui| {
+                                                 if ui.button("Копировать имя").clicked() {
+                                                     ui.ctx().copy_text(vehicle.name.clone());
+                                                     ui.close();
+                                                 }
+                                             });
+                                             let blueprint_response = ui.add(
+                                                 egui::Label::new(&vehicle.blueprint)
+                                                     .selectable(true)
+                                                     .sense(egui::Sense::click_and_drag())
+                                                     .wrap_mode(egui::TextWrapMode::Wrap),
+                                             );
+                                             blueprint_response.context_menu(|ui| {
+                                                 if ui.button("Копировать путь").clicked() {
+                                                     ui.ctx().copy_text(vehicle.blueprint.clone());
+                                                     ui.close();
+                                                 }
+                                             });
+                                             if blueprint_response.double_clicked() {
+                                                 if let Some(route_path) = route_path.as_deref() {
+                                                     if let Some(file_path) =
+                                                         resolve_blueprint_file_cached_free(
+                                                             &rw_path,
+                                                             route_path,
+                                                             &vehicle.blueprint,
+                                                             &vehicle.provider,
+                                                             &vehicle.product,
+                                                         )
+                                                     {
+                                                         let folder = file_path
+                                                             .parent()
+                                                             .unwrap_or(&file_path)
+                                                             .to_path_buf();
+                                                         if let Err(error) =
+                                                             open_in_file_explorer(&folder)
+                                                         {
+                                                             ui.colored_label(
+                                                                 egui::Color32::LIGHT_RED,
+                                                                 error,
+                                                             );
+                                                         }
+                                                     }
+                                                 }
+                                             }
                                             if !vehicle.provider.is_empty()
                                                 || !vehicle.product.is_empty()
                                             {

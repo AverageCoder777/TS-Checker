@@ -34,37 +34,12 @@ pub(crate) struct RouteScenario {
     /// Подвижные составы сценария: в них перечислена техника.
     /// `None` пока не открыто окно сценария (загружается лениво).
     pub(crate) consists: Option<Vec<ScenarioConsist>>,
-    /// Информация о поездах из sDriverFrontEndDetails (номер рейса, название состава).
-    pub(crate) drivers: Vec<ScenarioDriver>,
-}
-
-/// Информация о поезде из sDriverFrontEndDetails.
-#[derive(Clone, Default)]
-pub(crate) struct ScenarioDriver {
-    /// Является ли поезд игрока.
-    pub(crate) player_driver: bool,
-    /// Номер рейса/сервиса, например "2S24".
-    pub(crate) service: String,
-    /// Название состава, загружаемое игрой.
-    pub(crate) name: String,
-    /// Ключ ServiceName для сопоставления с составами из Scenario.bin.
-    pub(crate) service_key: String,
-    /// Путь к блюпринту состава.
-    pub(crate) blueprint: String,
-    /// Разработчик дополнения.
-    pub(crate) provider: String,
-    /// Дополнение.
-    pub(crate) product: String,
 }
 
 /// Подвижной состав сценария.
 #[derive(Clone, Default)]
 pub(crate) struct ScenarioConsist {
-    /// Номер состава по порядку в файле сценария.
-    pub(crate) number: usize,
-    /// Ключ ServiceName (для сопоставления с sDriverFrontEndDetails).
-    pub(crate) service_key: String,
-    /// Название состава (рейс), полученное из ScenarioProperties.xml.
+    /// Название состава (рейс).
     pub(crate) name: String,
     /// Единицы техники в составе.
     pub(crate) vehicles: Vec<ScenarioVehicle>,
@@ -221,7 +196,6 @@ pub(crate) fn read_route_scenarios(
             scenario.state = element_text(&xml, "StateName");
             scenario.player_consist = element_text(&xml, "QuickDrivePlayerConsistName");
             scenario.date = scenario_date(&xml);
-            scenario.drivers = front_end_drivers(&xml);
         } else {
             scenario.name = id.clone();
         }
@@ -235,7 +209,6 @@ pub(crate) fn read_route_scenarios(
 pub(crate) fn load_consists(
     scenario_path: &Path,
     serz_path: &Path,
-    _drivers: &[ScenarioDriver],
 ) -> Vec<ScenarioConsist> {
     let Some(xml) = read_scenario_file(scenario_path, serz_path) else {
         return Vec::new();
@@ -262,16 +235,14 @@ pub(crate) fn read_scenario_file(scenario_path: &Path, serz_path: &Path) -> Opti
 pub(crate) fn scenario_consists(xml: &str) -> Vec<ScenarioConsist> {
     let mut consists = Vec::new();
     let mut rest = xml;
-    let mut number = 0;
     while let Some(start) = rest.find("<cConsist") {
         rest = &rest[start..];
         let end = rest.find("</cConsist>").unwrap_or(rest.len());
         let consist = &rest[..end];
-        number += 1;
         let name = consist_name(consist);
         let vehicles = scenario_vehicles(consist);
         if !vehicles.is_empty() {
-            consists.push(ScenarioConsist { number, service_key: String::new(), name, vehicles });
+            consists.push(ScenarioConsist { name, vehicles });
         }
         rest = &rest[end..];
     }
@@ -319,14 +290,6 @@ pub(crate) fn absolute_blueprint_block(text: &str) -> Option<&str> {
     let end = text[start..].find("</iBlueprintLibrary-cAbsoluteBlueprintID>")? + start;
     Some(&text[start..end])
 }
-
-/// Блок с абсолютной ссылкой на блюпринт внутри фрагмента XML.
-fn absolute_blueprint_block_in(text: &str) -> Option<&str> {
-    let start = text.find("<iBlueprintLibrary-cAbsoluteBlueprintID>")?;
-    let end = text[start..].find("</iBlueprintLibrary-cAbsoluteBlueprintID>")? + start;
-    Some(&text[start..end])
-}
-
 /// Текст элемента: содержимое между открывающим и закрывающим тегом.
 pub(crate) fn element_text(xml: &str, element: &str) -> String {
     let open = format!("<{element}");
@@ -353,6 +316,8 @@ pub(crate) fn element_text(xml: &str, element: &str) -> String {
 }
 
 /// Текст локализованного элемента: первый <English> внутри блока.
+/// Предпочитает English, но при пустом значении берёт первый непустой
+/// из остальных языков.
 fn localised_text(xml: &str, block: &str) -> String {
     let open = format!("<{block}");
     let mut search_from = 0;
@@ -364,7 +329,19 @@ fn localised_text(xml: &str, block: &str) -> String {
             let close_tag = format!("</{block}>");
             let end = rest.find(&close_tag).unwrap_or(rest.len());
             let block_xml = &rest[..end];
-            return element_text(block_xml, "English");
+            // Сначала пробуем English.
+            let english = element_text(block_xml, "English");
+            if !english.is_empty() {
+                return english;
+            }
+            // English пуст — берём первый непустой из остальных языков.
+            for lang in ["German", "French", "Italian", "Spanish", "Dutch", "Polish", "Russian"] {
+                let val = element_text(block_xml, lang);
+                if !val.is_empty() {
+                    return val;
+                }
+            }
+            return String::new();
         }
         search_from = abs + open.len();
     }
@@ -390,183 +367,6 @@ fn scenario_date(xml: &str) -> String {
     }
     format!("{day:02}.{month:02}.{year}")
 }
-
-fn front_end_drivers(xml: &str) -> Vec<ScenarioDriver> {
-    // 1. Блюпринты и признак игрока берём из FrontEndDriver.
-    let mut fed_drivers: Vec<ScenarioDriver> = Vec::new();
-    if let Some(list_start) = xml.find("<FrontEndDriverList") {
-        let list_rest = &xml[list_start..];
-        let list_end = list_rest
-            .find("</FrontEndDriverList>")
-            .unwrap_or(list_rest.len());
-        let list_block = &list_rest[..list_end];
-
-        let mut driver_rest = list_block;
-        while let Some(driver_start) = driver_rest.find("<FrontEndDriver") {
-            let after = &driver_rest[driver_start + "<FrontEndDriver".len()..];
-            if after.starts_with("List") {
-                driver_rest = &driver_rest[driver_start + 1..];
-                continue;
-            }
-            let driver_fragment = &driver_rest[driver_start..];
-            let driver_end = driver_fragment
-                .find("</FrontEndDriver>")
-                .unwrap_or(driver_fragment.len());
-            let driver_block = &driver_fragment[..driver_end];
-
-            let player_driver = element_text(driver_block, "PlayerDriver") == "1";
-            let service = element_text(driver_block, "Service");
-            let name = element_text(driver_block, "Name");
-
-            let (provider, product, blueprint) =
-                if let Some(bp_block) = absolute_blueprint_block_in(driver_block) {
-                    (
-                        element_text(bp_block, "Provider"),
-                        element_text(bp_block, "Product"),
-                        element_text(bp_block, "BlueprintID"),
-                    )
-                } else {
-                    (String::new(), String::new(), String::new())
-                };
-
-            fed_drivers.push(ScenarioDriver {
-                player_driver,
-                service,
-                name,
-                service_key: String::new(),
-                blueprint,
-                provider,
-                product,
-            });
-
-            driver_rest = &driver_fragment[driver_end..];
-        }
-    }
-
-    // 2. Названия рейсов и ключи берём из sDriverFrontEndDetails.
-    let mut sdrivers: Vec<ScenarioDriver> = Vec::new();
-    let mut rest = xml;
-    while let Some(start) = rest.find("<sDriverFrontEndDetails") {
-        let fragment = &rest[start..];
-        let end = fragment
-            .find("</sDriverFrontEndDetails>")
-            .unwrap_or(fragment.len());
-        let block = &fragment[..end];
-
-        let sn = localized_element_text(block, "ServiceName");
-        let name = if sn.is_empty() {
-            "Неназванный состав".to_owned()
-        } else {
-            sn
-        };
-
-        let service_key = {
-            let mut key = String::new();
-            if let Some(sn_pos) = block.find("<ServiceName") {
-                let sn_rest = &block[sn_pos..];
-                let sn_end = sn_rest.find("</ServiceName>").unwrap_or(sn_rest.len());
-                let sn_block = &sn_rest[..sn_end];
-                if let Some(kp) = sn_block.find("<Key") {
-                    let krest = &sn_block[kp..];
-                    let vs = krest.find('>').map(|i| i + 1).unwrap_or(0);
-                    let ke = krest.find("</Key>").unwrap_or(krest.len());
-                    key = decode_xml_text(&krest[vs..ke]).trim().to_owned();
-                }
-            }
-            key
-        };
-
-        let player_driver = element_text(block, "PlayerDriver") == "1";
-
-        let (provider, product, blueprint) = if let Some(ab) = absolute_blueprint_block_in(block) {
-            (
-                element_text(ab, "Provider"),
-                element_text(ab, "Product"),
-                element_text(ab, "BlueprintID"),
-            )
-        } else {
-            (String::new(), String::new(), String::new())
-        };
-
-        sdrivers.push(ScenarioDriver {
-            player_driver,
-            service: String::new(),
-            name,
-            service_key,
-            blueprint,
-            provider,
-            product,
-        });
-
-        rest = &fragment[end..];
-    }
-
-    if !sdrivers.is_empty() {
-        return sdrivers;
-    }
-
-    for d in &mut fed_drivers {
-        if d.name.is_empty() {
-            d.name = if d.service.is_empty() {
-                "Неназванный состав".to_owned()
-            } else {
-                d.service.clone()
-            };
-        }
-    }
-    fed_drivers
-}
-
-fn localized_element_text(xml: &str, element: &str) -> String {
-    let open = format!("<{element}");
-    let mut pos = 0;
-    while let Some(found) = xml[pos..].find(&open) {
-        let abs = pos + found;
-        let after = &xml[abs + open.len()..];
-        if after.starts_with(' ') || after.starts_with('>') {
-            let close_tag = format!("</{element}>");
-            let end = xml[abs..].find(&close_tag).map(|i| abs + i).unwrap_or(xml.len());
-            let block = &xml[abs..end];
-            if let Some(eng_pos) = block.find("<English") {
-                let eng_after = &block[eng_pos..];
-                let val_start = eng_after.find('>').map(|i| i + 1).unwrap_or(0);
-                let eng_end = eng_after.find("</English>").unwrap_or(eng_after.len());
-                let val = &eng_after[val_start..eng_end];
-                let text = match val.find('<') {
-                    Some(i) => &val[..i],
-                    None => val,
-                };
-                let decoded = decode_xml_text(text).trim().to_owned();
-                if !decoded.is_empty() {
-                    return decoded;
-                }
-            }
-            for lang in ["German", "French", "Italian", "Spanish", "Dutch", "Polish", "Russian"] {
-                let tag = format!("<{}", lang);
-                if let Some(lp) = block.find(&tag) {
-                    let la = &block[lp..];
-                    let val_start = la.find('>').map(|i| i + 1).unwrap_or(0);
-                    let close = format!("</{}>", lang);
-                    let le = la.find(&close).unwrap_or(la.len());
-                    let val = &la[val_start..le];
-                    let text = match val.find('<') {
-                        Some(i) => &val[..i],
-                        None => val,
-                    };
-                    let decoded = decode_xml_text(text).trim().to_owned();
-                    if !decoded.is_empty() {
-                        return decoded;
-                    }
-                }
-            }
-            pos = end;
-            continue;
-        }
-        pos = abs + open.len();
-    }
-    String::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,16 +383,15 @@ mod tests {
         }
         let scenarios = read_route_scenarios(&route, &serz);
             for scenario in &scenarios {
-                let consists = load_consists(&scenario.path, &serz, &scenario.drivers);
+                let consists = load_consists(&scenario.path, &serz);
                 eprintln!(
-                    "SCENARIO {:?} имя={:?} дата={:?} автор={:?} сезон={:?} составов={} поездов={}",
+                    "SCENARIO {:?} имя={:?} дата={:?} автор={:?} сезон={:?} составов={}",
                     scenario.id,
                     scenario.name,
                     scenario.date,
                     scenario.author,
                     scenario.season,
                     consists.len(),
-                    scenario.drivers.len()
                 );
                 for consist in &consists {
                     eprintln!("  состав name={:?} единиц={}", consist.name, consist.vehicles.len());
@@ -600,27 +399,5 @@ mod tests {
                 break;
             }
         assert!(!scenarios.is_empty(), "сценарии должны находиться");
-    }
-
-    #[test]
-    fn parses_front_end_drivers() {
-        let xml = r#"
-<ScenarioProperties>
-    <FrontEndDriverList>
-        <FrontEndDriver>
-            <PlayerDriver d:type="cBool">1</PlayerDriver>
-            <Service d:type="cDeltaString">2S21</Service>
-            <Name d:type="cDeltaString">ATS Class 755 'FLIRT'</Name>
-            <iBlueprintLibrary-cAbsoluteBlueprintID>
-                <Provider d:type="cDeltaString">ATS</Provider>
-                <Product d:type="cDeltaString">FLIRTPack01</Product>
-                <BlueprintID d:type="cDeltaString">Railvehicles\FLIRT_745_755\[755]DMS\C755_DMS_3D_AI.xml</BlueprintID>
-            </iBlueprintLibrary-cAbsoluteBlueprintID>
-        </FrontEndDriver>
-    </FrontEndDriverList>
-</ScenarioProperties>
-"#;
-        let drivers = front_end_drivers(xml);
-        assert_eq!(drivers.len(), 1);
     }
 }
