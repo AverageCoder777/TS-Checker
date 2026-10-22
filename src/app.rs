@@ -1,6 +1,8 @@
 //! egui application state, windows, and user interactions.
 
 use super::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 enum CheckMessage {
     Progress(String),
@@ -9,7 +11,10 @@ enum CheckMessage {
 
 enum InventoryAction {
     ScanUmlauts,
-    Repair(UmlautAsset),
+    Repair {
+        asset: UmlautAsset,
+        fixes: CharacterFixes,
+    },
 }
 
 #[derive(Default)]
@@ -22,6 +27,11 @@ struct AssetInventoryWindowState {
     error: Option<String>,
     assets: Vec<ReferencedAsset>,
     umlaut_assets: Vec<UmlautAsset>,
+    /// Ассет, для которого открыто окно подтверждения транслитерации.
+    pending_repair: Option<UmlautAsset>,
+    /// Замены символов, предложенные пользователем.
+    character_fixes: CharacterFixes,
+    sort: InventorySort,
 }
 
 pub(crate) fn decode_route_icon(path: &Path) -> image::ImageResult<image::DynamicImage> {
@@ -45,526 +55,7 @@ pub(crate) fn route_panel_widths(
 
 /// Строка таблицы инвентаря: путь ассета, список использований, признак отсутствия
 /// на диске и ассет с умляутами, если его нужно починить.
-pub(crate) type InventoryRow<'a> = (
-    &'a str,
-    &'a [AssetUse],
-    bool,
-    Option<&'a UmlautAsset>,
-);
-
-/// Действия, запрошенные строками таблицы инвентаря.
-#[derive(Default)]
-pub(crate) struct InventoryRowActions {
-    /// Ассет с умляутами, который нужно транслитерировать.
-    pub(crate) repair: Option<UmlautAsset>,
-    /// Папка с ассетом, которую нужно открыть в Проводнике.
-    pub(crate) open_folder: Option<PathBuf>,
-    /// Прямоугольники ячеек с путём ассетов: нужны только в тестах.
-    #[cfg(test)]
-    pub(crate) path_rects: Vec<egui::Rect>,
-}
-
-/// Ширины столбцов таблицы инвентаря.
-///
-/// Считаются один раз для шапки и для строк, чтобы подписи и данные стояли
-/// в одних и тех же местах.
-#[derive(Clone, Copy)]
-pub(crate) struct InventoryLayout {
-    pub(crate) path_width: f32,
-    usage_width: f32,
-    tiles_width: f32,
-    status_width: f32,
-}
-
-impl InventoryLayout {
-    /// Раскладывает таблицу по ширине окна. `table_width` берётся с запасом на
-    /// полосу прокрутки, чтобы шапка и строки совпадали при прокрутке.
-    pub(crate) fn new(table_width: f32, column_spacing: f32, show_tiles: bool) -> Self {
-        let column_count = if show_tiles { 4 } else { 3 };
-        let usage_width = 112.0;
-        let status_width = 200.0;
-        let tiles_width = if show_tiles {
-            (table_width * 0.28).clamp(120.0, 400.0)
-        } else {
-            0.0
-        };
-        let path_width = (table_width
-            - column_spacing * (column_count - 1) as f32
-            - usage_width
-            - status_width
-            - tiles_width)
-            .max(180.0);
-        Self {
-            path_width,
-            usage_width,
-            tiles_width,
-            status_width,
-        }
-    }
-
-    fn columns(&self, show_tiles: bool) -> usize {
-        if show_tiles {
-            4
-        } else {
-            3
-        }
-    }
-}
-
-/// Измеряет ширину текста в стиле мелкого шрифта.
-fn measure_small_text(ui: &egui::Ui, font_id: &egui::FontId, text: &str) -> f32 {
-    let font_id = font_id.clone();
-    ui.fonts(|fonts| {
-        fonts
-            .layout_no_wrap(text.to_string(), font_id, ui.visuals().text_color())
-            .size()
-            .x
-    })
-}
-
-/// Делит список тайлов на часть, помещающуюся в ячейку, и часть, уходящую в подсказку.
-///
-/// Так список тайлов не показывается дважды: в ячейке видно начало, в подсказке — продолжение.
-fn split_tiles_for_cell(
-    ui: &egui::Ui,
-    tiles_width: f32,
-    tiles: &[(&str, usize)],
-) -> (String, String) {
-    let font_id = ui
-        .style()
-        .text_styles
-        .get(&egui::TextStyle::Small)
-        .cloned()
-        .unwrap_or_default();
-    let mut visible = String::new();
-    let mut hidden: Vec<String> = Vec::new();
-    let mut used = 0.0;
-    for (tile, count) in tiles {
-        let token = format!("{} ({count})", tile.trim_start_matches("тайл "));
-        let separator = if visible.is_empty() {
-            0.0
-        } else {
-            measure_small_text(ui, &font_id, ", ")
-        };
-        let width = measure_small_text(ui, &font_id, &token) + separator;
-        if visible.is_empty() || used + width <= tiles_width {
-            if !visible.is_empty() {
-                visible.push_str(", ");
-            }
-            visible.push_str(&token);
-            used += width;
-        } else {
-            hidden.push(format!("{tile} — {count}"));
-        }
-    }
-    let hint = if hidden.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Ещё {} {}:\n{}",
-            hidden.len(),
-            plural_tiles(hidden.len()),
-            hidden.join("\n")
-        )
-    };
-    (visible, hint)
-}
-
-/// Склонение слова «тайл» по числу.
-fn plural_tiles(count: usize) -> &'static str {
-    match count % 10 {
-        1 if count % 100 != 11 => "тайл",
-        2..=4 if !(12..=14).contains(&(count % 100)) => "тайла",
-        _ => "тайлов",
-    }
-}
-
-/// Положение текста по горизонтали внутри ячейки.
-pub(crate) fn text_offset_x(align: egui::Align, rect: egui::Rect, text_width: f32) -> f32 {
-    match align {
-        egui::Align::Min => rect.left(),
-        egui::Align::Center => rect.center().x - text_width / 2.0,
-        egui::Align::Max => rect.right() - text_width,
-    }
-}
-
-/// Рисует текст в ячейке таблицы, выравнивая его по краю ячейки.
-///
-/// Текст рисуется вручную, а не виджетом: сетка измеряет столбцы по содержимому
-/// ячеек, и обычная подпись сжала бы столбец до ширины текста.
-fn paint_cell_text(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    text: &str,
-    color: egui::Color32,
-    font_id: egui::FontId,
-    align: egui::Align,
-) {
-    let galley = ui.fonts(|fonts| fonts.layout_no_wrap(text.to_owned(), font_id, color));
-    let x = text_offset_x(align, rect, galley.size().x);
-    let y = rect.center().y - galley.size().y / 2.0;
-    ui.painter().galley(egui::pos2(x, y), galley, color);
-}
-
-/// Рисует кнопку в ячейке таблицы и возвращает её ответ.
-///
-/// Кнопка рисуется вручную, чтобы занять в ячейке ровно своё место и не сдвигать
-/// соседние столбцы.
-fn paint_action_button(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    text: &str,
-    font_id: &egui::FontId,
-    enabled: bool,
-    id: egui::Id,
-) -> egui::Response {
-    let response = ui.interact(rect, id, egui::Sense::click());
-    let background = if !enabled {
-        ui.visuals().widgets.noninteractive.bg_fill
-    } else if response.is_pointer_button_down_on() {
-        ui.visuals().widgets.active.bg_fill
-    } else if response.hovered() {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        ui.visuals().widgets.inactive.bg_fill
-    };
-    ui.painter().rect_filled(rect, 3.0, background);
-    ui.painter().rect_stroke(
-        rect,
-        3.0,
-        ui.visuals().widgets.noninteractive.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
-    let color = if enabled {
-        ui.visuals().text_color()
-    } else {
-        ui.visuals().weak_text_color()
-    };
-    paint_cell_text(ui, rect, text, color, font_id.clone(), egui::Align::Center);
-    response
-}
-
-/// Ширина текста в ячейке таблицы.
-pub(crate) fn measure_cell_text(ui: &egui::Ui, text: &str, font_id: &egui::FontId) -> f32 {
-    let font_id = font_id.clone();
-    ui.fonts(|fonts| {
-        fonts
-            .layout_no_wrap(text.to_owned(), font_id, ui.visuals().text_color())
-            .size()
-            .x
-    })
-}
-
-/// Ячейки строки таблицы инвентаря вместе с ответами виджетов.
-pub(crate) struct InventoryCells {
-    /// Столбец с путём ассета.
-    pub(crate) path: (egui::Rect, egui::Response),
-    /// Столбец с числом использований.
-    pub(crate) usage: (egui::Rect, egui::Response),
-    /// Столбец с тайлами, если он показан.
-    pub(crate) tiles: Option<(egui::Rect, egui::Response)>,
-    /// Столбец со состоянием ассета.
-    pub(crate) status: egui::Rect,
-}
-
-/// Выделяет ячейки строки таблицы инвентаря.
-///
-/// Каждая ячейка занимает ровно свою ширину: сетка меряет столбцы по содержимому
-/// ячеек, и обычная подпись сжала бы столбец до ширины текста. Шапка и строки
-/// берут ячейки из одной функции, поэтому их столбцы совпадают.
-pub(crate) fn allocate_inventory_cells(
-    ui: &mut egui::Ui,
-    layout: &InventoryLayout,
-    show_tiles: bool,
-) -> InventoryCells {
-    let (path, path_response) =
-        ui.allocate_exact_size(egui::vec2(layout.path_width, 18.0), egui::Sense::click());
-    let (usage, usage_response) =
-        ui.allocate_exact_size(egui::vec2(layout.usage_width, 18.0), egui::Sense::hover());
-    let tiles = if show_tiles {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(layout.tiles_width, 18.0), egui::Sense::hover());
-        Some((rect, response))
-    } else {
-        None
-    };
-    let (status, _) = ui.allocate_exact_size(egui::vec2(layout.status_width, 18.0), egui::Sense::hover());
-    InventoryCells {
-        path: (path, path_response),
-        usage: (usage, usage_response),
-        tiles,
-        status,
-    }
-}
-
-/// Шапка таблицы инвентаря: подписи столбцов объясняют значения в строках.
-pub(crate) fn asset_inventory_header(
-    ui: &mut egui::Ui,
-    layout: &InventoryLayout,
-    show_tiles: bool,
-) -> Option<InventoryCells> {
-    let body = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
-    let color = ui.visuals().strong_text_color();
-    let mut cells = None;
-    egui::Grid::new("asset_inventory_header")
-        .num_columns(layout.columns(show_tiles))
-        .show(ui, |ui| {
-            let allocated = allocate_inventory_cells(ui, layout, show_tiles);
-            // Подписи столбцов стоят по центру своих ячеек.
-            paint_cell_text(
-                ui,
-                allocated.path.0,
-                "Ассет",
-                color,
-                body.clone(),
-                egui::Align::Center,
-            );
-            paint_cell_text(
-                ui,
-                allocated.usage.0,
-                "Использований",
-                color,
-                body.clone(),
-                egui::Align::Center,
-            );
-            allocated
-                .usage
-                .1
-                .clone()
-                .on_hover_text("Сколько раз ассет встречается в файлах маршрута");
-            if let Some((rect, response)) = allocated.tiles.as_ref() {
-                paint_cell_text(ui, *rect, "Тайлы", color, body.clone(), egui::Align::Center);
-                response
-                    .clone()
-                    .on_hover_text("Сколько объектов ассета размещено на каждом тайле");
-            }
-            paint_cell_text(
-                ui,
-                allocated.status,
-                "Состояние",
-                color,
-                body,
-                egui::Align::Center,
-            );
-            ui.end_row();
-            cells = Some(allocated);
-        });
-    cells
-}
-
-/// Папка, в которой должен лежать ассет по его пути внутри Assets.
-fn asset_directory(assets_path: &std::path::Path, asset_path: &str) -> std::path::PathBuf {
-    let normalized = asset_path.replace('/', "\\");
-    let relative = std::path::Path::new(&normalized);
-    match relative.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => assets_path.join(parent),
-        _ => assets_path.to_path_buf(),
-    }
-}
-
-/// Ближайшая существующая папка по пути: если нужной папки нет, поднимаемся выше.
-fn existing_directory_upwards(path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut current = Some(path);
-    while let Some(candidate) = current {
-        if candidate.is_dir() {
-            return Some(candidate.to_path_buf());
-        }
-        current = candidate.parent();
-    }
-    None
-}
-
-/// Папка, которую открывают по двойному клику на ассете.
-pub(crate) fn asset_folder_to_open(
-    assets_root: &std::path::Path,
-    asset_path: &str,
-) -> Option<std::path::PathBuf> {
-    existing_directory_upwards(&asset_directory(assets_root, asset_path))
-}
-
-/// Обрезает путь ассета слева, оставляя имя файла: длинные пути не помещаются
-/// в столбец, а имя файла в нём важнее папок.
-///
-/// Возвращает обрезанный текст и признак того, что путь не поместился целиком:
-/// только в этом случае показываем подсказку с полным названием ассета.
-pub(crate) fn elide_asset_path(ui: &egui::Ui, path: &str, max_width: f32) -> (String, bool) {
-    let font_id = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
-    let width = |text: &str| -> f32 {
-        let font_id = font_id.clone();
-        ui.fonts(|fonts| {
-            fonts
-                .layout_no_wrap(text.to_owned(), font_id, ui.visuals().text_color())
-                .size()
-                .x
-        })
-    };
-    let characters: Vec<char> = path.chars().collect();
-    // Ширина считается по факту: раскладка текста в egui кэшируется, поэтому
-    // повторные измерения одних и тех же строк почти ничего не стоят.
-    if width(path) <= max_width {
-        return (path.to_owned(), false);
-    }
-    let mut best = 0usize;
-    let mut low = 1usize;
-    let mut high = characters.len();
-    while low <= high {
-        let middle = (low + high) / 2;
-        let candidate: String = std::iter::once('…')
-            .chain(characters[characters.len() - middle..].iter().copied())
-            .collect();
-        if width(&candidate) <= max_width {
-            best = middle;
-            low = middle + 1;
-        } else {
-            high = middle.saturating_sub(1);
-        }
-    }
-    if best == 0 {
-        // Даже имя файла не помещается: показываем его целиком, текст обрежет
-        // сам виджет.
-        return (path.rsplit('/').next().unwrap_or(path).to_owned(), true);
-    }
-    let text: String = std::iter::once('…')
-        .chain(characters[characters.len() - best..].iter().copied())
-        .collect();
-    (text, true)
-}
-
-/// Строки таблицы инвентаря.
-pub(crate) fn asset_inventory_rows(
-    ui: &mut egui::Ui,
-    rows: &[InventoryRow<'_>],
-    assets_root: &Path,
-    layout: &InventoryLayout,
-    show_tiles: bool,
-    repair_busy: bool,
-    actions: &mut InventoryRowActions,
-) -> egui::Rect {
-    let body = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
-    let small = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Small));
-    ui.spacing_mut().item_spacing.y = 1.0;
-    egui::Grid::new("asset_inventory_grid")
-        .num_columns(layout.columns(show_tiles))
-        .striped(true)
-        .show(ui, |ui| {
-            for (path, uses, missing, repair_asset) in rows {
-                let color = if *missing {
-                    egui::Color32::LIGHT_RED
-                } else if repair_asset.is_some() {
-                    egui::Color32::YELLOW
-                } else {
-                    ui.visuals().text_color()
-                };
-                // Путь ассета стоит по левому краю своей ячейки. Подсказка с полным
-                // названием появляется только тогда, когда текст обрезан.
-                let cells = allocate_inventory_cells(ui, layout, show_tiles);
-                let (rect, path_response) = cells.path;
-                let (text, truncated) = elide_asset_path(ui, path, layout.path_width);
-                paint_cell_text(ui, rect, &text, color, body.clone(), egui::Align::Min);
-                if path_response.double_clicked() {
-                    actions.open_folder = asset_folder_to_open(assets_root, path);
-                }
-                if truncated {
-                    path_response.clone().on_hover_text(*path);
-                }
-                #[cfg(test)]
-                actions.path_rects.push(rect);
-
-                let (rect, response) = cells.usage;
-                paint_cell_text(
-                    ui,
-                    rect,
-                    &format!("×{}", uses.len()),
-                    ui.visuals().text_color(),
-                    body.clone(),
-                    egui::Align::Center,
-                );
-                response.on_hover_text(format!(
-                    "Использований: {} (см. столбец «Использований»)",
-                    uses.len()
-                ));
-
-                if let Some((rect, response)) = cells.tiles {
-                    let mut by_tile: HashMap<&str, usize> = HashMap::new();
-                    for usage in *uses {
-                        by_tile
-                            .entry(&usage.tile)
-                            .and_modify(|count| *count += 1)
-                            .or_insert(1);
-                    }
-                    let mut tiles: Vec<_> = by_tile.into_iter().collect();
-                    tiles.sort_by(|left, right| left.0.cmp(right.0));
-                    let (summary, tile_hint) =
-                        split_tiles_for_cell(ui, layout.tiles_width, &tiles);
-                    // Названия тайлов стоят по левому краю своей ячейки.
-                    paint_cell_text(
-                        ui,
-                        rect,
-                        &summary,
-                        ui.visuals().text_color(),
-                        small.clone(),
-                        egui::Align::Min,
-                    );
-                    if !tile_hint.is_empty() {
-                        response.on_hover_text(tile_hint);
-                    }
-                }
-
-                // Состояние ассета: метка об отсутствии и кнопка починки.
-                let status_rect = cells.status;
-                let mut cursor = status_rect.left();
-                if *missing {
-                    let text = "ОТСУТСТВУЕТ";
-                    paint_cell_text(
-                        ui,
-                        egui::Rect::from_min_size(
-                            egui::pos2(cursor, status_rect.top()),
-                            egui::vec2(status_rect.width(), 18.0),
-                        ),
-                        text,
-                        egui::Color32::LIGHT_RED,
-                        body.clone(),
-                        egui::Align::Min,
-                    );
-                    cursor += measure_cell_text(ui, text, &body) + 12.0;
-                }
-                if let Some(asset) = repair_asset {
-                    let text = "Исправить…";
-                    let width = measure_cell_text(ui, text, &body) + 16.0;
-                    let button_rect = egui::Rect::from_min_size(
-                        egui::pos2(cursor, status_rect.center().y - 9.0),
-                        egui::vec2(width, 18.0),
-                    );
-                    let response = paint_action_button(
-                        ui,
-                        button_rect,
-                        text,
-                        &body,
-                        !repair_busy,
-                        ui.id().with(("repair", *path)),
-                    );
-                    let mut hint = String::from("Транслитерировать цепочку имён с умляутами");
-                    for (index, evidence) in asset.evidence.iter().enumerate() {
-                        if index == 0 {
-                            hint.push_str("\n\nОбнаружение: ");
-                        } else {
-                            hint.push('\n');
-                        }
-                        hint.push_str(evidence);
-                    }
-                    response.clone().on_hover_text(hint);
-                    if !repair_busy && response.clicked() {
-                        actions.repair = Some((*asset).clone());
-                    }
-                }
-                ui.end_row();
-            }
-        })
-        .response
-        .rect
-}
-
-/// Результат сохранения ассета: исходный путь, XML и путь резервной копии.
+/// Данные для отрисовки таблицы инвентаря.
 type SavedAsset = (PathBuf, String, Option<PathBuf>);
 
 /// Результат проверки ассетов на умляуты: найденные ассеты и список ошибок.
@@ -575,6 +66,22 @@ pub(crate) struct CheckerApp {
     startup_scan_started: bool,
     routes: Vec<Route>,
     selected_route: Option<usize>,
+    /// Сценарии выбранного маршрута.
+    scenarios: Vec<RouteScenario>,
+    /// Маршрут, для которого прочитаны сценарии.
+    scenarios_route: Option<String>,
+    /// Выбранный сценарий в списке.
+    selected_scenario: Option<usize>,
+    /// Выбранный состав внутри открытого окна сценария.
+    selected_consist: Option<usize>,
+    /// Открыто ли окно выбранного сценария.
+    scenario_window_open: bool,
+    /// Кэш разрешённых путей блюпринтов техники, чтобы не обходить Assets
+    /// повторно при каждом кадре отрисовки окна сценария.
+    blueprint_cache: RefCell<HashMap<(String, String, String), Option<PathBuf>>>,
+    /// Результат проверки наличия файлов для составов открытого сценария,
+    /// считается один раз, чтобы не пересчитывать при каждом кадре egui.
+    scenario_consist_info: Option<Vec<(String, bool)>>,
     search_query: String,
     ignore_scenarios: bool,
     result: Option<CheckResult>,
@@ -589,7 +96,11 @@ pub(crate) struct CheckerApp {
     asset_replacement: Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
     umlaut_repair: Option<Receiver<(String, Result<UmlautRepairReport, String>)>>,
     asset_replacement_feedback: Option<Result<String, String>>,
+    /// Ассет, для которого в главном окне открыто подтверждение транслитерации.
     pending_umlaut_repair: Option<UmlautAsset>,
+    pending_asset_replacement: Option<PendingAssetReplacement>,
+    /// Замены символов, предложенные пользователем для сломанных имён.
+    character_fixes: CharacterFixes,
     pending_delete: Option<Vec<PathBuf>>,
     delete_paths: Option<Vec<PathBuf>>,
     delete_rx: Option<Receiver<Result<usize, String>>>,
@@ -650,6 +161,13 @@ impl Default for CheckerApp {
             ignored_route_ids,
             ignore_list_window_open: false,
             selected_route: None,
+            scenarios: Vec::new(),
+            scenarios_route: None,
+            selected_scenario: None,
+            selected_consist: None,
+            scenario_window_open: false,
+            blueprint_cache: RefCell::new(HashMap::new()),
+            scenario_consist_info: None,
             search_query: String::new(),
             ignore_scenarios: true,
             result: None,
@@ -660,6 +178,8 @@ impl Default for CheckerApp {
             umlaut_repair: None,
             asset_replacement_feedback: None,
             pending_umlaut_repair: None,
+            pending_asset_replacement: None,
+            character_fixes: CharacterFixes::new(),
             pending_delete: None,
             delete_paths: None,
             delete_rx: None,
@@ -702,7 +222,6 @@ impl CheckerApp {
             || self.asset_replacement.is_some()
             || self.inventory_scan.is_some()
             || self.umlaut_repair.is_some()
-            || self.pending_umlaut_repair.is_some()
             || self.selected_route.is_none();
         let scan_busy = repair_busy || self.inventory_scan.is_some();
         ctx.show_viewport_deferred(
@@ -710,7 +229,7 @@ impl CheckerApp {
             egui::ViewportBuilder::default()
                 .with_title("Инвентарь ассетов маршрута")
                 .with_inner_size([900.0, 700.0]),
-            move |ctx, _class| {
+            move |ui, _class| {
                 let mut state = match state.lock() {
                     Ok(state) => state,
                     Err(error) => {
@@ -718,12 +237,15 @@ impl CheckerApp {
                         return;
                     }
                 };
-                if ctx.input(|input| input.viewport().close_requested()) {
+                if ui
+                    .ctx()
+                    .input(|input| input.viewport().close_requested())
+                {
                     state.open = false;
                     return;
                 }
 
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     ui.heading("Все используемые ассеты маршрута");
                     ui.horizontal(|ui| {
                         ui.label(format!("Всего: {}", state.assets.len()));
@@ -742,7 +264,7 @@ impl CheckerApp {
                                 state.error =
                                     Some(format!("Не удалось запустить проверку: {error}"));
                             } else {
-                                ctx.request_repaint();
+                                ui.ctx().request_repaint();
                             }
                         }
                         ui.selectable_value(&mut state.show_umlauts, false, "Все ассеты");
@@ -779,7 +301,19 @@ impl CheckerApp {
                     ui.separator();
 
                     let search = state.search.to_lowercase();
-                    let rows: Vec<InventoryRow<'_>> =
+                    // Карты собираются один раз на кадр: поиск по списку для
+                    // каждой строки стоил бы времени при тысячах ассетов.
+                    let umlaut_by_path: HashMap<&str, &UmlautAsset> = state
+                        .umlaut_assets
+                        .iter()
+                        .map(|asset| (asset.path.as_str(), asset))
+                        .collect();
+                    let missing_by_path: HashMap<&str, bool> = state
+                        .assets
+                        .iter()
+                        .map(|asset| (asset.path.as_str(), asset.missing))
+                        .collect();
+                    let mut rows: Vec<InventoryRow<'_>> =
                         if state.show_umlauts {
                             state
                                 .umlaut_assets
@@ -798,11 +332,10 @@ impl CheckerApp {
                                         })
                                 })
                                 .map(|asset| {
-                                    let missing = state
-                                        .assets
-                                        .iter()
-                                        .find(|item| item.path == asset.path)
-                                        .is_some_and(|item| item.missing);
+                                    let missing = missing_by_path
+                                        .get(asset.path.as_str())
+                                        .copied()
+                                        .unwrap_or(false);
                                     (
                                         asset.path.as_str(),
                                         asset.uses.as_slice(),
@@ -833,10 +366,7 @@ impl CheckerApp {
                                         asset.path.as_str(),
                                         asset.uses.as_slice(),
                                         asset.missing,
-                                        state
-                                            .umlaut_assets
-                                            .iter()
-                                            .find(|item| item.path == asset.path),
+                                        umlaut_by_path.get(asset.path.as_str()).copied(),
                                     )
                                 })
                                 .collect()
@@ -848,40 +378,59 @@ impl CheckerApp {
                     // шапка и строки оставались в одних и тех же границах.
                     let table_width =
                         (ui.available_width() - ui.spacing().scroll.allocated_width()).max(320.0);
-                    let layout = InventoryLayout::new(
-                        table_width,
-                        ui.spacing().item_spacing.x,
+                    let layout = InventoryLayout::new(table_width, show_tiles);
+                    let mut sort = state.sort;
+                    sort_inventory_rows(&mut rows, sort);
+                    let table_data = InventoryTable {
+                        rows: &rows,
+                        assets_root: &assets_root,
+                        layout,
                         show_tiles,
-                    );
-                    asset_inventory_header(ui, &layout, show_tiles);
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_salt("asset_inventory_rows")
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                        .show(ui, |ui| {
-                            asset_inventory_rows(
-                                ui,
-                                &rows,
-                                &assets_root,
-                                &layout,
-                                show_tiles,
-                                repair_busy,
-                                &mut actions,
-                            );
-                        });
-                    drop(rows);
+                        repair_busy,
+                    };
+                    asset_inventory_table(ui, &table_data, &mut sort, &mut actions);
+                    state.sort = sort;
                     if let Some(folder) = actions.open_folder {
                         if let Err(error) = open_in_file_explorer(&folder) {
                             state.error = Some(error);
                         }
                     }
                     if let Some(asset) = actions.repair {
-                        if let Err(error) = action_tx.send(InventoryAction::Repair(asset)) {
-                            state.error =
-                                Some(format!("Не удалось запустить транслитерацию: {error}"));
-                        } else {
-                            ctx.request_repaint();
+                        state.pending_repair = Some(asset);
+                    }
+                    // Окно подтверждения открываем здесь же: в отдельном окне
+                    // инвентаря остаётся фокус клавиатуры, иначе в поля нельзя
+                    // вводить символы.
+                    if let Some(asset) = state.pending_repair.clone() {
+                        let mut fixes = state.character_fixes.clone();
+                        let decision = umlaut_repair_window(ui, &asset, &mut fixes);
+                        // Введённые символы сохраняем сразу: иначе они
+                        // теряются до следующего кадра.
+                        state.character_fixes = fixes.clone();
+                        match decision {
+                            Some(RepairDecision::Cancel) => {
+                                state.pending_repair = None;
+                            }
+                            Some(RepairDecision::Confirm) => {
+                                state.pending_repair = None;
+                                // Пустое поле означает значение по умолчанию.
+                                let mut effective = fixes;
+                                for character in &asset.unsupported {
+                                    effective
+                                        .entry(*character)
+                                        .or_insert_with(|| default_replacement(*character));
+                                }
+                                state.character_fixes = effective.clone();
+                                if let Err(error) = action_tx.send(InventoryAction::Repair {
+                                    asset,
+                                    fixes: effective,
+                                }) {
+                                    state.error = Some(format!(
+                                        "Не удалось запустить транслитерацию: {error}"
+                                    ));
+                                }
+                            }
+                            None => {}
                         }
                     }
                 });
@@ -929,7 +478,7 @@ impl CheckerApp {
         });
     }
 
-    fn start_umlaut_repair(&mut self, asset: UmlautAsset) {
+    fn start_umlaut_repair(&mut self, asset: UmlautAsset, fixes: CharacterFixes) {
         let Some(route) = self
             .selected_route
             .and_then(|index| self.routes.get(index))
@@ -952,6 +501,7 @@ impl CheckerApp {
                 &serz_path,
                 &asset.path,
                 &asset.uses,
+                &fixes,
             )
             .map(|mut report| {
                 let mut uses: Vec<_> = asset
@@ -959,7 +509,7 @@ impl CheckerApp {
                     .iter()
                     .map(|usage| AssetReplacementLogUse {
                         tile: usage.tile.clone(),
-                        source_file: usage.source_file.clone(),
+                        source_file: usage.source_file.display(),
                     })
                     .collect();
                 uses.sort_by(|left, right| {
@@ -973,7 +523,11 @@ impl CheckerApp {
                     route_id: Some(route.id.clone()),
                     route_name: Some(route.name.clone()),
                     route_path: Some(route.path.clone()),
-                    original_files: report.files.clone(),
+                    original_files: report
+                        .files
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
                     missing_asset: Some(path.clone()),
                     replacement_asset: Some(report.new_asset_path.clone()),
                     replaced_files: report.changed_files,
@@ -997,7 +551,14 @@ impl CheckerApp {
         });
     }
 
-    fn start_asset_replacement(&mut self, missing: MissingAsset, replacement: PathBuf) {
+    fn start_asset_replacement(
+        &mut self,
+        missing: MissingAsset,
+        replacement: PathBuf,
+        transliterate: bool,
+        replacement_relative: String,
+        fixes: CharacterFixes,
+    ) {
         let Some(route) = self
             .selected_route
             .and_then(|index| self.routes.get(index))
@@ -1014,6 +575,31 @@ impl CheckerApp {
         self.status = format!("Подготовка замены ассета {}...", missing.path);
         thread::spawn(move || {
             let missing_path = missing.path.clone();
+            // Сначала новый ассет переводится в английские имена: замена
+            // должна ссылаться на уже переименованный файл.
+            let replacement = if transliterate {
+                match repair_umlaut_asset_chain(
+                    &route.path,
+                    &assets_path,
+                    &serz_path,
+                    &replacement_relative,
+                    &[],
+                    &fixes,
+                ) {
+                    Ok(report) => assets_path.join(report.new_asset_path),
+                    Err(error) => {
+                        let _ = tx.send((
+                            missing_path,
+                            Err(format!(
+                                "Не удалось переименовать новый ассет под английские имена: {error}"
+                            )),
+                        ));
+                        return;
+                    }
+                }
+            } else {
+                replacement
+            };
             let result = replace_missing_asset(
                 &route.path,
                 &assets_path,
@@ -1026,7 +612,7 @@ impl CheckerApp {
                 let mut original_files: Vec<_> = missing
                     .uses
                     .iter()
-                    .map(|usage| usage.source_file.clone())
+                    .map(|usage| usage.source_file.display())
                     .collect::<HashSet<_>>()
                     .into_iter()
                     .collect();
@@ -1047,7 +633,7 @@ impl CheckerApp {
                         .iter()
                         .map(|usage| AssetReplacementLogUse {
                             tile: usage.tile.clone(),
-                            source_file: usage.source_file.clone(),
+                            source_file: usage.source_file.display(),
                         })
                         .collect(),
                     backups: report.backups.clone(),
@@ -1152,19 +738,21 @@ impl CheckerApp {
         self.start_asset_view(path);
     }
 
-    fn show_asset_editor(&mut self, ctx: &egui::Context) {
-        let save_shortcut =
-            ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
-        let find_shortcut =
-            ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::F));
+    fn show_asset_editor(&mut self, ui: &mut egui::Ui) {
+        let save_shortcut = ui
+            .ctx()
+            .input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
+        let find_shortcut = ui
+            .ctx()
+            .input(|input| input.modifiers.command && input.key_pressed(egui::Key::F));
         let saving = self.asset_viewer_save.is_some();
         let mut save_requested = false;
 
         if self.asset_editor_only {
-            egui::TopBottomPanel::bottom("editor_status").show(ctx, |ui| {
+            egui::Panel::bottom("editor_status").show(ui, |ui| {
                 ui.label(&self.status);
             });
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Редактор BIN/GeoPcDx — XML");
                 ui.separator();
                 save_requested = render_asset_editor(
@@ -1181,7 +769,7 @@ impl CheckerApp {
                 .open(&mut self.asset_viewer_open)
                 .default_size([1000.0, 760.0])
                 .resizable(true)
-                .show(ctx, |ui| {
+                .show(ui.ctx(), |ui| {
                     save_requested = render_asset_editor(
                         ui,
                         self.asset_viewer_document.as_mut(),
@@ -1323,12 +911,93 @@ impl CheckerApp {
         });
     }
 
+    /// Заголовок окна выбранного сценария.
+    fn scenario_title(&self) -> String {
+        self.selected_scenario
+            .and_then(|index| self.scenarios.get(index))
+            .map(|scenario| scenario.name.clone())
+            .unwrap_or_else(|| "Сценарий".to_owned())
+    }
+
+    /// Обновляет список сценариев выбранного маршрута.
+    ///
+    /// Сценарии читаются с диска, поэтому список обновляется только при смене
+    /// маршрута: файл сценариев небольшой, но читать его каждый кадр незачем.
+    fn refresh_scenarios(&mut self) {
+        let Some(route) = self.selected_route.and_then(|index| self.routes.get(index)) else {
+            self.scenarios.clear();
+            self.scenarios_route = None;
+            self.selected_scenario = None;
+            return;
+        };
+        if self.scenarios_route.as_deref() == Some(route.id.as_str()) {
+            return;
+        }
+        self.scenarios = read_route_scenarios(
+            &route.path,
+            &preferred_serz_path(Path::new(self.rw_path.trim())),
+        );
+        self.scenarios_route = Some(route.id.clone());
+        self.selected_scenario = None;
+        self.selected_consist = None;
+        self.scenario_consist_info = None;
+    }
+
+    /// Все ли файлы техники выбранного состава разрешаются в реальные файлы на диске.
+    fn consist_files_exist(
+        &self,
+        consist: &ScenarioConsist,
+        route_path: Option<&Path>,
+        rw_path: &Path,
+    ) -> bool {
+        let Some(route_path) = route_path else {
+            return false;
+        };
+        consist
+            .vehicles
+            .iter()
+            .all(|vehicle| {
+                vehicle.blueprint.is_empty()
+                    || self
+                        .resolve_blueprint_file_cached(
+                            rw_path,
+                            route_path,
+                            &vehicle.blueprint,
+                            &vehicle.provider,
+                            &vehicle.product,
+                        )
+                        .is_some()
+            })
+    }
+
+    /// Разрешает путь блюпринта с кэшированием результата.
+    fn resolve_blueprint_file_cached(
+        &self,
+        rw_path: &Path,
+        route_path: &Path,
+        blueprint: &str,
+        provider: &str,
+        product: &str,
+    ) -> Option<PathBuf> {
+        let key = (blueprint.to_owned(), provider.to_owned(), product.to_owned());
+        {
+            let cache = self.blueprint_cache.borrow();
+            if let Some(cached) = cache.get(&key) {
+                return cached.clone();
+            }
+        }
+        let found = resolve_blueprint_file(rw_path, route_path, blueprint, provider, product);
+        self.blueprint_cache.borrow_mut().insert(key, found.clone());
+        found
+    }
+
     fn receive_background_results(&mut self) {
         loop {
             match self.inventory_action_rx.try_recv() {
                 Ok(InventoryAction::ScanUmlauts) => self.start_inventory_scan(),
-                Ok(InventoryAction::Repair(asset)) => {
-                    self.pending_umlaut_repair = Some(asset);
+                Ok(InventoryAction::Repair { asset, fixes }) => {
+                    self.character_fixes = fixes.clone();
+                    self.start_umlaut_repair(asset, fixes);
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
@@ -1444,7 +1113,7 @@ impl CheckerApp {
                         route_id: None,
                         route_name: None,
                         route_path: None,
-                        original_files: vec![source_path.clone()],
+                        original_files: vec![source_path.display().to_string()],
                         missing_asset: None,
                         replacement_asset: None,
                         replaced_files: 1,
@@ -1742,6 +1411,133 @@ impl CheckerApp {
     }
 }
 
+thread_local! {
+    static ASSETS_INDEX: RefCell<Option<HashMap<String, PathBuf>>> = RefCell::new(None);
+}
+
+/// Строит (один раз) индекс файлов в папке Assets: имя файла без расширения
+/// (в нижнем регистре) → полный путь. Используется для быстрого поиска
+/// блюпринта по имени без обхода всего дерева Assets при каждом запросе.
+fn build_assets_index(assets_path: &Path) -> HashMap<String, PathBuf> {
+    ASSETS_INDEX.with(|cell| {
+        if let Some(index) = cell.borrow().as_ref() {
+            return index.clone();
+        }
+        let mut index = HashMap::new();
+        for entry in walkdir::WalkDir::new(assets_path)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            if let Some(stem) = entry.path().file_stem() {
+                let key = stem.to_string_lossy().to_lowercase();
+                index.entry(key).or_insert_with(|| entry.into_path());
+            }
+        }
+        cell.borrow_mut().replace(index.clone());
+        index
+    })
+}
+
+/// Разрешает ссылку на блюпринт состава (例如 `RailVehicles\...\имя.xml`) в
+/// реальный файл на диске. Ищется относительно папки Assets и папки маршрута,
+/// с известными расширениями RailWorks. Если указаны провайдер и продукт,
+/// сначала пробуется полный путь Assets\{provider}\{product}\{blueprint}.
+fn resolve_blueprint_file(
+    rw_path: &Path,
+    route_path: &Path,
+    blueprint: &str,
+    provider: &str,
+    product: &str,
+) -> Option<PathBuf> {
+    let blueprint = blueprint.trim();
+    if blueprint.is_empty() {
+        return None;
+    }
+    let assets_path = rw_path.join("Assets");
+    let normalized = blueprint.replace('/', "\\");
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Полный путь через провайдера и продукт: Assets\ATS\FLIRTPack01\...
+    if !provider.is_empty() && !product.is_empty() {
+        let joined = format!(
+            "{}\\{}\\{}",
+            provider.replace('/', "\\"),
+            product.replace('/', "\\"),
+            normalized
+        );
+        candidates.push(PathBuf::from(&joined));
+    }
+
+    candidates.push(PathBuf::from(&normalized));
+    if let Some(extension) = Path::new(&normalized).extension() {
+        let stem = Path::new(&normalized)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| normalized.clone());
+        for ext in ["bin", "GeoPcDx", "TgPcDx", "xml"] {
+            if ext.eq_ignore_ascii_case(extension.to_str().unwrap_or("")) {
+                continue;
+            }
+            candidates.push(PathBuf::from(format!("{stem}.{ext}")));
+        }
+    }
+
+    let roots: Vec<PathBuf> = vec![assets_path.clone(), route_path.to_path_buf()];
+    for root in &roots {
+        for candidate in &candidates {
+            let path = root.join(candidate);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+
+    // Путь в блюпринте может быть неполным (без провайдера/продукта), поэтому
+    // ищем файл по имени. Обходим не всё дерево Assets, а только папку
+    // провайдера/продукта из блюпринта — это на порядок быстрее.
+    let file_stem = Path::new(&normalized)
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())?;
+
+    // Определяем корневые папки для поиска.
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    if !provider.is_empty() {
+        let provider_dir = assets_path.join(provider.replace('/', "\\"));
+        if !product.is_empty() {
+            let product_dir = provider_dir.join(product.replace('/', "\\"));
+            if product_dir.is_dir() {
+                search_roots.push(product_dir);
+            }
+        }
+        if provider_dir.is_dir() {
+            search_roots.push(provider_dir);
+        }
+    }
+    if search_roots.is_empty() {
+        search_roots.push(assets_path.clone());
+    }
+
+    for root in &search_roots {
+        if let Some(found) = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .find(|e| {
+                e.path()
+                    .file_stem()
+                    .map(|s| s.eq_ignore_ascii_case(&file_stem))
+                    .unwrap_or(false)
+            })
+        {
+            return Some(found.into_path());
+        }
+    }
+
+    None
+}
+
 fn render_asset_editor(
     ui: &mut egui::Ui,
     document: Option<&mut EditorDocument>,
@@ -1795,7 +1591,11 @@ fn render_asset_editor(
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Найти:");
-            let find_response = ui.text_edit_singleline(&mut document.find_query);
+            let find_response = ui.add(
+                egui::TextEdit::singleline(&mut document.find_query)
+                    .id(ui.make_persistent_id("editor_find"))
+                    .desired_width(160.0),
+            );
             if find_shortcut {
                 find_response.request_focus();
             }
@@ -1824,7 +1624,11 @@ fn render_asset_editor(
         });
         ui.horizontal(|ui| {
             ui.label("Заменить на:");
-            ui.text_edit_singleline(&mut document.replace_text);
+            ui.add(
+                egui::TextEdit::singleline(&mut document.replace_text)
+                    .id(ui.make_persistent_id("editor_replace"))
+                    .desired_width(160.0),
+            );
             if ui
                 .add_enabled(document.match_count() > 0, egui::Button::new("Заменить"))
                 .clicked()
@@ -1845,13 +1649,19 @@ fn render_asset_editor(
         let editor_id = ui.make_persistent_id("asset_xml_editor");
         let cursor_char = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
             .and_then(|state| state.cursor.char_range())
-            .map_or(0, |range| range.primary.index);
+            .map_or(0, |range| range.primary.index.into());
         let matching_tags = document.matching_tag_ranges(cursor_char);
         let syntax = document.syntax().clone();
         let xml = &mut document.xml;
-        let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
-            let job = xml_layout_job(ui, text, wrap_width, &syntax, matching_tags.as_ref());
-            ui.fonts(|fonts| fonts.layout_job(job))
+        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+            let job = xml_layout_job(
+                ui,
+                text.as_str(),
+                wrap_width,
+                &syntax,
+                matching_tags.as_ref(),
+            );
+            ui.painter().layout_job(job)
         };
         let pending_selection = document.pending_selection.take();
         let mut text_changed = false;
@@ -1897,7 +1707,7 @@ fn render_asset_editor(
 }
 
 impl eframe::App for CheckerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if !self.startup_scan_started {
             self.startup_scan_started = true;
             if is_valid_game_path(Path::new(self.rw_path.trim())) {
@@ -1913,15 +1723,15 @@ impl eframe::App for CheckerApp {
             || self.inventory_scan.is_some()
             || self.asset_replacement.is_some()
             || self.umlaut_repair.is_some()
-            || self.pending_umlaut_repair.is_some()
             || self.delete_rx.is_some()
             || self.asset_viewer_load.is_some()
             || self.asset_viewer_save.is_some()
         {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            ui.ctx()
+                .request_repaint_after(Duration::from_millis(100));
         }
         if self.asset_editor_only {
-            self.show_asset_editor(ctx);
+            self.show_asset_editor(ui);
             return;
         }
         let route_icon_paths: Vec<_> = if self.route_thumbnails_enabled {
@@ -1937,7 +1747,7 @@ impl eframe::App for CheckerApp {
             .map(|icon_path| {
                 icon_path
                     .as_deref()
-                    .and_then(|path| self.route_icon_texture_id(ctx, path))
+                    .and_then(|path| self.route_icon_texture_id(ui.ctx(), path))
             })
             .collect();
 
@@ -1949,11 +1759,11 @@ impl eframe::App for CheckerApp {
         let mut replace_asset_request = None;
         let mut repair_umlaut_request = None;
         let mut open_inventory_request = false;
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.label(&self.status);
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("TS Checker");
             ui.label("Проверка маршрутов RailWorks и ссылок на ассеты");
             ui.add_space(8.0);
@@ -1964,8 +1774,7 @@ impl eframe::App for CheckerApp {
                     || self.inventory_scan.is_some()
                     || self.asset_replacement.is_some()
                     || self.umlaut_repair.is_some()
-                    || self.pending_umlaut_repair.is_some()
-                    || self.delete_rx.is_some();
+                            || self.delete_rx.is_some();
                 ui.label("Папка RailWorks:");
                 ui.add(
                     egui::Label::new(&self.rw_path)
@@ -2018,18 +1827,17 @@ impl eframe::App for CheckerApp {
             ui.separator();
             let content_size = ui.available_size();
             let font_id = egui::TextStyle::Button.resolve(ui.style());
-            let longest_route_label_width = ui.fonts(|fonts| {
-                self.routes
-                    .iter()
-                    .map(|route| {
-                        let label = format!("{}  ({})", route.name, route.id);
-                        fonts
-                            .layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE)
-                            .size()
-                            .x
-                    })
-                    .fold(0.0_f32, f32::max)
-            });
+            let longest_route_label_width = self
+                .routes
+                .iter()
+                .map(|route| {
+                    let label = format!("{}  ({})", route.name, route.id);
+                    ui.painter()
+                        .layout_no_wrap(label, font_id.clone(), egui::Color32::WHITE)
+                        .size()
+                        .x
+                })
+                .fold(0.0_f32, f32::max);
             let has_route_thumbnails =
                 self.route_thumbnails_enabled && route_icon_texture_ids.iter().any(Option::is_some);
             let route_content_width = longest_route_label_width
@@ -2079,7 +1887,11 @@ impl eframe::App for CheckerApp {
 
                             ui.horizontal(|ui| {
                                 ui.label("Поиск:");
-                                ui.text_edit_singleline(&mut self.search_query);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.search_query)
+                                        .id(ui.make_persistent_id("inventory_search"))
+                                        .desired_width(200.0),
+                                );
                             });
 
                             if self.routes.is_empty() {
@@ -2106,7 +1918,7 @@ impl eframe::App for CheckerApp {
                                 egui::ScrollArea::vertical()
                                     .id_salt("route_list")
                                     .auto_shrink([false, false])
-                                    .max_height(available_height)
+                                    .max_height(available_height * 0.55)
                                     .show(ui, |ui| {
                                         for (index, route) in self.routes.iter().enumerate() {
                                             if !query.is_empty()
@@ -2135,7 +1947,7 @@ impl eframe::App for CheckerApp {
                                                         && self.check.is_none()
                                                         && self.inventory_scan.is_none()
                                                         && self.umlaut_repair.is_none()
-                                                        && self.pending_umlaut_repair.is_none(),
+                                                        ,
                                                     |ui| {
                                                         if ui
                                                             .selectable_label(
@@ -2160,6 +1972,39 @@ impl eframe::App for CheckerApp {
                                                     },
                                                 );
                                             });
+                                        }
+                                    });
+
+                                // Под списком маршрутов — сценарии выбранного
+                                // маршрута: они есть всегда, проверять для этого
+                                // ничего не нужно.
+                                self.refresh_scenarios();
+                                ui.label("Сценарии маршрута:");
+                                egui::ScrollArea::vertical()
+                                    .id_salt("scenario_list")
+                                    .auto_shrink([false, false])
+                                    .max_height(available_height * 0.35)
+                                    .show(ui, |ui| {
+                                        if self.scenarios.is_empty() {
+                                            ui.label("У маршрута нет сценариев.");
+                                        }
+                                        for (index, scenario) in self.scenarios.iter().enumerate() {
+                                            let mut label = scenario.name.clone();
+                                            if !scenario.date.is_empty() {
+                                                label.push_str(&format!("  ({})", scenario.date));
+                                            }
+                                                    if ui
+                                                        .selectable_label(
+                                                            self.selected_scenario == Some(index),
+                                                            label,
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        self.selected_scenario = Some(index);
+                                                        self.selected_consist = None;
+                                                        self.scenario_consist_info = None;
+                                                        self.scenario_window_open = true;
+                                                    }
                                         }
                                     });
                             }
@@ -2189,7 +2034,7 @@ impl eframe::App for CheckerApp {
                                         self.asset_replacement.is_none()
                                             && self.inventory_scan.is_none()
                                             && self.umlaut_repair.is_none()
-                                            && self.pending_umlaut_repair.is_none(),
+                                            ,
                                         |ui| {
                                             ui.checkbox(
                                                 &mut self.ignore_scenarios,
@@ -2203,7 +2048,7 @@ impl eframe::App for CheckerApp {
                                         && self.inventory_scan.is_none()
                                         && self.asset_replacement.is_none()
                                         && self.umlaut_repair.is_none()
-                                        && self.pending_umlaut_repair.is_none();
+                                        ;
                                     if ui
                                         .add_enabled(
                                             can_check,
@@ -2294,6 +2139,25 @@ impl eframe::App for CheckerApp {
                                                 },
                                             );
                                         }
+                                        // Сценарии маршрута: в них лежат поезда и
+                                        // техника, а объекты маршрута — в корне.
+                                        if !result.scenarios.is_empty() {
+                                            egui::CollapsingHeader::new(format!(
+                                                "Сценариев маршрута: {}",
+                                                result.scenarios.len()
+                                            ))
+                                            .default_open(false)
+                                            .show(ui, |ui| {
+                                                for scenario in &result.scenarios {
+                                                    ui.label(format!(
+                                                        "{} — файлов: {}",
+                                                        scenario.name, scenario.file_count
+                                                    ));
+                                                }
+                                            });
+                                        }
+                                        // Отсутствующих ассетов бывают десятки,
+                                        // поэтому весь список свёрнут.
                                         if result.missing_assets.is_empty() {
                                             ui.colored_label(
                                                 egui::Color32::LIGHT_GREEN,
@@ -2301,185 +2165,180 @@ impl eframe::App for CheckerApp {
                                             );
                                         } else {
                                             let missing_assets = result.missing_assets.clone();
-                                            ui.colored_label(
-                                                egui::Color32::LIGHT_RED,
-                                                format!(
-                                                    "Отсутствует ассетов: {}",
-                                                    missing_assets.len()
-                                                ),
-                                            );
                                             let replacement_busy = checking
                                                 || self.inventory_scan.is_some()
                                                 || self.asset_replacement.is_some()
                                                 || self.umlaut_repair.is_some()
-                                                || self.pending_umlaut_repair.is_some()
                                                 || self.selected_route.is_none();
                                             if self.asset_replacement.is_some() {
                                                 ui.label(
                                                     "Не закрывайте программу, пока выполняется замена объектов.",
                                                 );
                                             }
-                                            egui::ScrollArea::vertical()
-                                                .id_salt("missing_assets")
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    for (kind, heading) in [
-                                                        (AssetKind::Loft, "Loft (Networks)"),
-                                                        (AssetKind::Scenery, "Scenery"),
-                                                        (AssetKind::Other, "Другие типы"),
-                                                    ] {
-                                                        let assets: Vec<_> = missing_assets
-                                                            .iter()
-                                                            .filter(|asset| {
-                                                                asset_kind(&asset.path) == kind
-                                                            })
-                                                            .cloned()
-                                                            .collect();
-                                                        if assets.is_empty() {
-                                                            continue;
-                                                        }
-                                                        ui.collapsing(
-                                                            format!(
-                                                                "{heading} ({})",
-                                                                assets.len()
-                                                            ),
-                                                            |ui| {
-                                                                for asset in &assets {
-                                                                    ui.horizontal(|ui| {
-                                                                        ui.colored_label(
-                                                                            egui::Color32::LIGHT_RED,
-                                                                            &asset.path,
-                                                                        );
-                                                                        if ui
-                                                                            .add_enabled(
-                                                                                !replacement_busy,
-                                                                                egui::Button::new("Заменить во всём маршруте..."),
-                                                                            )
-                                                                            .clicked()
-                                                                        {
-                                                                            replace_asset_request =
-                                                                                Some(asset.clone());
-                                                                        }
-                                                                    });
-                                                                    let mut uses_by_tile: HashMap<
-                                                                        String,
-                                                                        Vec<String>,
-                                                                    > = HashMap::new();
-                                                                    for usage in &asset.uses {
-                                                                        let route_relative =
-                                                                            self.selected_route
-                                                                                .and_then(|index| self.routes.get(index))
-                                                                                .and_then(|route| usage.source_file.strip_prefix(&route.path).ok())
-                                                                                .map(|path| path.display().to_string())
-                                                                                .unwrap_or_else(|| usage.source_file.display().to_string());
-                                                                        uses_by_tile
-                                                                            .entry(usage.tile.clone())
-                                                                            .or_default()
-                                                                            .push(route_relative);
-                                                                    }
-                                                                    let mut tiles: Vec<_> =
-                                                                        uses_by_tile.into_iter().collect();
-                                                                    tiles.sort_by(|left, right| left.0.cmp(&right.0));
-                                                                    ui.indent(
-                                                                        ("asset_uses", &asset.path),
-                                                                        |ui| {
-                                                                            ui.label(format!(
-                                                                                "Использований: {}",
-                                                                                asset.uses.len()
-                                                                            ));
-                                                                            for (tile, files) in tiles {
-                                                                                ui.label(format!("• {} ({})", tile.trim_start_matches("тайл "), files.len()));
-                                                                            }
-                                                                        },
-                                                                    );
+                                            egui::CollapsingHeader::new(
+                                                egui::RichText::new(format!(
+                                                    "Отсутствует ассетов: {}",
+                                                    missing_assets.len()
+                                                ))
+                                                .color(egui::Color32::LIGHT_RED),
+                                            )
+                                            .default_open(false)
+                                            .show(ui, |ui| {
+                                                    egui::ScrollArea::vertical()
+                                                        .id_salt("missing_assets")
+                                                        .auto_shrink([false, false])
+                                                        .show(ui, |ui| {
+                                                            for (kind, heading) in [
+                                                                (AssetKind::Loft, "Loft (Networks)"),
+                                                                (AssetKind::Scenery, "Scenery"),
+                                                                (AssetKind::Other, "Unknown"),
+                                                            ] {
+                                                                let assets: Vec<_> = missing_assets
+                                                                    .iter()
+                                                                    .filter(|asset| {
+                                                                        asset_kind(&asset.path) == kind
+                                                                    })
+                                                                    .cloned()
+                                                                    .collect();
+                                                                if assets.is_empty() {
+                                                                    continue;
                                                                 }
-                                                            },
-                                                        );
-                                                    }
-                                                });
+                                                                ui.collapsing(
+                                                                    format!(
+                                                                        "{heading} ({})",
+                                                                        assets.len()
+                                                                    ),
+                                                                    |ui| {
+                                                                        for asset in &assets {
+                                                                            ui.horizontal(|ui| {
+                                                                                ui.colored_label(
+                                                                                    egui::Color32::LIGHT_RED,
+                                                                                    &asset.path,
+                                                                                );
+                                                                                if ui
+                                                                                    .add_enabled(
+                                                                                        !replacement_busy,
+                                                                                        egui::Button::new("Заменить во всём маршруте..."),
+                                                                                    )
+                                                                                    .clicked()
+                                                                                {
+                                                                                    replace_asset_request =
+                                                                                        Some(asset.clone());
+                                                                                }
+                                                                            });
+                                                                            let mut uses_by_tile: HashMap<
+                                                                                String,
+                                                                                Vec<String>,
+                                                                            > = HashMap::new();
+                                                                            for usage in &asset.uses {
+                                                                                let route_relative =
+                                                                                    self.selected_route
+                                                                                        .and_then(|index| self.routes.get(index))
+                                                                                        .and_then(|route| usage.source_file.route_name(&route.path))
+                                                                                        .unwrap_or_else(|| usage.source_file.display());
+                                                                                uses_by_tile
+                                                                                    .entry(usage.tile.clone())
+                                                                                    .or_default()
+                                                                                    .push(route_relative);
+                                                                            }
+                                                                            let mut tiles: Vec<_> =
+                                                                                uses_by_tile.into_iter().collect();
+                                                                            tiles.sort_by(|left, right| left.0.cmp(&right.0));
+                                                                            ui.indent(
+                                                                                ("asset_uses", &asset.path),
+                                                                                |ui| {
+                                                                                    ui.label(format!(
+                                                                                        "Использований: {}",
+                                                                                        asset.uses.len()
+                                                                                    ));
+                                                                                    for (tile, files) in tiles {
+                                                                                        ui.label(format!("• {} ({})", tile.trim_start_matches("тайл "), files.len()));
+                                                                                    }
+                                                                                },
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                );
+                                                            }
+                                                        });
+                                                },
+                                            );
                                         }
-
-                                        if result.umlaut_assets.is_empty() {
+                                        // Ассеты со сломанными символами: их немного,
+                                        // и они требуют действия.
+                                        let umlaut_assets = result.umlaut_assets.clone();
+                                        if umlaut_assets.is_empty() {
                                             ui.colored_label(
                                                 egui::Color32::LIGHT_GREEN,
-                                                "Ассетов с умляутами или подозрительным U+FFDF не обнаружено.",
+                                                "Ассетов со сломанными символами не обнаружено.",
                                             );
                                         } else {
-                                            let assets = result.umlaut_assets.clone();
                                             ui.colored_label(
                                                 egui::Color32::YELLOW,
                                                 format!(
-                                                    "Ассеты с умляутами или подозрительным U+FFDF — требуют проверки: {}",
-                                                    assets.len()
+                                                    "Ассетов со сломанными символами: {}",
+                                                    umlaut_assets.len()
                                                 ),
                                             );
-                                            egui::ScrollArea::vertical()
-                                                .id_salt("umlaut_assets")
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    for asset in assets {
-                                                        ui.horizontal(|ui| {
-                                                            ui.colored_label(
-                                                                egui::Color32::YELLOW,
-                                                                &asset.path,
-                                                            );
-                                                            let busy = checking
-                                                                || self.inventory_scan.is_some()
-                                                                || self.asset_replacement.is_some()
-                                                                || self.umlaut_repair.is_some()
-                                                                || self.pending_umlaut_repair.is_some()
-                                                                || self.selected_route.is_none();
-                                                            if ui
-                                                                .add_enabled(
-                                                                    !busy,
-                                                                    egui::Button::new(
-                                                                        "Транслитерировать цепочку...",
-                                                                    ),
-                                                                )
-                                                                .clicked()
-                                                            {
-                                                                repair_umlaut_request =
-                                                                    Some(asset.clone());
-                                                            }
-                                                        });
-                                                        for evidence in &asset.evidence {
-                                                            ui.small(format!("• {evidence}"));
-                                                        }
-                                                        let mut uses_by_tile: HashMap<
-                                                            String,
-                                                            Vec<String>,
-                                                        > = HashMap::new();
-                                                        for usage in &asset.uses {
-                                                            let path = self
-                                                                .selected_route
-                                                                .and_then(|index| self.routes.get(index))
-                                                                .and_then(|route| usage.source_file.strip_prefix(&route.path).ok())
-                                                                .map(|path| path.display().to_string())
-                                                                .unwrap_or_else(|| usage.source_file.display().to_string());
-                                                            uses_by_tile
-                                                                .entry(usage.tile.clone())
-                                                                .or_default()
-                                                                .push(path);
-                                                        }
-                                                        let mut tiles: Vec<_> =
-                                                            uses_by_tile.into_iter().collect();
-                                                        tiles.sort_by(|left, right| {
-                                                            left.0.cmp(&right.0)
-                                                        });
-                                                        ui.indent(
-                                                            ("umlaut_asset_uses", &asset.path),
-                                                            |ui| {
-                                                                for (tile, files) in tiles {
-                                                                    ui.label(format!("• {tile}"));
-                                                                    for file in files {
-                                                                        ui.small(file);
-                                                                    }
-                                                                }
-                                                            },
-                                                        );
+                                            let busy = checking
+                                                || self.inventory_scan.is_some()
+                                                || self.asset_replacement.is_some()
+                                                || self.umlaut_repair.is_some()
+                                                || self.selected_route.is_none();
+                                            for asset in umlaut_assets {
+                                                ui.horizontal(|ui| {
+                                                    ui.colored_label(
+                                                        egui::Color32::YELLOW,
+                                                        &asset.path,
+                                                    );
+                                                    if ui
+                                                        .add_enabled(
+                                                            !busy,
+                                                            egui::Button::new("Исправить"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        repair_umlaut_request =
+                                                            Some(asset.clone());
                                                     }
                                                 });
+                                                for evidence in &asset.evidence {
+                                                    ui.small(format!("• {evidence}"));
+                                                }
+                                                let mut uses_by_tile: HashMap<
+                                                    String,
+                                                    Vec<String>,
+                                                > = HashMap::new();
+                                                for usage in &asset.uses {
+                                                    let path = self
+                                                        .selected_route
+                                                        .and_then(|index| self.routes.get(index))
+                                                        .and_then(|route| usage.source_file.route_name(&route.path))
+                                                        .unwrap_or_else(|| usage.source_file.display());
+                                                    uses_by_tile
+                                                        .entry(usage.tile.clone())
+                                                        .or_default()
+                                                        .push(path);
+                                                }
+                                                let mut tiles: Vec<_> =
+                                                    uses_by_tile.into_iter().collect();
+                                                tiles.sort_by(|left, right| {
+                                                    left.0.cmp(&right.0)
+                                                });
+                                                ui.indent(
+                                                    ("umlaut_asset_uses", &asset.path),
+                                                    |ui| {
+                                                        for (tile, files) in tiles {
+                                                            ui.label(format!("• {tile}"));
+                                                            for file in files {
+                                                                ui.small(file);
+                                                            }
+                                                        }
+                                                    },
+                                                );
+                                            }
                                         }
+
                                     }
                                 });
                         });
@@ -2501,35 +2360,152 @@ impl eframe::App for CheckerApp {
                 .set_directory(&start_dir)
                 .pick_file();
             if let Some(replacement) = selected {
-                self.start_asset_replacement(missing, replacement);
+                // Показываем окно подтверждения: пользователь должен увидеть,
+                // какой ассет на какой меняется.
+                let inside_assets = replacement.strip_prefix(&assets_path).is_ok();
+                let replacement_relative = if inside_assets {
+                    replacement
+                        .strip_prefix(&assets_path)
+                        .unwrap_or(&replacement)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                } else {
+                    replacement.to_string_lossy().replace('\\', "/")
+                };
+                // Умляуты в новом ассете ищутся в фоне: проверка требует
+                // конвертации файла и занимает время.
+                let (umlaut_check_tx, umlaut_check) = mpsc::channel();
+                {
+                    let assets_path = assets_path.clone();
+                    let serz_path =
+                        preferred_serz_path(&PathBuf::from(self.rw_path.trim()));
+                    let relative = replacement_relative.clone();
+                    thread::spawn(move || {
+                        let (asset, error) =
+                            inspect_umlaut_asset(&relative, &[], &assets_path, &serz_path);
+                        let _ = umlaut_check_tx.send(match error {
+                            Some(error) => Err(error),
+                            None => Ok(asset),
+                        });
+                    });
+                }
+                self.pending_asset_replacement = Some(PendingAssetReplacement {
+                    missing,
+                    replacement,
+                    replacement_relative,
+                    inside_assets,
+                    umlaut_check: Some(umlaut_check),
+                    umlaut_result: None,
+                    transliterate: inside_assets,
+                });
             }
         }
-        if let Some(asset) = repair_umlaut_request {
-            self.pending_umlaut_repair = Some(asset);
-        }
-        if let Some(asset) = self.pending_umlaut_repair.clone() {
+        if let Some(mut pending) = self.pending_asset_replacement.take() {
+            // Забираем результат фоновой проверки нового ассета.
+            if let Some(receiver) = pending.umlaut_check.take() {
+                match receiver.try_recv() {
+                    Ok(result) => pending.umlaut_result = Some(result),
+                    Err(mpsc::TryRecvError::Empty) => pending.umlaut_check = Some(receiver),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        pending.umlaut_result = Some(Err("Проверка ассета прервалась.".to_owned()))
+                    }
+                }
+            }
             let mut confirm = false;
             let mut cancel = false;
-            egui::Window::new("Подтверждение транслитерации ассета")
+            let mut fixes = self.character_fixes.clone();
+            let old_kind = asset_kind(&pending.missing.path);
+            // Тип нового ассета известен из проверки: он определяется по
+            // содержимому файла, а не по имени папки.
+            let new_kind = match &pending.umlaut_result {
+                Some(Ok(Some(asset))) => asset.kind,
+                _ => asset_kind(&pending.replacement_relative),
+            };
+            let kind_error =
+                check_asset_kind_compatibility(&pending.missing.path, &pending.replacement_relative)
+                    .err();
+            egui::Window::new("Подтверждение замены ассета")
                 .collapsible(false)
                 .resizable(true)
-                .show(ctx, |ui| {
-                    ui.label(format!("Ассет: {}", asset.path));
-                    ui.label(
-                        "Будут транслитерированы имена и текст внутри BIN, связанные GeoPcDx и ссылки на TgPcDx. Если затронут TgPcDx, проверятся GeoPcDx во всём продукте.",
-                    );
-                    ui.label(
-                        "Папки Provider/Product и вложенные папки автоматически не переименовываются; если умляут есть в их именах, операция остановится без изменений.",
-                    );
-                    ui.label(
-                        "Перед установкой проверяются конфликты имён. Для каждого изменённого файла сохраняется исходник с суффиксом .bak1, .bak2 и далее.",
-                    );
-                    ui.label("Обнаружения:");
-                    for evidence in &asset.evidence {
-                        ui.small(evidence);
+                .default_size([620.0, 320.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Не хватает:");
+                    ui.indent(("old_asset", &pending.missing.path), |ui| {
+                        ui.colored_label(egui::Color32::LIGHT_RED, &pending.missing.path);
+                        ui.small(format!("Тип: {}", asset_kind_name(old_kind)));
+                    });
+                    ui.label("Новый ассет:");
+                    ui.indent(("new_asset", &pending.replacement_relative), |ui| {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_GREEN,
+                            &pending.replacement_relative,
+                        );
+                        ui.small(format!("Тип: {}", asset_kind_name(new_kind)));
+                    });
+                    let files: HashSet<_> = pending
+                        .missing
+                        .uses
+                        .iter()
+                        .map(|usage| usage.source_file.clone())
+                        .collect();
+                    ui.small(format!(
+                        "Будет изменено файлов маршрута: {}, заменено ссылок: {}.",
+                        files.len(),
+                        pending.missing.uses.len()
+                    ));
+                    if let Some(error) = &kind_error {
+                        ui.colored_label(egui::Color32::YELLOW, error);
+                    }
+                    ui.separator();
+                    match &pending.umlaut_result {
+                        None => {
+                            ui.label("Проверяем новый ассет на сломанные символы...");
+                        }
+                        Some(Err(error)) => {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!("Не удалось проверить новый ассет: {error}"),
+                            );
+                        }
+                        Some(Ok(None)) => {
+                            ui.small("В новом ассете не найдено сломанных символов.");
+                        }
+                        Some(Ok(Some(asset))) => {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                "В новом ассете есть сломанные символы:",
+                            );
+                            for evidence in &asset.evidence {
+                                ui.small(evidence);
+                            }
+                            if pending.inside_assets {
+                                if asset.needs_transliteration {
+                                    ui.checkbox(
+                                        &mut pending.transliterate,
+                                        "Переименовать новый ассет и связанные файлы под английские имена",
+                                    );
+                                    ui.small(
+                                        "Будут переименованы папка с ассетом, сам файл, ссылки внутри него и связанные объекты. Ссылка в маршруте будет обновлена на новое имя ассета.",
+                                    );
+                                }
+                                // Символы без правила перевода пользователь
+                                // заменяет сам.
+                                character_fix_inputs(ui, &asset.unsupported, &mut fixes);
+                            } else {
+                                ui.small(
+                                    "Новый ассет лежит вне папки Assets: переименовать его вместе со ссылками нельзя.",
+                                );
+                            }
+                        }
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Транслитерировать").clicked() {
+                        if ui
+                            .add_enabled(
+                                kind_error.is_none() && pending.umlaut_result.is_some(),
+                                egui::Button::new("Заменить"),
+                            )
+                            .clicked()
+                        {
                             confirm = true;
                         }
                         if ui.button("Отмена").clicked() {
@@ -2537,12 +2513,333 @@ impl eframe::App for CheckerApp {
                         }
                     });
                 });
+            // Введённые символы сохраняем сразу: иначе они теряются до
+            // следующего кадра.
+            self.character_fixes = fixes.clone();
             if cancel {
-                self.pending_umlaut_repair = None;
+                self.pending_asset_replacement = None;
             } else if confirm {
-                self.pending_umlaut_repair = None;
-                self.start_umlaut_repair(asset);
+                self.pending_asset_replacement = None;
+                // Пустое поле означает значение по умолчанию.
+                let mut effective = fixes;
+                if let Some(Ok(Some(asset))) = &pending.umlaut_result {
+                    for character in &asset.unsupported {
+                        effective
+                            .entry(*character)
+                            .or_insert_with(|| default_replacement(*character));
+                    }
+                }
+                self.character_fixes = effective.clone();
+                self.start_asset_replacement(
+                    pending.missing,
+                    pending.replacement,
+                    // Переводить имена нужно, только если в новом ассете есть
+                    // что переводить: иначе замена сорвётся на пустом месте.
+                    pending.transliterate
+                        && pending
+                            .umlaut_result
+                            .as_ref()
+                            .and_then(|result| result.as_ref().ok())
+                            .and_then(|asset| asset.as_ref())
+                            .is_some_and(|asset| asset.needs_transliteration),
+                    pending.replacement_relative,
+                    effective,
+                );
+            } else {
+                self.pending_asset_replacement = Some(pending);
             }
+        }
+        if let Some(asset) = repair_umlaut_request {
+            self.pending_umlaut_repair = Some(asset);
+        }
+        if let Some(asset) = self.pending_umlaut_repair.clone() {
+            let mut fixes = self.character_fixes.clone();
+            let decision = umlaut_repair_window(ui, &asset, &mut fixes);
+            // Введённые символы сохраняем сразу: иначе они теряются до
+            // следующего кадра.
+            self.character_fixes = fixes.clone();
+            match decision {
+                Some(RepairDecision::Cancel) => {
+                    self.pending_umlaut_repair = None;
+                }
+                Some(RepairDecision::Confirm) => {
+                    self.pending_umlaut_repair = None;
+                    // Пустое поле означает значение по умолчанию.
+                    let mut effective = fixes;
+                    for character in &asset.unsupported {
+                        effective
+                            .entry(*character)
+                            .or_insert_with(|| default_replacement(*character));
+                    }
+                    self.character_fixes = effective.clone();
+                    self.start_umlaut_repair(asset, effective);
+                }
+                None => {}
+            }
+        }
+
+        // Окно выбранного сценария: составы слева, вагоны и пути к ним — справа.
+        if self.scenario_window_open {
+            let mut close = false;
+
+            let scenario_index = match self.selected_scenario {
+                Some(index) => index,
+            None => {
+                close = true;
+                0usize
+            }
+            };
+
+            if close {
+                self.scenario_window_open = false;
+                return;
+            }
+
+            // Ленивая загрузка составов (Scenario.bin через Serz) — только при
+            // первом открытии окна этого сценария, а не для всех сценариев при
+            // выборе маршрута.
+            let needs_load = self
+                .scenarios
+                .get(scenario_index)
+                .map(|s| s.consists.is_none())
+                .unwrap_or(false);
+            if needs_load {
+                if let Some(scenario) = self.scenarios.get(scenario_index) {
+                    let scenario_path = scenario.path.clone();
+                    let serz_path = preferred_serz_path(Path::new(self.rw_path.trim()));
+                    let consists = crate::scenario::load_consists(&scenario_path, &serz_path, &scenario.drivers);
+                    if let Some(s) = self.scenarios.get_mut(scenario_index) {
+                        s.consists = Some(consists);
+                    }
+                }
+            }
+
+            let title = self.scenario_title();
+            let scenario = self
+                .scenarios
+                .get(scenario_index)
+                .cloned();
+            let rw_path = PathBuf::from(self.rw_path.trim());
+            let route_path = self
+                .selected_route
+                .and_then(|index| self.routes.get(index))
+                .map(|route| route.path.clone());
+            let mut selected_consist = self.selected_consist;
+
+            // Кэш наличия файлов для составов считается один раз при открытии
+            // сценария, а не при каждом кадре egui.
+            let consist_info: Vec<(String, bool)> = match scenario.as_ref() {
+                Some(scenario_ref) => match self.scenario_consist_info.take() {
+                    Some(info) => {
+                        self.scenario_consist_info = Some(info.clone());
+                        info
+                    }
+                    None => {
+                        // Не блокируем открытие окна: если составы ещё не
+                        // загружены, показываем без цвета; проверка файлов
+                        // выполняется, как только составы загружены.
+                        if scenario_ref.consists.is_none() {
+                            Vec::new()
+                        } else {
+                            let info: Vec<(String, bool)> =
+                                match scenario_ref.consists.as_ref() {
+                                    Some(consists) => consists
+                                        .iter()
+                                        .map(|consist| {
+                                            let all_exist = self
+                                                .consist_files_exist(
+                                                    consist,
+                                                    route_path.as_deref(),
+                                                    &rw_path,
+                                                );
+                                            let name = if consist.name.is_empty() {
+                                                "Неназванный состав".to_owned()
+                                            } else {
+                                                consist.name.clone()
+                                            };
+                                            (
+                                                format!(
+                                                    "{} ({} единиц)",
+                                                    name,
+                                                    consist.vehicles.len()
+                                                ),
+                                                all_exist,
+                                            )
+                                        })
+                                        .collect(),
+                                    None => Vec::new(),
+                                };
+                            self.scenario_consist_info = Some(info.clone());
+                            info
+                        }
+                    }
+                },
+                None => {
+                    self.scenario_consist_info = Some(Vec::new());
+                    Vec::new()
+                }
+            };
+
+            if scenario.is_none() {
+                close = true;
+            }
+
+            if let Some(scenario) = scenario.as_ref() {
+                let consist_count = scenario.consists.as_ref().map_or(0, |c| c.len());
+                let window = egui::Window::new(title)
+                    .open(&mut self.scenario_window_open)
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_size([900.0, 560.0]);
+
+                window.show(ui.ctx(), |ui| {
+                    ui.label(format!("Идентификатор: {}", scenario.id));
+                    ui.small(scenario.path.display().to_string());
+                    if !scenario.date.is_empty() {
+                        ui.label(format!("Дата: {}", scenario.date));
+                    }
+                    if !scenario.author.is_empty() {
+                        ui.label(format!("Автор: {}", scenario.author));
+                    }
+                    if !scenario.season.is_empty() {
+                        ui.label(format!("Сезон: {}", scenario.season));
+                    }
+                    if !scenario.duration.is_empty() {
+                        ui.label(format!("Длительность, мин: {}", scenario.duration));
+                    }
+                    if !scenario.start_time.is_empty() {
+                        ui.label(format!("Время начала: {}", scenario.start_time));
+                    }
+                    if !scenario.state.is_empty() {
+                        ui.label(format!("Состояние: {}", scenario.state));
+                    }
+                    if !scenario.player_consist.is_empty() {
+                        ui.label(format!("Состав игрока: {}", scenario.player_consist));
+                    }
+                    ui.separator();
+                    ui.label(format!(
+                        "Подвижных составов в сценарии: {}",
+                        consist_count
+                    ));
+
+                    ui.columns(2, |columns| {
+                        // Левая колонка: поезда сценария (имена из FrontEndDriverList).
+                        columns[0].vertical(|ui| {
+                            ui.heading("Поезда");
+                            egui::ScrollArea::vertical()
+                                .id_salt("scenario_consist_list")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    let consists = scenario.consists.as_ref();
+                                    if consists.map_or(true, |c| c.is_empty()) {
+                                        ui.label("Поезда не найдены.");
+                                    }
+                                    if let Some(consists) = consists {
+                                        for index in 0..consists.len() {
+                                            let selected = selected_consist == Some(index);
+                                            let all_exist = consist_info
+                                                .get(index)
+                                                .map(|(_, exist)| *exist)
+                                                .unwrap_or(false);
+                                            let color = if all_exist {
+                                                egui::Color32::LIGHT_GREEN
+                                            } else {
+                                                egui::Color32::LIGHT_RED
+                                            };
+                                            let (label, _) = consist_info
+                                                .get(index)
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            if ui
+                                                .selectable_label(
+                                                    selected,
+                                                    egui::RichText::new(&label).color(color),
+                                                )
+                                                .clicked()
+                                            {
+                                                selected_consist = Some(index);
+                                            }
+                                        }
+                                    }
+                                });
+                        });
+
+                        // Правая колонка: вагоны/локомотивы выбранного состава и пути к ним.
+                        columns[1].vertical(|ui| {
+                            ui.heading("Техника состава");
+                            let Some(consist_index) = selected_consist else {
+                                ui.label("Выберите поезд слева.");
+                                return;
+                            };
+                            let Some(consist) = scenario
+                                .consists
+                                .as_ref()
+                                .and_then(|c| c.get(consist_index))
+                            else {
+                                ui.label("Состав не найден.");
+                                return;
+                            };
+                            egui::ScrollArea::vertical()
+                                .id_salt("scenario_vehicle_list")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    if consist.vehicles.is_empty() {
+                                        ui.label("Техника не найдена.");
+                                    }
+                                    for vehicle in &consist.vehicles {
+                                        ui.group(|ui| {
+                                            ui.label(&vehicle.name);
+                                            let blueprint_response = ui.add(
+                                                egui::Label::new(&vehicle.blueprint)
+                                                    .sense(egui::Sense::click())
+                                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                                            );
+                                            if blueprint_response.double_clicked() {
+                                                if let Some(route_path) = route_path.as_deref() {
+                                                    if let Some(file_path) =
+                                                        resolve_blueprint_file(
+                                                            &rw_path,
+                                                            route_path,
+                                                            &vehicle.blueprint,
+                                                            &vehicle.provider,
+                                                            &vehicle.product,
+                                                        )
+                                                    {
+                                                        let folder = file_path
+                                                            .parent()
+                                                            .unwrap_or(&file_path)
+                                                            .to_path_buf();
+                                                        if let Err(error) =
+                                                            open_in_file_explorer(&folder)
+                                                        {
+                                                            ui.colored_label(
+                                                                egui::Color32::LIGHT_RED,
+                                                                error,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if !vehicle.provider.is_empty()
+                                                || !vehicle.product.is_empty()
+                                            {
+                                                ui.small(format!(
+                                                    "{}/{}",
+                                                    vehicle.provider, vehicle.product
+                                                ));
+                                            }
+                                        });
+                                    }
+                                });
+                        });
+                    });
+                });
+            }
+
+            if close {
+                self.scenario_window_open = false;
+            }
+            self.selected_consist = selected_consist;
         }
 
         if self.settings_window_open {
@@ -2550,7 +2847,7 @@ impl eframe::App for CheckerApp {
                 .open(&mut self.settings_window_open)
                 .collapsible(false)
                 .resizable(false)
-                .show(ctx, |ui| {
+                .show(ui.ctx(), |ui| {
                     ui.style_mut()
                         .text_styles
                         .insert(egui::TextStyle::Body, egui::FontId::proportional(18.0));
@@ -2571,9 +2868,9 @@ impl eframe::App for CheckerApp {
                         match save_route_thumbnail_setting(enabled) {
                             Ok(()) => {
                                 self.status = if enabled {
-                                    "Миниатюры маршрутов включены.".to_owned()
+                                    "Миниатюры маршрутов вкл.".to_owned()
                                 } else {
-                                    "Миниатюры маршрутов отключены.".to_owned()
+                                    "Миниатюры маршрутов откл.".to_owned()
                                 };
                             }
                             Err(error) => {
@@ -2583,7 +2880,7 @@ impl eframe::App for CheckerApp {
                         }
                     }
                     ui.small(
-                        "Иконки RouteInformation будут показываться в списке маршрутов и отчёте о неполных папках.",
+                        "Иконки RouteInformation будут показываться в списках маршрутов.",
                     );
                     ui.separator();
                     let previous_limit = self.serz_process_limit;
@@ -2592,14 +2889,14 @@ impl eframe::App for CheckerApp {
                             &mut self.serz_process_limit,
                             1..=maximum_serz_processes(),
                         )
-                        .text("Параллельные Serz-процессы"),
+                        .text("Потоков"),
                     );
                     if self.serz_process_limit != previous_limit {
                         let limit = self.serz_process_limit;
                         match save_serz_process_limit(limit) {
                             Ok(()) => {
                                 self.status = format!(
-                                    "Лимит параллельных Serz-процессов: {limit}."
+                                    "Лимит используемых потоков процессора: {limit}."
                                 );
                             }
                             Err(error) => {
@@ -2609,22 +2906,22 @@ impl eframe::App for CheckerApp {
                         }
                     }
                     ui.small(format!(
-                        "Доступно логических процессоров: {}. Это максимальное число одновременно запущенных Serz, не число потоков внутри каждого процесса.",
+                        "Доступно потоков: {}.",
                         maximum_serz_processes()
                     ));
                 });
         }
 
-        self.show_asset_editor(ctx);
+        self.show_asset_editor(ui);
 
         if self.ignore_list_window_open {
             egui::Window::new("Игнор-лист маршрутов")
                 .open(&mut self.ignore_list_window_open)
                 .default_size([520.0, 360.0])
                 .resizable(true)
-                .show(ctx, |ui| {
+                .show(ui.ctx(), |ui| {
                     ui.label(
-                        "Эти папки не будут отмечаться дефектными при сканировании. Удалите запись из списка, чтобы снова проверять папку.",
+                        "Эти маршруты не будут отмечаться неполными при сканировании. Удалите запись из списка, чтобы снова проверять папку.",
                     );
                     ui.separator();
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2654,13 +2951,13 @@ impl eframe::App for CheckerApp {
                         folder
                             .icon_path
                             .as_deref()
-                            .and_then(|icon_path| self.route_icon_texture_id(ctx, icon_path))
+                            .and_then(|icon_path| self.route_icon_texture_id(ui.ctx(), icon_path))
                     } else {
                         None
                     }
                 })
                 .collect();
-            let screen_size = ctx.input(|input| input.screen_rect().size());
+            let screen_size = ui.ctx().input(|input| input.content_rect().size());
             let max_window_size = egui::vec2(
                 (screen_size.x - 24.0).max(320.0),
                 (screen_size.y - 24.0).max(240.0),
@@ -2676,7 +2973,7 @@ impl eframe::App for CheckerApp {
             ])
             .max_size(max_window_size)
             .resizable(true)
-            .show(ctx, |ui| {
+            .show(ui.ctx(), |ui| {
                 ui.label(
                     "Сортировка по числу файлов",
                 );
@@ -2685,7 +2982,7 @@ impl eframe::App for CheckerApp {
                         Ok(count) => {
                             ui.colored_label(
                                 egui::Color32::LIGHT_GREEN,
-                                format!("Перемещено в Корзину Windows: {count} папок."),
+                                format!("Перемещено в корзину: {count} папок."),
                             );
                         }
                         Err(error) => {
@@ -2761,7 +3058,7 @@ impl eframe::App for CheckerApp {
                                     .wrap_mode(egui::TextWrapMode::Wrap),
                             );
                             ui.horizontal_wrapped(|ui| {
-                                if ui.button("Открыть в Проводнике").clicked() {
+                                if ui.button("В проводник").clicked() {
                                     open_folder_request = Some(folder.path.clone());
                                 }
                                 if !self.ignored_route_ids.contains(&folder.id)
@@ -2798,7 +3095,7 @@ impl eframe::App for CheckerApp {
                                 {
                                     if let Some(name) = &folder.suggested_name {
                                         ui.label(format!(
-                                            "Возможное название маршрута: {name}"
+                                            "Теоретическое название маршрута: {name}"
                                         ));
                                     }
                                     for problem in &folder.problems {
@@ -2808,7 +3105,7 @@ impl eframe::App for CheckerApp {
                                         ui.separator();
                                         ui.heading("Подсказки из сценариев");
                                         ui.label(
-                                            "Названия сценариев и упомянутые места могут помочь опознать маршрут; это подсказки, а не гарантированный список станций.",
+                                            "Описания сценариев и упомянутые места могут помочь опознать маршрут.",
                                         );
                                         for clue in &folder.scenario_clues {
                                             ui.add(
@@ -2908,12 +3205,11 @@ impl eframe::App for CheckerApp {
             egui::Window::new("Подтверждение удаления")
                 .collapsible(false)
                 .resizable(true)
-                .show(ctx, |ui| {
+                .show(ui.ctx(), |ui| {
                     ui.label(format!(
                         "Переместить в корзину все {}?",
                         folders.len()
                     ));
-                    ui.label("Перед удалением будет проверено, что каждая папка является непосредственной папкой внутри Content\\Routes.");
                     egui::ScrollArea::vertical()
                         .max_height(160.0)
                         .show(ui, |ui| {
@@ -2922,7 +3218,7 @@ impl eframe::App for CheckerApp {
                             }
                         });
                     ui.horizontal(|ui| {
-                        if ui.button("Переместить в Корзину").clicked() {
+                        if ui.button("В корзину").clicked() {
                             confirm = true;
                         }
                         if ui.button("Отмена").clicked() {
@@ -2936,6 +3232,6 @@ impl eframe::App for CheckerApp {
                 self.start_delete(folders);
             }
         }
-        self.show_asset_inventory_viewport(ctx);
+        self.show_asset_inventory_viewport(ui.ctx());
     }
 }

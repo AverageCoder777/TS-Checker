@@ -66,6 +66,14 @@ struct CheckResult {
     umlaut_assets: Vec<UmlautAsset>,
     conversion_errors: Vec<String>,
     structure_issues: Vec<String>,
+    scenarios: Vec<ScenarioInfo>,
+}
+
+/// Сценарий маршрута: имя папки и сколько в ней файлов.
+#[derive(Clone)]
+struct ScenarioInfo {
+    name: String,
+    file_count: usize,
 }
 
 #[derive(Clone)]
@@ -86,19 +94,177 @@ struct UmlautAsset {
     path: String,
     uses: Vec<AssetUse>,
     evidence: Vec<String>,
+    /// Символы, которые игра не умеет загружать: их пользователь заменяет сам.
+    unsupported: Vec<char>,
+    /// Тип ассета: scenery, loft или что-то другое.
+    kind: AssetKind,
+    /// Нужно ли переводить имена ассета в английские.
+    needs_transliteration: bool,
 }
 
 #[derive(Clone)]
 struct AssetUse {
-    source_file: PathBuf,
+    source_file: RouteFile,
     tile: String,
+    /// Что за объект: объект маршрута, файл состава или что-то другое.
+    kind: AssetKind,
+}
+
+/// Файл маршрута: обычный файл на диске или запись архива .ap.
+///
+/// Игра читает архив .ap так, будто его нет: записи лежат рядом с файлами
+/// маршрута. Поэтому архив читается прямо из zip, без распаковки целиком.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum RouteFile {
+    /// Файл лежит на диске.
+    Path(PathBuf),
+    /// Запись архива .ap.
+    Archive { archive: PathBuf, name: String },
+}
+
+impl RouteFile {
+    /// Имя файла маршрута относительно его папки.
+    pub(crate) fn route_name(&self, route_path: &Path) -> Option<String> {
+        match self {
+            RouteFile::Path(path) => {
+                let relative = path.strip_prefix(route_path).ok()?;
+                Some(relative.to_string_lossy().replace('\\', "/"))
+            }
+            RouteFile::Archive { name, .. } => Some(name.replace('\\', "/")),
+        }
+    }
+
+    /// Имя файла без папок: по нему определяется тайл.
+    pub(crate) fn file_name(&self) -> String {
+        match self {
+            RouteFile::Path(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            RouteFile::Archive { name, .. } => Path::new(name)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Куда класть изменённую версию файла.
+    ///
+    /// Запись архива кладётся рядом с архивом: игра читает сначала архив, а
+    /// потом файлы рядом с ним, поэтому изменённая версия перекроет оригинал, а
+    /// сам архив останется нетронутым.
+    pub(crate) fn install_target(&self, route_path: &Path) -> PathBuf {
+        match self {
+            RouteFile::Path(path) => path.clone(),
+            RouteFile::Archive { name, .. } => route_path.join(name.replace('\\', "/")),
+        }
+    }
+
+    /// Готовит файл на диске: запись архива распаковывается во временный файл.
+    pub(crate) fn materialize(&self, temp_dir: &Path) -> Result<PathBuf, String> {
+        let RouteFile::Archive { archive, name } = self else {
+            let RouteFile::Path(path) = self else {
+                unreachable!()
+            };
+            return Ok(path.clone());
+        };
+        let file = fs::File::open(archive)
+            .map_err(|error| format!("Не удалось открыть архив {}: {error}", archive.display()))?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|error| {
+            format!("Не удалось прочитать архив {}: {error}", archive.display())
+        })?;
+        let mut member = zip
+            .by_name(name)
+            .map_err(|error| format!("Не удалось прочитать {name} из архива: {error}"))?;
+        let relative = Path::new(name);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(format!("Недопустимый путь внутри архива: {name}"));
+        }
+        let target = temp_dir.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Не удалось создать папку {}: {error}", parent.display()))?;
+        }
+        let mut output = fs::File::create(&target)
+            .map_err(|error| format!("Не удалось создать файл {}: {error}", target.display()))?;
+        std::io::copy(&mut member, &mut output)
+            .map_err(|error| format!("Не удалось распаковать {name}: {error}"))?;
+        Ok(target)
+    }
+
+    /// Расширение файла.
+    pub(crate) fn extension(&self) -> Option<String> {
+        match self {
+            RouteFile::Path(path) => path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.to_owned()),
+            RouteFile::Archive { name, .. } => Path::new(name)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.to_owned()),
+        }
+    }
+
+    /// Как файл показывать в интерфейсе.
+    pub(crate) fn display(&self) -> String {
+        match self {
+            RouteFile::Path(path) => path.display().to_string(),
+            RouteFile::Archive { archive, name } => {
+                format!("{}!{}", archive.display(), name)
+            }
+        }
+    }
+
+    /// Признаки файла для кэша разбора.
+    pub(crate) fn stamp(&self) -> Option<crate::analysis_cache::FileStamp> {
+        match self {
+            RouteFile::Path(path) => crate::analysis_cache::FileStamp::of(path),
+            // У записи архива признаки берутся у самого архива: когда он меняется,
+            // меняются и все его записи.
+            RouteFile::Archive { archive, .. } => crate::analysis_cache::FileStamp::of(archive),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AssetKind {
     Loft,
     Scenery,
+    /// Файл состава: в XML он лежит внутри `iRailVehicleBlueprint`.
+    Vehicle,
     Other,
+}
+
+impl AssetKind {
+    /// Файл состава — это поезд, а не объект маршрута.
+    pub(crate) fn is_vehicle(self) -> bool {
+        self == AssetKind::Vehicle
+    }
+
+    /// Код типа для кэша разбора.
+    pub(crate) fn to_code(self) -> u8 {
+        match self {
+            AssetKind::Loft => 0,
+            AssetKind::Scenery => 1,
+            AssetKind::Vehicle => 2,
+            AssetKind::Other => 3,
+        }
+    }
+
+    /// Восстанавливает тип по коду из кэша.
+    pub(crate) fn from_code(code: u8) -> Self {
+        match code {
+            0 => AssetKind::Loft,
+            1 => AssetKind::Scenery,
+            2 => AssetKind::Vehicle,
+            _ => AssetKind::Other,
+        }
+    }
 }
 
 struct AssetReplacementReport {
@@ -108,6 +274,25 @@ struct AssetReplacementReport {
     replacement_asset: String,
     log_file: Option<PathBuf>,
     log_error: Option<String>,
+}
+
+/// Замена ассета, выбранная пользователем и ждущая подтверждения в окне.
+struct PendingAssetReplacement {
+    /// Ассет, которого не хватает в маршруте.
+    missing: MissingAsset,
+    /// Выбранный файл нового ассета.
+    replacement: PathBuf,
+    /// Путь нового ассета относительно папки Assets.
+    replacement_relative: String,
+    /// Находится ли новый ассет внутри папки Assets: только там его можно
+    /// переименовать вместе со ссылками.
+    inside_assets: bool,
+    /// Проверка нового ассета на умляуты: выполняется в фоне.
+    umlaut_check: Option<mpsc::Receiver<Result<Option<UmlautAsset>, String>>>,
+    /// Результат проверки на умляуты.
+    umlaut_result: Option<Result<Option<UmlautAsset>, String>>,
+    /// Переименовать новый ассет и связанные файлы под английские имена.
+    transliterate: bool,
 }
 
 struct UmlautRepairReport {
@@ -127,7 +312,7 @@ struct AssetReplacementLogEntry {
     route_id: Option<String>,
     route_name: Option<String>,
     route_path: Option<PathBuf>,
-    original_files: Vec<PathBuf>,
+    original_files: Vec<String>,
     missing_asset: Option<String>,
     replacement_asset: Option<String>,
     replaced_files: usize,
@@ -139,7 +324,7 @@ struct AssetReplacementLogEntry {
 #[derive(Serialize)]
 struct AssetReplacementLogUse {
     tile: String,
-    source_file: PathBuf,
+    source_file: String,
 }
 
 struct RouteScanOutcome {
@@ -161,15 +346,25 @@ struct RouteScanCache {
 mod analysis_cache;
 mod app;
 mod assets;
+mod dialogs;
 mod editor;
+mod inventory_ui;
+mod reference;
 mod routes;
+mod scenario;
 mod settings;
+mod translit;
 mod windows;
 
 pub(crate) use assets::*;
+pub(crate) use dialogs::*;
 pub(crate) use editor::*;
+pub(crate) use inventory_ui::*;
+pub(crate) use reference::*;
 pub(crate) use routes::*;
+pub(crate) use scenario::*;
 pub(crate) use settings::*;
+pub(crate) use translit::*;
 pub(crate) use windows::*;
 
 fn parse_asset_launch_args(
@@ -657,7 +852,7 @@ mod tests {
         archive
             .start_file(
                 "RouteInformation/Image.png",
-                zip::write::FileOptions::default(),
+                zip::write::SimpleFileOptions::default(),
             )
             .unwrap();
         archive.write_all(b"archived image").unwrap();
@@ -787,7 +982,7 @@ mod tests {
         let archive_path = route_path.join("route-data.ap");
         let archive_file = fs::File::create(&archive_path).unwrap();
         let mut archive = zip::ZipWriter::new(archive_file);
-        let options = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         archive.start_file("RouteProperties.xml", options).unwrap();
         archive
             .write_all(b"<DisplayName><English>Archived Route</English></DisplayName>")

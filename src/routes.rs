@@ -319,7 +319,10 @@ pub(crate) fn inspect_route_folder(
             let mut member = archive
                 .by_index(index)
                 .map_err(|error| format!("Ошибка в архиве {}: {error}", child_path.display()))?;
-            let member_name = member.name().replace('\\', "/").to_owned();
+            let member_name = match member.name() {
+                Ok(name) => name.replace('\\', "/"),
+                Err(_) => continue,
+            };
             if member.is_file()
                 && member_name
                     .rsplit('/')
@@ -599,7 +602,10 @@ pub(crate) fn find_route_icon_with_cache(
             let member = archive
                 .by_index(index)
                 .map_err(|error| format!("Ошибка в архиве {}: {error}", entry.path().display()))?;
-            let member_name = member.name().replace('\\', "/");
+            let member_name = match member.name() {
+                Ok(name) => name.replace('\\', "/"),
+                Err(_) => continue,
+            };
             if !member.is_file() || !is_route_information_image(&member_name) {
                 continue;
             }
@@ -894,9 +900,12 @@ pub(crate) fn read_route_name(route_path: &Path, fallback: &str) -> Result<Strin
                     let mut member = archive.by_index(index).map_err(|error| {
                         format!("Ошибка в архиве {}: {error}", entry.path().display())
                     })?;
+                    let member_name = match member.name() {
+                        Ok(name) => name.to_string(),
+                        Err(_) => continue,
+                    };
                     if !member.is_file()
-                        || !member
-                            .name()
+                        || !member_name
                             .rsplit(['/', '\\'])
                             .next()
                             .is_some_and(|name| name.eq_ignore_ascii_case("RouteProperties.xml"))
@@ -958,44 +967,4 @@ pub(crate) fn parse_route_name(xml: &str) -> Option<String> {
         .find(|(is_english, _)| *is_english)
         .or_else(|| values.first())
         .map(|(_, name)| name.clone())
-}
-
-pub(crate) fn decode_xml_text(text: &str) -> String {
-    let mut decoded = String::with_capacity(text.len());
-    let mut remaining = text;
-    while let Some(ampersand) = remaining.find('&') {
-        decoded.push_str(&remaining[..ampersand]);
-        remaining = &remaining[ampersand + 1..];
-        let Some(semicolon) = remaining.find(';') else {
-            decoded.push('&');
-            continue;
-        };
-        let entity = &remaining[..semicolon];
-        let character = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            value if value.starts_with("#x") || value.starts_with("#X") => {
-                u32::from_str_radix(&value[2..], 16)
-                    .ok()
-                    .and_then(char::from_u32)
-            }
-            value if value.starts_with('#') => {
-                value[1..].parse::<u32>().ok().and_then(char::from_u32)
-            }
-            _ => None,
-        };
-        if let Some(character) = character {
-            decoded.push(character);
-        } else {
-            decoded.push('&');
-            decoded.push_str(entity);
-            decoded.push(';');
-        }
-        remaining = &remaining[semicolon + 1..];
-    }
-    decoded.push_str(remaining);
-    decoded.trim().to_owned()
 }

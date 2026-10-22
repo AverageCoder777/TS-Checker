@@ -98,6 +98,62 @@ pub(crate) fn collect_route_files(
         })
 }
 
+/// Читает записи архивов .ap маршрута.
+///
+/// Записи возвращаются как виртуальные файлы: архив не распаковывается целиком,
+/// игра читает его так, будто его нет.
+pub(crate) fn collect_archive_members(
+    route_path: &Path,
+) -> Result<Vec<RouteFile>, String> {
+    let mut members = Vec::new();
+    let entries = fs::read_dir(route_path)
+        .map_err(|error| format!("Не удалось прочитать папку маршрута: {error}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file()
+            || !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ap"))
+        {
+            continue;
+        }
+        let file = fs::File::open(&path)
+            .map_err(|error| format!("Не удалось открыть архив {}: {error}", path.display()))?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|error| {
+            format!("Не удалось прочитать архив {}: {error}", path.display())
+        })?;
+        for index in 0..zip.len() {
+            let Ok(member) = zip.by_index(index) else {
+                continue;
+            };
+            if !member.is_file() {
+                continue;
+            }
+            let Ok(name) = member.name() else {
+                continue;
+            };
+            let relative = Path::new(name.as_ref());
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                continue;
+            }
+            if !relative.extension().is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("xml")
+            }) {
+                continue;
+            }
+            members.push(RouteFile::Archive {
+                archive: path.clone(),
+                name: name.into_owned(),
+            });
+        }
+    }
+    Ok(members)
+}
+
 pub(crate) fn unexpected_route_directories(route_path: &Path) -> Result<Vec<String>, String> {
     let entries = fs::read_dir(route_path)
         .map_err(|error| format!("Не удалось прочитать {}: {error}", route_path.display()))?;
@@ -160,99 +216,15 @@ struct FileAnalysis {
     converted_bin: bool,
     /// Разбор взят из кэша: файл не менялся с прошлой проверки.
     from_cache: bool,
-    file_path: PathBuf,
+    file: RouteFile,
     /// Сколько раз каждый ассет встречается в файле.
-    uses: Vec<(String, u32)>,
+    uses: Vec<(String, u32, AssetKind)>,
     error: Option<String>,
 }
 
-#[derive(Clone)]
-struct AssetReference {
-    path: String,
-    provider_range: std::ops::Range<usize>,
-    product_range: std::ops::Range<usize>,
-    blueprint_range: std::ops::Range<usize>,
-}
-
-/// Испорченные символы, которые встречаются в ссылках маршрута вместо умляута.
 ///
-/// U+FFFD — стандартный символ замены, U+FFDF — такой же непечатаемый символ,
-/// который раньше встречался в ссылках маршрутов.
-pub(crate) const BROKEN_CHARACTERS: [char; 2] = ['\u{FFFD}', '\u{FFDF}'];
-
-/// Настоящие умляуты, которыми может быть назван файл ассета.
-const UMLAUT_CHARACTERS: [&str; 8] = ["ä", "Ä", "ö", "Ö", "ü", "Ü", "ß", "ẞ"];
-
-/// Транслитерации умляутов, которыми могли оказаться переименованы файлы.
-const TRANSLITERATED_CHARACTERS: [&str; 8] = ["ae", "Ae", "oe", "Oe", "ue", "Ue", "ss", "SS"];
-
-/// Сколько испорченных символов в ссылке ещё разбираются.
-const MAX_BROKEN_CHARACTERS: usize = 3;
-
-/// Имя элемента, без которого в файле нет ни одной ссылки на ассет.
-const BLUEPRINT_ID_MARKER: &str = "BlueprintID";
-
-fn transliterate_umlauts(value: &str) -> String {
-    value
-        .replace('ä', "ae")
-        .replace('Ä', "Ae")
-        .replace('ö', "oe")
-        .replace('Ö', "Oe")
-        .replace('ü', "ue")
-        .replace('Ü', "Ue")
-        .replace('ß', "ss")
-        .replace('ẞ', "SS")
-        .replace('\u{FFDF}', "ss")
-        .replace('\u{FFFD}', "ss")
-}
-
-fn has_umlauts(value: &str) -> bool {
-    value.chars().any(|character| {
-        matches!(character, 'ä' | 'Ä' | 'ö' | 'Ö' | 'ü' | 'Ü' | 'ß' | 'ẞ')
-            || BROKEN_CHARACTERS.contains(&character)
-    })
-}
-
-/// Есть ли в строке испорченный символ.
-fn has_broken_character(value: &str) -> bool {
-    value
-        .chars()
-        .any(|character| BROKEN_CHARACTERS.contains(&character))
-}
-
-/// Заменяет испорченные символы в имени на переданную подстановку.
-fn replace_broken_characters(name: &str, replacement: &str) -> String {
-    BROKEN_CHARACTERS
-        .iter()
-        .fold(name.to_owned(), |value, character| {
-            value.replace(*character, replacement)
-        })
-}
-
-/// Варианты имени, где каждый испорченный символ заменён по отдельности.
-///
-/// Например, `Br\u{FFFD}cke Fu\u{FFFD}g\u{FFFD}nger` превращается в
-/// `Brücke Fußgänger`, `Brücke Fussganger` и другие комбинации. Число вариантов
-/// растёт как степень количества подстановок, поэтому ссылка с большим числом
-/// испорченных символов не разбирается вовсе.
-fn replace_broken_characters_combinations(name: &str, replacements: &[&str]) -> Vec<String> {
-    let mut variants = vec![String::new()];
-    for character in name.chars() {
-        let mut next = Vec::new();
-        for variant in &variants {
-            if BROKEN_CHARACTERS.contains(&character) {
-                for replacement in replacements {
-                    next.push(format!("{variant}{replacement}"));
-                }
-            } else {
-                next.push(format!("{variant}{character}"));
-            }
-        }
-        variants = next;
-    }
-    variants
-}
-
+/// Сломанный символ U+FFFD в ожидаемом имени совпадает с любым символом,
+/// регистр не учитывается. Возвращает `None`, если имена слишком разные.
 /// Похожий файл, найденный рядом с утерянным ассетом.
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -262,12 +234,6 @@ pub(crate) struct SimilarAssetFile {
     /// Сколько символов в имени отличается от ожидаемого.
     pub distance: usize,
 }
-
-/// Сколько символов отличается в двух именах.
-///
-/// Сломанный символ U+FFFD в ожидаемом имени совпадает с любым символом,
-/// регистр не учитывается. Возвращает `None`, если имена слишком разные.
-#[allow(dead_code)]
 fn name_distance(expected: &str, candidate: &str) -> Option<usize> {
     let expected: Vec<char> = expected.chars().collect();
     let candidate: Vec<char> = candidate.chars().collect();
@@ -291,6 +257,84 @@ fn name_distance(expected: &str, candidate: &str) -> Option<usize> {
     let distance = previous[candidate.len()];
     let limit = if expected.len() <= 10 { 1 } else { 2 };
     (distance <= limit).then_some(distance)
+}
+
+/// Буквы, которые выглядят одинаково, но различаются кодом.
+///
+/// В именах файлов игры встречается кириллическая «Е» вместо латинской: такой
+/// файл нужно найти, но спутать его с другим нельзя.
+const HOMOGLYPHS: [(char, char); 46] = [
+    ('а', 'a'),
+    ('б', 'b'),
+    ('в', 'b'),
+    ('г', 'r'),
+    ('д', 'd'),
+    ('е', 'e'),
+    ('ё', 'e'),
+    ('ж', 'x'),
+    ('з', '3'),
+    ('и', 'u'),
+    ('й', 'u'),
+    ('к', 'k'),
+    ('л', 'l'),
+    ('м', 'm'),
+    ('н', 'h'),
+    ('о', 'o'),
+    ('п', 'n'),
+    ('р', 'p'),
+    ('с', 'c'),
+    ('т', 't'),
+    ('у', 'y'),
+    ('ф', 'f'),
+    ('х', 'x'),
+    ('ц', 'u'),
+    ('ч', '4'),
+    ('ш', 'w'),
+    ('щ', 'w'),
+    ('ъ', 'b'),
+    ('ы', 'b'),
+    ('ь', 'b'),
+    ('э', 'e'),
+    ('ю', 'i'),
+    ('я', 'r'),
+    ('с', 'c'),
+    // Прописные буквы, похожие на латинские.
+    ('А', 'A'),
+    ('В', 'B'),
+    ('Е', 'E'),
+    ('К', 'K'),
+    ('М', 'M'),
+    ('Н', 'H'),
+    ('О', 'O'),
+    ('Р', 'P'),
+    ('С', 'C'),
+    ('Т', 'T'),
+    ('У', 'Y'),
+    ('Х', 'X'),
+];
+
+/// Являются ли две буквы похожими начертанием.
+fn is_homoglyph(left: char, right: char) -> bool {
+    HOMOGLYPHS
+        .iter()
+        .any(|(first, second)| (*first == left && *second == right) || (*first == right && *second == left))
+}
+
+/// Совпадают ли имена, если считать похожие буквы одинаковыми.
+///
+/// Отличаться могут только буквы-«двойники» и испорченные символы: любые другие
+/// различия означают, что это другой файл.
+fn names_match(expected: &str, candidate: &str) -> bool {
+    let expected: Vec<char> = expected.chars().collect();
+    let candidate: Vec<char> = candidate.chars().collect();
+    expected.len() == candidate.len()
+        && expected.iter().zip(candidate.iter()).all(|(left, right)| {
+            left == right
+                || left.eq_ignore_ascii_case(right)
+                || BROKEN_CHARACTERS.contains(left)
+                || BROKEN_CHARACTERS.contains(right)
+                || is_homoglyph(*left, *right)
+        })
 }
 
 /// Ищет рядом с утерянным ассетом файлы с очень похожим именем.
@@ -360,7 +404,9 @@ fn resolve_asset_path(assets_path: &Path, relative_asset: &str) -> Result<Option
         return Ok(Some(exact));
     }
     if !has_broken_character(relative_asset) {
-        return Ok(None);
+        // Файла нет по точному имени: ищем ближайший по сходству. В игре
+        // встречаются имена с кириллическими буквами вместо латинских.
+        return Ok(find_similar_asset_path(assets_path, relative_asset));
     }
     let broken_count = relative_asset
         .chars()
@@ -391,7 +437,7 @@ fn resolve_asset_path(assets_path: &Path, relative_asset: &str) -> Result<Option
         }
     }
     match candidates.len() {
-        0 => Ok(None),
+        0 => Ok(find_similar_asset_path(assets_path, relative_asset)),
         1 => Ok(Some(candidates.remove(0).0)),
         _ => Err(format!(
             "Ссылка содержит испорченный символ и совпадает с несколькими файлами: {}",
@@ -404,34 +450,36 @@ fn resolve_asset_path(assets_path: &Path, relative_asset: &str) -> Result<Option
     }
 }
 
-fn has_umlauts_in_xml(xml: &str) -> bool {
-    has_umlauts(&decode_xml_text(xml))
-}
-
-fn transliterate_xml_umlauts(xml: &str) -> String {
-    let mut output = String::with_capacity(xml.len());
-    let mut remaining = xml;
-    while let Some(ampersand) = remaining.find('&') {
-        output.push_str(&transliterate_umlauts(&remaining[..ampersand]));
-        remaining = &remaining[ampersand..];
-        let Some(semicolon) = remaining.find(';') else {
-            output.push_str(&transliterate_umlauts(remaining));
-            return output;
-        };
-        let entity_end = semicolon + 1;
-        let decoded = decode_xml_text(&remaining[..entity_end]);
-        if decoded.chars().count() == 1 && has_umlauts(&decoded) {
-            output.push_str(&transliterate_umlauts(&decoded));
-        } else {
-            output.push_str(&remaining[..entity_end]);
+/// Ищет файл, похожий на указанный путь.
+///
+/// Имена в игре иногда отличаются от ссылок одной буквой: кириллическая «Е»
+/// вместо латинской или испорченный символ. Тогда ищем ближайшее по сходству.
+fn find_similar_asset_path(assets_path: &Path, relative_asset: &str) -> Option<PathBuf> {
+    let relative = relative_asset.replace('/', "\\");
+    let mut current = assets_path.to_path_buf();
+    let components: Vec<&str> = relative.split('\\').filter(|part| !part.is_empty()).collect();
+    for (index, component) in components.iter().enumerate() {
+        if index + 1 == components.len() {
+            // Сначала имя целиком, потом с расширениями: в ссылке расширение
+            // может быть, а может и отсутствовать.
+            if let Some(path) = find_entry_in_directory(&current, component, false) {
+                return Some(path);
+            }
+            for extension in ["bin", "GeoPcDx", "TgPcDx", "xml"] {
+                let wanted = format!("{component}.{extension}");
+                if let Some(path) = find_entry_in_directory(&current, &wanted, false) {
+                    return Some(path);
+                }
+            }
+            return None;
         }
-        remaining = &remaining[entity_end..];
+        current = find_entry_in_directory(&current, component, true)?;
     }
-    output.push_str(&transliterate_umlauts(remaining));
-    output
+    None
 }
 
-fn read_serz_xml(serz_path: &Path, asset_path: &Path) -> Result<String, String> {
+
+pub(crate) fn read_serz_xml(serz_path: &Path, asset_path: &Path) -> Result<String, String> {
     let temp = tempdir().map_err(|error| format!("Не удалось создать временную папку: {error}"))?;
     let xml_path = temp.path().join("asset.xml");
     let conversion = convert_bin_to_xml(serz_path, asset_path, &xml_path).or_else(|error| {
@@ -450,50 +498,359 @@ fn read_serz_xml(serz_path: &Path, asset_path: &Path) -> Result<String, String> 
         .map_err(|error| format!("Не удалось прочитать XML {}: {error}", xml_path.display()))
 }
 
+/// Ссылка на объект ассета внутри XML RailWorks.
+///
+/// В игре такая ссылка выглядит как `Provider\Product\папка\[00]имя`: без
+/// расширения и с суффиксом варианта. Иногда расширение в ссылке всё же есть,
+/// поэтому разбираются оба вида.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GeometryReference {
+    /// Путь без суффикса варианта и без расширения.
+    path: String,
+    /// Суффикс варианта, например `[00]`.
+    variant: String,
+    /// Расширение из ссылки, если оно там было.
+    extension: Option<String>,
+}
+
+impl GeometryReference {
+    /// Разбирает текст ссылки из XML.
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        // Ссылка состоит из папки, суффикса варианта, имени файла и иногда
+        // расширения: `Provider\Product\папка\[00]имя.GeoPcDx`.
+        let (folder, name) = match text.rfind(['\\', '/']) {
+            Some(index) => (&text[..index], &text[index + 1..]),
+            None => ("", text),
+        };
+        // Суффикс варианта стоит в начале имени файла: [00], [01] и так далее.
+        let (variant, name) = match name.find(']') {
+            Some(index) if name.starts_with('[') && index > 1 => {
+                let digits = &name[1..index];
+                if !digits.is_empty() && digits.chars().all(|digit| digit.is_ascii_digit()) {
+                    (&name[..=index], &name[index + 1..])
+                } else {
+                    ("", name)
+                }
+            }
+            _ => ("", name),
+        };
+        // Расширение тоже может быть указано явно.
+        let (name, extension) = match Path::new(name).extension() {
+            Some(extension) => {
+                let extension = extension.to_string_lossy().into_owned();
+                if extension.eq_ignore_ascii_case("GeoPcDx")
+                    || extension.eq_ignore_ascii_case("TgPcDx")
+                {
+                    (&name[..name.len() - extension.len() - 1], Some(extension))
+                } else {
+                    (name, None)
+                }
+            }
+            None => (name, None),
+        };
+        Some(Self {
+            path: if folder.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{folder}\\{name}")
+            },
+            variant: variant.to_owned(),
+            extension,
+        })
+    }
+
+    /// Указывает ли ссылка на объект ассета.
+    fn is_geometry_reference(&self) -> bool {
+        self.extension.is_some() || !self.variant.is_empty()
+    }
+
+    /// Расширение, с которым файл лежит на диске.
+    ///
+    /// Если расширения в ссылке не было, файл может оказаться и геометрией, и
+    /// текстурой: проверяются оба варианта.
+    fn disk_extensions(&self) -> Vec<String> {
+        match &self.extension {
+            Some(extension) => vec![extension.clone()],
+            None => vec!["GeoPcDx".to_owned(), "TgPcDx".to_owned()],
+        }
+    }
+
+    /// Текст ссылки в исходном виде.
+    fn to_text(&self) -> String {
+        let mut text = String::new();
+        let (folder, name) = match self.path.rfind(['\\', '/']) {
+            Some(index) => (&self.path[..=index], &self.path[index + 1..]),
+            None => ("", self.path.as_str()),
+        };
+        text.push_str(folder);
+        text.push_str(&self.variant);
+        text.push_str(name);
+        if let Some(extension) = &self.extension {
+            text.push('.');
+            text.push_str(extension);
+        }
+        text
+    }
+}
+
+/// Относительно чего задан путь в ссылке на объект.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferenceBase {
+    /// Относительно папки Assets.
+    Assets,
+    /// Относительно папки продукта.
+    Product,
+    /// Относительно папки файла, в котором встретилась ссылка.
+    Folder,
+}
+
 fn geometry_reference_regex() -> &'static Regex {
     static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r#"(?is)>([^<>]*?\.(?:GeoPcDx|TgPcDx))\s*</[^>]+>"#)
+        Regex::new(r#"(?is)>([^<>]*\.(?:GeoPcDx|TgPcDx))\s*</[^>]+>"#)
             .expect("Шаблон поиска ссылок на геометрию должен быть корректным")
     })
 }
 
-fn referenced_geometry_paths(xml: &str) -> Vec<(String, std::ops::Range<usize>)> {
-    geometry_reference_regex()
-        .captures_iter(xml)
-        .filter_map(|captures| {
-            let matched = captures.get(1)?;
-            let path = decode_xml_text(matched.as_str().trim());
-            let extension = Path::new(&path).extension()?;
-            if !extension.eq_ignore_ascii_case("GeoPcDx")
-                && !extension.eq_ignore_ascii_case("TgPcDx")
-            {
-                return None;
-            }
-            Some((path, capture_value_range(&matched)))
-        })
-        .collect()
+fn variant_reference_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r#"(?is)>([^<>]*\[[0-9]{2,3}\][^<>]*)\s*</[^>]+>"#)
+            .expect("Шаблон поиска ссылок с вариантом должен быть корректным")
+    })
 }
 
+/// Находит в XML ссылки на объекты ассетов.
+///
+/// Учитываются оба вида ссылок: с расширением (`.GeoPcDx`) и без него, но с
+/// суффиксом варианта (`[00]`) — именно так их пишет игра.
+fn referenced_geometry_paths(xml: &str) -> Vec<(GeometryReference, std::ops::Range<usize>)> {
+    let mut found: Vec<(GeometryReference, std::ops::Range<usize>)> = Vec::new();
+    for regex in [geometry_reference_regex(), variant_reference_regex()] {
+        for captures in regex.captures_iter(xml) {
+            let Some(matched) = captures.get(1) else {
+                continue;
+            };
+            let text = decode_xml_text(matched.as_str().trim());
+            let Some(reference) = GeometryReference::parse(&text) else {
+                continue;
+            };
+            if !reference.is_geometry_reference() {
+                continue;
+            }
+            let range = capture_value_range(&matched);
+            if found
+                .iter()
+                .any(|(_, existing_range)| existing_range == &range)
+            {
+                continue;
+            }
+            found.push((reference, range));
+        }
+    }
+    found.sort_by_key(|(_, range)| range.start);
+    found
+}
+
+/// Описание ссылки, которая не нашлась на диске.
+///
+/// В сообщение попадает содержимое папки: без него непонятно, что именно не
+/// совпало с именем файла.
+fn unresolved_reference_error(
+    source: &Path,
+    reference: &GeometryReference,
+    assets_root: &Path,
+    product_root: &Path,
+) -> String {
+    let mut message = format!(
+        "Ссылка с умляутом не разрешается в файл: {} → {}",
+        source.display(),
+        reference.to_text()
+    );
+    let mut folders = vec![
+        source.parent().map(Path::to_path_buf),
+        Some(product_root.to_path_buf()),
+        Some(assets_root.to_path_buf()),
+    ];
+    folders.retain(|folder| folder.is_some());
+    for folder in folders.into_iter().flatten() {
+        if !folder.is_dir() {
+            continue;
+        }
+        let names: Vec<String> = fs::read_dir(&folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .take(40)
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        message.push_str(&format!(
+            "\nВ папке {}: {}",
+            folder.display(),
+            names.join(", ")
+        ));
+        break;
+    }
+    message
+}
+
+/// Ссылка на объект, путь которого указан относительно папки продукта.
+///
+/// Символы в ссылке могут быть испорчены, поэтому перебираются варианты имени с
+/// настоящими умляутами.
 fn resolve_product_reference(
+    assets_root: &Path,
     product_root: &Path,
     source_file: &Path,
-    reference: &str,
-) -> Option<PathBuf> {
-    let normalized = reference.replace('\\', "/");
-    let relative = Path::new(&normalized);
-    let candidates = [
-        product_root.join(relative),
-        source_file.parent()?.join(relative),
+    reference: &GeometryReference,
+) -> Option<(PathBuf, ReferenceBase)> {
+    let base = reference.path.replace('/', "\\");
+    let mut names = vec![base.clone()];
+    if has_broken_character(&base) {
+        let broken_count = base
+            .chars()
+            .filter(|character| BROKEN_CHARACTERS.contains(character))
+            .count();
+        if broken_count <= MAX_REFERENCE_VARIANTS {
+            // Испорченный символ в ссылке может означать и умляут, и уже
+            // переписанное имя, причём в разных частях пути по-разному, поэтому
+            // проверяются все сочетания.
+            let mut replacements: Vec<&str> = TRANSLITERATED_CHARACTERS.to_vec();
+            replacements.extend_from_slice(&UMLAUT_CHARACTERS);
+            names.extend(replace_broken_characters_combinations(&base, &replacements));
+        }
+    }
+    let extensions = reference.disk_extensions();
+    let bases = [
+        (assets_root.to_path_buf(), ReferenceBase::Assets),
+        (product_root.to_path_buf(), ReferenceBase::Product),
+        (
+            source_file.parent()?.to_path_buf(),
+            ReferenceBase::Folder,
+        ),
     ];
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    for (directory, kind) in &bases {
+        for name in &names {
+            for extension in &extensions {
+                let candidate = directory.join(format!("{name}.{extension}"));
+                if candidate.is_file() {
+                    return Some((candidate, *kind));
+                }
+            }
+        }
+    }
+    // Точного совпадения нет: ищем ближайшее по сходству. Имя папки может
+    // отличаться регистром, кириллическими буквами или количеством букв.
+    for (directory, kind) in &bases {
+        if let Some(path) = resolve_reference_path(directory, &base, &extensions) {
+            return Some((path, *kind));
+        }
+    }
+    None
+}
+
+/// Ищет в папке файл или подпапку с подходящим именем.
+///
+/// Сначала проверяются точное имя и регистр, а при неудаче ищется ближайшее по
+/// сходству: в игре встречаются имена с испорченными символами и с
+/// кириллическими буквами вместо латинских.
+fn find_entry_in_directory(
+    directory: &Path,
+    wanted: &str,
+    want_directory: bool,
+) -> Option<PathBuf> {
+    let exact = directory.join(wanted);
+    if exact.is_dir() == want_directory && (exact.is_file() || exact.is_dir()) {
+        return Some(exact);
+    }
+    let entries = fs::read_dir(directory).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() != want_directory {
+            continue;
+        }
+        let Some(file_name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        if file_name.eq_ignore_ascii_case(wanted) {
+            return Some(path);
+        }
+        // Похожие буквы («Е» кириллическая вместо латинской) считаем совпадением,
+        // а вот любые другие различия — нет: это другой файл.
+        if names_match(wanted, &file_name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Разрешает путь ссылки, подбирая похожие имена файлов и папок.
+fn resolve_reference_path(
+    base: &Path,
+    relative: &str,
+    extensions: &[String],
+) -> Option<PathBuf> {
+    let mut current = base.to_path_buf();
+    let components: Vec<_> = relative
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    for (index, component) in components.iter().enumerate() {
+        if index + 1 == components.len() {
+            for extension in extensions {
+                let wanted = format!("{component}.{extension}");
+                if let Some(path) = find_entry_in_directory(&current, &wanted, false) {
+                    return Some(path);
+                }
+            }
+            return None;
+        }
+        current = find_entry_in_directory(&current, component, true)?;
+    }
+    None
+}
+
+/// Определяет тип ассета по его содержимому.
+///
+/// По имени папки тип определить не всегда можно: ассеты одного вида лежат в
+/// разных папках, например scenery-объекты в продукте `ice`.
+pub(crate) fn asset_kind_from_xml(xml: &str) -> AssetKind {
+    if xml.contains("SceneryRenderBlueprint") || xml.contains("SceneryObject") {
+        return AssetKind::Scenery;
+    }
+    if xml.contains("AbsoluteBlueprintID") || xml.contains("BlueprintSetID") {
+        return AssetKind::Loft;
+    }
+    AssetKind::Other
+}
+
+/// Результат проверки цепочки ассета на сломанные символы.
+pub(crate) struct UmlautChainEvidence {
+    /// Обнаружения: что и где нашлось.
+    pub(crate) evidence: Vec<String>,
+    /// Символы, которые игра не умеет загружать.
+    pub(crate) unsupported: std::collections::BTreeSet<char>,
+    /// Тип ассета по его содержимому.
+    pub(crate) kind: AssetKind,
+    /// Есть ли в ассете символы, которые нужно переводить.
+    pub(crate) has_umlauts: bool,
 }
 
 fn asset_chain_umlaut_evidence(
     assets_path: &Path,
     serz_path: &Path,
     root_asset: &Path,
-) -> Result<Vec<String>, String> {
+) -> Result<UmlautChainEvidence, String> {
     let relative = root_asset
         .strip_prefix(assets_path)
         .map_err(|_| format!("Ассет находится вне Assets: {}", root_asset.display()))?;
@@ -505,9 +862,18 @@ fn asset_chain_umlaut_evidence(
         .next()
         .ok_or_else(|| "Некорректный путь ассета.".to_owned())?;
     let product_root = assets_path.join(provider).join(product);
+    // Работаем только с файлами рядом с ассетом: соседние папки продукта
+    // относятся к другим объектам, и трогать их не нужно.
+    let scope_root = root_asset
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| product_root.clone());
     let mut queue = vec![root_asset.to_path_buf()];
     let mut visited = HashSet::new();
     let mut evidence = Vec::new();
+    let mut unsupported = std::collections::BTreeSet::new();
+    let mut kind = AssetKind::Other;
+    let mut has_umlauts_found = false;
 
     while let Some(asset_path) = queue.pop() {
         let canonical = match asset_path.canonicalize() {
@@ -520,7 +886,7 @@ fn asset_chain_umlaut_evidence(
                 ))
             }
         };
-        if !canonical.starts_with(&product_root) || !visited.insert(canonical.clone()) {
+        if !canonical.starts_with(&scope_root) || !visited.insert(canonical.clone()) {
             continue;
         }
         let extension = canonical
@@ -531,41 +897,62 @@ fn asset_chain_umlaut_evidence(
             continue;
         }
         let xml = read_serz_xml(serz_path, &canonical)?;
+        if kind == AssetKind::Other {
+            kind = asset_kind_from_xml(&xml);
+        }
         if has_umlauts_in_xml(&xml) {
+            has_umlauts_found = true;
             evidence.push(format!("Внутри файла: {}", canonical.display()));
         }
         for (reference, _) in referenced_geometry_paths(&xml) {
-            if has_umlauts(&reference) {
+            let reference_text = reference.to_text();
+            if has_umlauts(&reference_text) {
                 evidence.push(format!(
-                    "Ссылка из {}: {reference}",
+                    "Ссылка из {}: {reference_text}",
                     canonical.file_name().unwrap_or_default().to_string_lossy()
                 ));
             }
-            if Path::new(&reference)
+            // Символы, которые игра не грузит, пользователь заменяет сам.
+            unsupported.extend(unsupported_characters(&reference_text));
+            let Some((path, _)) = resolve_product_reference(
+                assets_path,
+                &product_root,
+                &canonical,
+                &reference,
+            ) else {
+                continue;
+            };
+            if path
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("GeoPcDx"))
             {
-                if let Some(path) = resolve_product_reference(&product_root, &canonical, &reference)
-                {
-                    queue.push(path);
-                }
+                queue.push(path);
             }
         }
     }
 
     evidence.sort();
     evidence.dedup();
-    Ok(evidence)
+    Ok(UmlautChainEvidence {
+        evidence,
+        unsupported,
+        kind,
+        has_umlauts: has_umlauts_found,
+    })
 }
 
-fn inspect_umlaut_asset(
+pub(crate) fn inspect_umlaut_asset(
     relative_asset: &str,
     uses: &[AssetUse],
     assets_path: &Path,
     serz_path: &Path,
 ) -> (Option<UmlautAsset>, Option<String>) {
     let mut evidence = Vec::new();
-    if has_umlauts(relative_asset) {
+    let mut unsupported = unsupported_characters(relative_asset);
+    let mut kind = AssetKind::Other;
+    let path_has_umlauts = has_umlauts(relative_asset);
+    let mut needs_transliteration = path_has_umlauts;
+    if path_has_umlauts {
         evidence.push(format!("Умляут в пути ассета: {relative_asset}"));
     }
     let mut scan_error = None;
@@ -590,12 +977,17 @@ fn inspect_umlaut_asset(
             ));
         }
     }
-    if let Some(asset_path) = full_asset_path.filter(|path| {
+    if let Some(asset_path) = full_asset_path.clone().filter(|path| {
         path.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
     }) {
         match asset_chain_umlaut_evidence(assets_path, serz_path, &asset_path) {
-            Ok(found) => evidence.extend(found),
+            Ok(found) => {
+                evidence.extend(found.evidence);
+                unsupported.extend(found.unsupported);
+                kind = found.kind;
+                needs_transliteration = needs_transliteration || found.has_umlauts;
+            }
             Err(error) => {
                 evidence.push(format!(
                     "Цепочка зависимостей не проверена полностью: {error}"
@@ -604,10 +996,17 @@ fn inspect_umlaut_asset(
             }
         }
     }
-    let asset = (!evidence.is_empty()).then(|| UmlautAsset {
+    // Ассета, которого нет на диске, чинить нечем: для него есть замена.
+    let has_unsupported = !unsupported.is_empty();
+    let asset = (full_asset_path.is_some()
+        && (!evidence.is_empty() || !unsupported.is_empty()))
+    .then(|| UmlautAsset {
         path: relative_asset.to_owned(),
         uses: uses.to_vec(),
         evidence,
+        unsupported: unsupported.into_iter().collect(),
+        kind,
+        needs_transliteration: needs_transliteration || has_unsupported,
     });
     (asset, scan_error)
 }
@@ -649,11 +1048,25 @@ pub(crate) fn scan_umlaut_assets(
 }
 
 fn analyze_route_file(
-    file_path: &Path,
+    route_file: &RouteFile,
     index: usize,
     temp_dir: &Path,
     serz_path: &Path,
 ) -> FileAnalysis {
+    // Запись архива читается через временный файл: конвертеру Serz нужен
+    // настоящий файл на диске.
+    let file_path = match route_file.materialize(temp_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            return FileAnalysis {
+                converted_bin: false,
+                from_cache: false,
+                file: route_file.clone(),
+                uses: Vec::new(),
+                error: Some(error),
+            };
+        }
+    };
     let is_binary = file_path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"));
@@ -661,22 +1074,22 @@ fn analyze_route_file(
         // Serz хранит имена элементов обычными строками, поэтому файл без
         // `BlueprintID` заведомо не содержит ссылок на ассеты. Такие файлы не
         // конвертируются: на больших маршрутах это основная часть работы.
-        if !may_contain_asset_reference(file_path) {
+        if !may_contain_asset_reference(&file_path) {
             return FileAnalysis {
                 converted_bin: false,
                 from_cache: false,
-                file_path: file_path.to_path_buf(),
+                file: route_file.clone(),
                 uses: Vec::new(),
                 error: None,
             };
         }
         let xml_path = temp_dir.join(format!("{index:08}.xml"));
-        let conversion_result = convert_bin_to_xml(serz_path, file_path, &xml_path).or_else(
+        let conversion_result = convert_bin_to_xml(serz_path, &file_path, &xml_path).or_else(
             |primary_error| {
                 let Some(fallback) = fallback_serz_path(serz_path) else {
                     return Err(primary_error);
                 };
-                convert_bin_to_xml(&fallback, file_path, &xml_path).map_err(|fallback_error| {
+                convert_bin_to_xml(&fallback, &file_path, &xml_path).map_err(|fallback_error| {
                     format!(
                         "{primary_error}; повторная попытка через {} тоже не удалась: {fallback_error}",
                         fallback.display()
@@ -688,7 +1101,7 @@ fn analyze_route_file(
             return FileAnalysis {
                 converted_bin: false,
                 from_cache: false,
-                file_path: file_path.to_path_buf(),
+                file: route_file.clone(),
                 uses: Vec::new(),
                 error: Some(format!("{}: {error}", file_path.display())),
             };
@@ -699,7 +1112,7 @@ fn analyze_route_file(
                 return FileAnalysis {
                     converted_bin: true,
                         from_cache: false,
-                    file_path: file_path.to_path_buf(),
+                    file: route_file.clone(),
                     uses: Vec::new(),
                     error: Some(format!(
                         "{}: не удалось прочитать результат Serz: {error}",
@@ -710,13 +1123,13 @@ fn analyze_route_file(
         };
         data
     } else {
-        match fs::read(file_path) {
+        match fs::read(&file_path) {
             Ok(data) => data,
             Err(error) => {
                 return FileAnalysis {
                     converted_bin: false,
                         from_cache: false,
-                    file_path: file_path.to_path_buf(),
+                    file: route_file.clone(),
                     uses: Vec::new(),
                     error: Some(format!(
                         "{}: не удалось прочитать XML: {error}",
@@ -738,7 +1151,7 @@ fn analyze_route_file(
         converted_bin: is_binary,
 
         from_cache: false,
-        file_path: file_path.to_path_buf(),
+        file: route_file.clone(),
         uses: count_asset_uses(references),
         error: None,
     }
@@ -747,13 +1160,16 @@ fn analyze_route_file(
 /// Считает, сколько раз каждый ассет встречается в файле.
 ///
 /// Порядок первого появления сохраняется: по нему собирается список
-/// использований в инвентаре.
-fn count_asset_uses(references: Vec<AssetReference>) -> Vec<(String, u32)> {
+/// использований в инвентаре. Вместе с ассетом запоминается, что он из себя
+/// представляет: объект маршрута или файл состава.
+fn count_asset_uses(references: Vec<AssetReference>) -> Vec<(String, u32, AssetKind)> {
     let mut order: Vec<String> = Vec::new();
     let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut kinds: HashMap<String, AssetKind> = HashMap::new();
     for reference in references {
         let counter = counts.entry(reference.path.clone()).or_insert_with(|| {
             order.push(reference.path.clone());
+            kinds.insert(reference.path.clone(), reference.kind);
             0
         });
         *counter += 1;
@@ -762,19 +1178,12 @@ fn count_asset_uses(references: Vec<AssetReference>) -> Vec<(String, u32)> {
         .into_iter()
         .map(|path| {
             let count = counts.get(&path).copied().unwrap_or_default();
-            (path, count)
+            let kind = kinds.get(&path).copied().unwrap_or(AssetKind::Other);
+            (path, count, kind)
         })
         .collect()
 }
 
-/// Имя файла маршрута относительно его папки.
-///
-/// Используется как ключ кэша разбора: одинаковые имена в разных маршрутах
-/// не должны путать друг с другом.
-fn route_file_name(route_path: &Path, file_path: &Path) -> Option<String> {
-    let relative = file_path.strip_prefix(route_path).ok()?;
-    Some(relative.to_string_lossy().replace('\\', "/"))
-}
 
 /// Может ли файл содержать ссылку на ассет.
 ///
@@ -788,6 +1197,40 @@ fn may_contain_asset_reference(file_path: &Path) -> bool {
     };
     data.windows(BLUEPRINT_ID_MARKER.len())
         .any(|window| window == BLUEPRINT_ID_MARKER.as_bytes())
+}
+
+
+
+/// Ставит изменённый файл маршрута на место.
+///
+/// Для файла из архива .ap копия кладётся рядом с архивом: игра читает сначала
+/// архив, а потом файлы рядом с ним, поэтому изменённая версия перекроет
+/// оригинальную, а сам архив останется нетронутым.
+fn install_route_file(
+    route_path: &Path,
+    source_file: &RouteFile,
+    converted_path: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let target = source_file.install_target(route_path);
+    // У записи из архива оригинала на диске нет: резервная копия не нужна, а
+    // изменённая версия просто кладётся рядом с архивом.
+    let original = match source_file {
+        RouteFile::Path(path) => Some(path.clone()),
+        RouteFile::Archive { .. } => None,
+    };
+    if let Some(original) = original {
+        if target == original {
+            return install_converted_asset(&original, converted_path).map(Some);
+        }
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("Не удалось создать папку {}: {error}", parent.display())
+        })?;
+    }
+    fs::copy(converted_path, &target)
+        .map_err(|error| format!("Не удалось записать {}: {error}", target.display()))?;
+    Ok(None)
 }
 
 pub(crate) fn check_route(
@@ -833,6 +1276,29 @@ pub(crate) fn check_route(
         ));
     }
 
+    // Основные файлы маршрута могут быть упакованы в .ap: без чтения архива
+    // список ассетов останется пустым. Архив читается прямо из zip, а файлы
+    // рядом с ним перекрывают одноимённые записи архива.
+    let mut route_files: Vec<RouteFile> = collect_route_files(route_path, ignore_scenarios)?
+        .into_iter()
+        .map(RouteFile::Path)
+        .collect();
+    let outside: Vec<String> = route_files
+        .iter()
+        .filter_map(|file| file.route_name(route_path))
+        .collect();
+    for member in collect_archive_members(route_path)? {
+        let name = member.route_name(route_path).unwrap_or_default();
+        if outside
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&name))
+        {
+            // Такой файл лежит рядом с архивом и перекрывает запись архива.
+            continue;
+        }
+        route_files.push(member);
+    }
+
     let temp_dir = tempdir()
         .map_err(|error| format!("Не удалось создать временную папку для Serz: {error}"))?;
     let binary_count = route_files
@@ -868,27 +1334,30 @@ pub(crate) fn check_route(
             chunk
                 .par_iter()
                 .enumerate()
-                .map(|(offset, file_path)| {
-                    let name = route_file_name(route_path, file_path);
-                    let stamp = crate::analysis_cache::FileStamp::of(file_path);
+                .map(|(offset, route_file)| {
+                    let name = route_file.route_name(route_path);
+                    let stamp = route_file.stamp();
                     if let (Some(name), Some(stamp)) = (&name, stamp) {
                         if let Some(cached) = cache.get(name, stamp) {
                             return FileAnalysis {
                                 converted_bin: false,
-                                                from_cache: true,
-                                file_path: file_path.to_path_buf(),
+                                from_cache: true,
+                                file: route_file.clone(),
                                 uses: cached.uses.clone(),
                                 error: None,
                             };
                         }
                     }
-                    analyze_route_file(file_path, start_index + offset, temp_dir.path(), serz_path)
+                    analyze_route_file(route_file, start_index + offset, temp_dir.path(), serz_path)
                 })
                 .collect()
         });
         analyses.extend(chunk_analyses);
     }
     let mut asset_uses: HashMap<String, Vec<AssetUse>> = HashMap::new();
+    // Написание пути, как оно встретилось в маршруте: ключ в asset_uses приведён
+    // к нижнему регистру, потому что игра регистр не различает.
+    let mut asset_names: HashMap<String, String> = HashMap::new();
     let mut conversion_errors = Vec::new();
     let mut converted_bin_files = 0;
     for analysis in analyses {
@@ -896,8 +1365,8 @@ pub(crate) fn check_route(
             converted_bin_files += usize::from(analysis.converted_bin);
             // В кэш попадают только заново разобранные файлы: для остальных
             // прежняя запись и так актуальна.
-            if let Some(name) = route_file_name(route_path, &analysis.file_path) {
-                if let Some(stamp) = crate::analysis_cache::FileStamp::of(&analysis.file_path) {
+            if let Some(name) = analysis.file.route_name(route_path) {
+                if let Some(stamp) = analysis.file.stamp() {
                     cache.put(
                         name,
                         crate::analysis_cache::CachedFile {
@@ -908,13 +1377,20 @@ pub(crate) fn check_route(
                 }
             }
         }
-        let tile = route_tile_label(route_path, &analysis.file_path);
-        for (asset, count) in analysis.uses {
-            let uses = asset_uses.entry(asset).or_default();
+        let tile = route_tile_label(route_path, &analysis.file);
+        for (asset, count, kind) in analysis.uses {
+            // Игра читает пути без учёта регистра, поэтому ссылки, отличающиеся
+            // регистром, относятся к одному ассету.
+            let key = asset_key(&asset);
+            asset_names
+                .entry(key.clone())
+                .or_insert_with(|| asset.clone());
+            let uses = asset_uses.entry(key).or_default();
             for _ in 0..count {
                 uses.push(AssetUse {
-                    source_file: analysis.file_path.clone(),
+                    source_file: analysis.file.clone(),
                     tile: tile.clone(),
+                    kind,
                 });
             }
         }
@@ -927,7 +1403,7 @@ pub(crate) fn check_route(
     // Удаляем из кэша файлы, которых в маршруте больше нет, и сохраняем кэш.
     let current_files: HashMap<String, ()> = route_files
         .iter()
-        .filter_map(|path| route_file_name(route_path, path))
+        .filter_map(|path| path.route_name(route_path))
         .map(|name| (name, ()))
         .collect();
     cache.retain(&current_files);
@@ -981,7 +1457,11 @@ pub(crate) fn check_route(
                     for index in 0..archive.len() {
                         match archive.by_index(index) {
                             Ok(file) => {
-                                files.insert(file.name().replace('\\', "/").to_lowercase());
+                                // Имя записи может не быть в UTF-8: такую запись
+                                // пропускаем.
+                                if let Ok(name) = file.name() {
+                                    files.insert(name.replace('\\', "/").to_lowercase());
+                                }
                             }
                             Err(error) => structure_issues.push(format!(
                                 "Не удалось прочитать запись {index} в архиве ассетов {}: {error}",
@@ -1006,7 +1486,7 @@ pub(crate) fn check_route(
     let inventory_seed: Vec<_> = asset_uses
         .iter()
         .map(|(path, uses)| ReferencedAsset {
-            path: path.clone(),
+            path: asset_names.get(path).cloned().unwrap_or_else(|| path.clone()),
             uses: uses.clone(),
             missing: false,
         })
@@ -1016,14 +1496,32 @@ pub(crate) fn check_route(
     conversion_errors.extend(umlaut_errors);
     conversion_errors.sort();
 
+    // Проверки подключённых в RouteProperties.xml продуктов здесь нет и не
+    // должно быть: новый провайдер с продуктом добавляют как раз для замены
+    // ассетов — в кастомном бинарнике ссылки ведут на геометрию из другой
+    // папки, и её продукт подключают к маршруту, даже если прямых ссылок на
+    // него в файлах маршрута нет.
+
     let mut asset_inventory = Vec::with_capacity(asset_uses.len());
     let mut missing_assets = Vec::new();
     for (relative_asset, uses) in asset_uses {
+        // Файлы составов (поездов) при проверке маршрута не учитываются: игра
+        // ссылается на них отдельно от объектов маршрута, а проверять их нужно
+        // вместе со сценариями.
+        if uses.iter().any(|usage| usage.kind.is_vehicle()) {
+            continue;
+        }
+        // Показываем путь так, как он записан в маршруте, но ищем файл без
+        // учёта регистра: игра регистр не различает.
+        let display_path = asset_names
+            .get(&relative_asset)
+            .cloned()
+            .unwrap_or_else(|| relative_asset.clone());
         let full_asset_path = match resolve_asset_path(assets_path, &relative_asset) {
             Ok(path) => path,
             Err(error) => {
                 structure_issues.push(format!(
-                    "Не удалось однозначно сопоставить ассет {relative_asset}: {error}"
+                    "Не удалось однозначно сопоставить ассет {display_path}: {error}"
                 ));
                 None
             }
@@ -1046,12 +1544,12 @@ pub(crate) fn check_route(
         let missing = full_asset_path.is_none() && !in_archive;
         if missing {
             missing_assets.push(MissingAsset {
-                path: relative_asset.clone(),
+                path: display_path.clone(),
                 uses: uses.clone(),
             });
         }
         asset_inventory.push(ReferencedAsset {
-            path: relative_asset,
+            path: display_path,
             uses,
             missing,
         });
@@ -1068,7 +1566,44 @@ pub(crate) fn check_route(
         umlaut_assets,
         conversion_errors,
         structure_issues,
+        scenarios: collect_route_scenarios(route_path),
     })
+}
+
+/// Ключ ассета в списке: игра не различает регистр, поэтому пути, отличающиеся
+/// только регистром, относятся к одному и тому же ассету.
+fn asset_key(path: &str) -> String {
+    path.to_lowercase()
+}
+
+/// Собирает список сценариев маршрута: имя папки и число файлов в ней.
+///
+/// Сценарии — отдельная часть маршрута: в них лежат поезда и техника, а сами
+/// объекты маршрута (scenery и loft) живут в корне.
+fn collect_route_scenarios(route_path: &Path) -> Vec<crate::ScenarioInfo> {
+    let mut scenarios = Vec::new();
+    let Ok(entries) = fs::read_dir(route_path.join("Scenarios")) else {
+        return scenarios;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let file_count = fs::read_dir(&path)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        scenarios.push(crate::ScenarioInfo {
+            name: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            file_count,
+        });
+    }
+    scenarios.sort_by(|left, right| left.name.cmp(&right.name));
+    scenarios
 }
 
 pub(crate) fn replace_missing_asset(
@@ -1118,21 +1653,7 @@ pub(crate) fn replace_missing_asset(
         .to_string_lossy()
         .replace('/', "\\");
     let new_asset = replacement_relative.to_string_lossy().replace('\\', "/");
-    let old_kind = asset_kind(old_asset);
-    let new_kind = asset_kind(&new_asset);
-    if (old_kind == AssetKind::Loft) != (new_kind == AssetKind::Loft)
-        || (old_kind == AssetKind::Scenery) != (new_kind == AssetKind::Scenery)
-    {
-        return Err(match old_kind {
-            AssetKind::Loft => "Для loft-объекта выберите замену из папки Networks.".to_owned(),
-            AssetKind::Scenery => {
-                "Для scenery-объекта выберите замену из папки Scenery.".to_owned()
-            }
-            AssetKind::Other => {
-                "Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned()
-            }
-        });
-    }
+    check_asset_kind_compatibility(old_asset, &new_asset)?;
     if !serz_path.is_file() {
         return Err(format!("Не найден Serz: {}", serz_path.display()));
     }
@@ -1145,19 +1666,30 @@ pub(crate) fn replace_missing_asset(
         .map_err(|error| format!("Не удалось проверить папку маршрута: {error}"))?;
     let mut source_files = HashSet::new();
     for usage in uses {
-        let canonical_source = usage.source_file.canonicalize().map_err(|error| {
-            format!(
-                "Не удалось проверить файл маршрута {}: {error}",
-                usage.source_file.display()
-            )
-        })?;
-        if !canonical_source.starts_with(&canonical_route) || !canonical_source.is_file() {
+        // Файл из архива .ap нельзя править на месте: он лежит внутри архива.
+        // Поэтому готовим временную копию, а результат кладём рядом с архивом.
+        let source = usage.source_file.clone();
+        if source.route_name(route_path).is_none() {
             return Err(format!(
-                "Файл для замены находится вне маршрута или недоступен: {}",
-                usage.source_file.display()
+                "Файл для замены находится вне маршрута: {}",
+                source.display()
             ));
         }
-        source_files.insert(canonical_source);
+        if let RouteFile::Path(path) = &source {
+            let canonical_source = path.canonicalize().map_err(|error| {
+                format!(
+                    "Не удалось проверить файл маршрута {}: {error}",
+                    source.display()
+                )
+            })?;
+            if !canonical_source.starts_with(&canonical_route) || !canonical_source.is_file() {
+                return Err(format!(
+                    "Файл для замены находится вне маршрута или недоступен: {}",
+                    source.display()
+                ));
+            }
+        }
+        source_files.insert(source);
     }
 
     let mut staged = Vec::new();
@@ -1176,16 +1708,27 @@ pub(crate) fn replace_missing_asset(
                 source_file.display()
             ));
         }
-        let source_parent = source_file.parent().unwrap_or(route_path);
-        let temp = create_temporary_work_directory(source_parent)?;
+        // Запись из архива лежит только внутри архива: папки с таким именем на
+        // диске нет, поэтому временные файлы кладём в папку маршрута.
+        let source_parent = match &source_file {
+            RouteFile::Path(path) => path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| route_path.to_path_buf()),
+            RouteFile::Archive { .. } => route_path.to_path_buf(),
+        };
+        let temp = create_temporary_work_directory(&source_parent)?;
+        let file_path = source_file
+            .materialize(temp.path())
+            .map_err(|error| error.to_string())?;
         let xml_path = temp.path().join("source.xml");
         if is_binary {
             let conversion =
-                convert_bin_to_xml(serz_path, &source_file, &xml_path).or_else(|error| {
+                convert_bin_to_xml(serz_path, &file_path, &xml_path).or_else(|error| {
                     let Some(fallback) = fallback_serz_path(serz_path) else {
                         return Err(error);
                     };
-                    convert_bin_to_xml(&fallback, &source_file, &xml_path).map_err(
+                    convert_bin_to_xml(&fallback, &file_path, &xml_path).map_err(
                         |fallback_error| {
                             format!(
                                 "{error}; повторная попытка через Serz тоже не удалась: {fallback_error}"
@@ -1200,7 +1743,7 @@ pub(crate) fn replace_missing_asset(
                 )
             })?;
         } else {
-            fs::copy(&source_file, &xml_path).map_err(|error| {
+            fs::copy(&file_path, &xml_path).map_err(|error| {
                 format!(
                     "Не удалось подготовить {} перед заменой: {error}",
                     source_file.display()
@@ -1297,10 +1840,12 @@ pub(crate) fn replace_missing_asset(
     let mut backups = Vec::new();
     let mut replaced_files = 0;
     for (source_file, _temp, converted_path) in staged {
-        match install_converted_asset(&source_file, &converted_path) {
+        match install_route_file(route_path, &source_file, &converted_path) {
             Ok(backup) => {
                 replaced_files += 1;
-                backups.push(backup);
+                if let Some(backup) = backup {
+                    backups.push(backup);
+                }
             }
             Err(error) => {
                 return Err(format!(
@@ -1326,13 +1871,19 @@ pub(crate) fn replace_missing_asset(
 }
 
 struct StagedUmlautFile {
-    source: PathBuf,
+    /// Исходный файл: запись архива .ap или файл на диске.
+    source: RouteFile,
+    /// Куда класть результат.
     target: PathBuf,
     staged: PathBuf,
     _temp: tempfile::TempDir,
 }
 
-fn transliterated_asset_path(assets_path: &Path, source: &Path) -> Result<PathBuf, String> {
+fn transliterated_asset_path(
+    assets_path: &Path,
+    source: &Path,
+    fixes: &CharacterFixes,
+) -> Result<PathBuf, String> {
     let relative = source
         .strip_prefix(assets_path)
         .map_err(|_| format!("Ассет находится вне папки Assets: {}", source.display()))?;
@@ -1349,53 +1900,95 @@ fn transliterated_asset_path(assets_path: &Path, source: &Path) -> Result<PathBu
         .as_os_str()
         .to_string_lossy()
         .into_owned();
-    let nested: Vec<_> = components
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect();
     if has_umlauts(&provider) || has_umlauts(&product) {
         return Err(format!(
             "Умляут найден в имени Provider/Product для {}. Автоматическая транслитерация папок Provider/Product остановлена, чтобы не затронуть другие ассеты.",
             source.display()
         ));
     }
-    if nested.len() > 1
-        && nested[..nested.len() - 1]
-            .iter()
-            .any(|part| has_umlauts(part))
-    {
-        return Err(format!(
-            "Умляут найден в имени вложенной папки для {}. Переименование целых папок пока не выполняется, чтобы не повредить соседние ссылки.",
-            source.display()
-        ));
-    }
-    let translated = transliterate_umlauts(&relative.to_string_lossy());
+    // Вложенные папки переименовываются вместе с файлами: все ссылки на них
+    // обновляются каскадом.
+    let translated = transliterate_text(&relative.to_string_lossy(), fixes);
     Ok(assets_path.join(translated))
 }
 
+/// Папки внутри продукта, в именах которых есть умляуты.
+///
+/// Такие папки приходится переименовывать целиком: иначе файлы внутри них
+/// останутся со старыми именами, а ссылки на них — со старыми путями.
+fn folders_with_umlauts(assets_path: &Path, asset: &Path) -> Result<Vec<PathBuf>, String> {
+    let relative = asset
+        .strip_prefix(assets_path)
+        .map_err(|_| format!("Ассет находится вне папки Assets: {}", asset.display()))?;
+    let components: Vec<_> = relative.components().collect();
+    if components.len() < 3 {
+        return Ok(Vec::new());
+    }
+    let mut current = assets_path.to_path_buf();
+    let mut folders = Vec::new();
+    // Последний компонент — имя файла, его пропускаем.
+    for (index, component) in components.iter().enumerate().take(components.len() - 1) {
+        current.push(component);
+        // Первые два компонента — Provider и Product, их не переименовываем.
+        let name = component.as_os_str().to_string_lossy();
+        if index >= 2 && has_umlauts(&name) {
+            folders.push(current.clone());
+        }
+    }
+    Ok(folders)
+}
+
+/// Собирает новый текст ссылки на объект.
+///
+/// Ссылка сохраняет вид, в котором она была записана: суффикс варианта стоит
+/// перед именем файла, расширение остаётся, если оно было.
 fn translated_reference(
     target_file: &Path,
-    target_source: &Path,
+    assets_root: &Path,
     product_root: &Path,
-    relative_to_product: bool,
+    target_source: &Path,
+    base: ReferenceBase,
+    reference: &GeometryReference,
 ) -> Result<String, String> {
-    let base = if relative_to_product {
-        product_root
-    } else {
-        target_source.parent().ok_or_else(|| {
+    let base_path = match base {
+        ReferenceBase::Assets => assets_root,
+        ReferenceBase::Product => product_root,
+        ReferenceBase::Folder => target_source.parent().ok_or_else(|| {
             format!(
                 "Некорректный путь к исходному ассету: {}",
                 target_source.display()
             )
-        })?
+        })?,
     };
-    let relative = target_file.strip_prefix(base).map_err(|_| {
+    let relative = target_file.strip_prefix(base_path).map_err(|_| {
         format!(
             "Путь {} вышел за пределы {}",
             target_file.display(),
-            base.display()
+            base_path.display()
         )
     })?;
-    Ok(relative.to_string_lossy().replace('/', "\\"))
+    let relative = relative.to_string_lossy().replace('/', "\\");
+    let (folder, file_name) = match relative.rfind('\\') {
+        Some(index) => (&relative[..=index], &relative[index + 1..]),
+        None => ("", relative.as_str()),
+    };
+    // Если в ссылке расширения не было, то и в новой его быть не должно: игра
+    // подставляет его сама.
+    let name = match &reference.extension {
+        Some(_) => file_name.to_owned(),
+        None => match Path::new(file_name).file_stem() {
+            Some(stem) => stem.to_string_lossy().into_owned(),
+            None => file_name.to_owned(),
+        },
+    };
+    let mut text = String::from(folder);
+    text.push_str(&reference.variant);
+    text.push_str(&name);
+    if let Some(extension) = &reference.extension {
+        text.push('.');
+        text.push_str(extension);
+    }
+    Ok(text)
 }
 
 fn stage_serz_xml(
@@ -1411,11 +2004,9 @@ fn stage_serz_xml(
     let xml_path = temp.path().join("transliterated.xml");
     fs::write(&xml_path, xml)
         .map_err(|error| format!("Не удалось записать временный XML: {error}"))?;
-    let extension = source
-        .extension()
-        .ok_or_else(|| format!("Не удалось определить тип файла: {}", source.display()))?;
-    let mut staged = temp.path().join("transliterated");
-    staged.set_extension(extension);
+    // Serz собирает только .bin: файл геометрии приходится собирать тем же
+    // форматом, а нужное расширение получит при переносе на место.
+    let staged = temp.path().join("transliterated.bin");
     let conversion = convert_xml_to_bin(serz_path, &xml_path, &staged).or_else(|error| {
         let Some(fallback) = fallback_serz_path(serz_path) else {
             return Err(error);
@@ -1434,7 +2025,7 @@ fn stage_serz_xml(
         )
     })?;
     Ok(StagedUmlautFile {
-        source: source.to_path_buf(),
+        source: RouteFile::Path(source.to_path_buf()),
         target: target.to_path_buf(),
         staged,
         _temp: temp,
@@ -1458,7 +2049,7 @@ fn stage_renamed_file(source: &Path, target: &Path) -> Result<StagedUmlautFile, 
         )
     })?;
     Ok(StagedUmlautFile {
-        source: source.to_path_buf(),
+        source: RouteFile::Path(source.to_path_buf()),
         target: target.to_path_buf(),
         staged,
         _temp: temp,
@@ -1471,12 +2062,10 @@ pub(crate) fn repair_umlaut_asset_chain(
     serz_path: &Path,
     asset_relative_path: &str,
     uses: &[AssetUse],
+    fixes: &CharacterFixes,
 ) -> Result<UmlautRepairReport, String> {
     if !serz_path.is_file() {
         return Err(format!("Не найден Serz: {}", serz_path.display()));
-    }
-    if uses.is_empty() {
-        return Err("Для ассета не найдены места использования в маршруте.".to_owned());
     }
     let assets_root = assets_path
         .canonicalize()
@@ -1502,7 +2091,7 @@ pub(crate) fn repair_umlaut_asset_chain(
             source_asset.display()
         ));
     }
-    let new_asset_path = transliterated_asset_path(&assets_root, &canonical_asset)?;
+    let new_asset_path = transliterated_asset_path(&assets_root, &canonical_asset, fixes)?;
     let new_relative_asset = new_asset_path
         .strip_prefix(&assets_root)
         .map_err(|_| "Новый путь ассета выходит за пределы Assets.".to_owned())?
@@ -1512,8 +2101,8 @@ pub(crate) fn repair_umlaut_asset_chain(
         return Err("Путь ассета должен иметь структуру Provider/Product/файл.".to_owned());
     }
     if new_relative_asset == asset_relative_path {
-        let evidence = asset_chain_umlaut_evidence(&assets_root, serz_path, &canonical_asset)?;
-        if evidence.is_empty() {
+        let found = asset_chain_umlaut_evidence(&assets_root, serz_path, &canonical_asset)?;
+        if found.evidence.is_empty() && found.unsupported.is_empty() {
             return Err("В файлах ассета не обнаружены поддерживаемые умляуты.".to_owned());
         }
     }
@@ -1529,13 +2118,64 @@ pub(crate) fn repair_umlaut_asset_chain(
         .next()
         .ok_or_else(|| "Некорректный путь ассета.".to_owned())?;
     let product_root = assets_root.join(provider).join(product);
+    // Работаем только с файлами рядом с ассетом: соседние папки продукта
+    // относятся к другим объектам, их переименование сломало бы их ссылки.
+    let scope_root = canonical_asset
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| product_root.clone());
     let mut queue = vec![canonical_asset.clone()];
     let mut visited = HashSet::new();
-    let mut staged_by_source: HashMap<PathBuf, StagedUmlautFile> = HashMap::new();
+    let mut staged_by_source: HashMap<RouteFile, StagedUmlautFile> = HashMap::new();
     let mut renamed_tg_files: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut scan_all_geometry = false;
     let mut changed_references = 0;
+    // Папки с умляутами переименовываются целиком: все файлы внутри них
+    // переезжают вместе с папкой, даже если их содержимое не меняется.
+    let renamed_folders = folders_with_umlauts(&assets_root, &canonical_asset)?;
+    if !renamed_folders.is_empty() {
+        // Ссылки на переехавшие файлы могут быть в соседних файлах папки
+        // ассета, поэтому приходится просмотреть её целиком.
+        scan_all_geometry = true;
+    }
 
+    // Файлы из переименованных папок переезжают вместе с папками: их имена и
+    // содержимое могут быть в порядке, но путь изменился.
+    let mut emptied_folders: Vec<PathBuf> = Vec::new();
+    for folder in &renamed_folders {
+        for entry in WalkDir::new(folder).follow_links(false) {
+            let entry = entry.map_err(|error| {
+                format!("Ошибка обхода папки {}: {error}", folder.display())
+            })?;
+            if entry.file_type().is_dir() {
+                emptied_folders.push(entry.into_path());
+                continue;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let source = entry.into_path();
+            let canonical = source.canonicalize().map_err(|error| {
+                format!("Не удалось открыть файл {}: {error}", source.display())
+            })?;
+            let extension = canonical
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("GeoPcDx") {
+                // Такие файлы могут ссылаться на другие объекты: их ссылки
+                // тоже нужно обновить, поэтому они идут в цепочку.
+                queue.push(canonical);
+                continue;
+            }
+            let target = transliterated_asset_path(&assets_root, &canonical, fixes)?;
+            if target == canonical {
+                continue;
+            }
+            let staged = stage_renamed_file(&canonical, &target)?;
+            staged_by_source.insert(RouteFile::Path(canonical), staged);
+        }
+    }
     while let Some(source) = queue.pop() {
         let canonical = source.canonicalize().map_err(|error| {
             format!(
@@ -1543,7 +2183,7 @@ pub(crate) fn repair_umlaut_asset_chain(
                 source.display()
             )
         })?;
-        if !canonical.starts_with(&product_root) || !visited.insert(canonical.clone()) {
+        if !canonical.starts_with(&scope_root) || !visited.insert(canonical.clone()) {
             continue;
         }
         let extension = canonical
@@ -1554,19 +2194,23 @@ pub(crate) fn repair_umlaut_asset_chain(
             continue;
         }
         let xml = read_serz_xml(serz_path, &canonical)?;
-        let target_file = transliterated_asset_path(&assets_root, &canonical)?;
+        let target_file = transliterated_asset_path(&assets_root, &canonical, fixes)?;
         let mut edits = Vec::new();
+        let mut protected_references: Vec<std::ops::Range<usize>> = Vec::new();
         for (reference, range) in referenced_geometry_paths(&xml) {
-            let extension = Path::new(&reference)
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("");
-            let Some(dependency) = resolve_product_reference(&product_root, &canonical, &reference)
-            else {
-                if has_umlauts(&reference) {
-                    return Err(format!(
-                        "Ссылка с умляутом не разрешается в файл: {} → {reference}",
-                        canonical.display()
+            let reference_text = reference.to_text();
+            let Some((dependency, base)) = resolve_product_reference(
+                &assets_root,
+                &product_root,
+                &canonical,
+                &reference,
+            ) else {
+                if has_umlauts(&reference_text) {
+                    return Err(unresolved_reference_error(
+                        &canonical,
+                        &reference,
+                        &assets_root,
+                        &product_root,
                     ));
                 }
                 continue;
@@ -1584,28 +2228,46 @@ pub(crate) fn repair_umlaut_asset_chain(
                     dependency.display()
                 ));
             }
+            if !canonical_dependency.starts_with(&scope_root) {
+                // Файл лежит за пределами папки ассета: его не трогаем, и ссылку
+                // на него тоже оставляем как есть.
+                protected_references.push(range);
+                continue;
+            }
             let translated_dependency =
-                transliterated_asset_path(&assets_root, &canonical_dependency)?;
-            if extension.eq_ignore_ascii_case("GeoPcDx") {
+                transliterated_asset_path(&assets_root, &canonical_dependency, fixes)?;
+            let dependency_extension = canonical_dependency
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if dependency_extension.eq_ignore_ascii_case("GeoPcDx") {
                 queue.push(canonical_dependency.clone());
-            } else if extension.eq_ignore_ascii_case("TgPcDx") && has_umlauts(&reference) {
+            } else if dependency_extension.eq_ignore_ascii_case("TgPcDx")
+                && (has_umlauts(&reference_text)
+                    || canonical_dependency
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(has_umlauts))
+            {
+                // Текстура — это готовый файл: её достаточно переименовать,
+                // внутри умляутов у неё не бывает.
                 scan_all_geometry = true;
                 renamed_tg_files
                     .insert(canonical_dependency.clone(), translated_dependency.clone());
             }
-            if transliterate_umlauts(&reference) != reference
+            if transliterate_umlauts(&reference_text) != reference_text
                 && translated_dependency == canonical_dependency
             {
                 changed_references += 1;
             }
             if translated_dependency != canonical_dependency {
-                let relative_to_product =
-                    product_root.join(reference.replace('\\', "/")) == canonical_dependency;
                 let replacement = translated_reference(
                     &translated_dependency,
-                    &target_file,
+                    &assets_root,
                     &product_root,
-                    relative_to_product,
+                    &target_file,
+                    base,
+                    &reference,
                 )?;
                 edits.push((range, escape_xml_text(&replacement)));
                 changed_references += 1;
@@ -1616,7 +2278,7 @@ pub(crate) fn repair_umlaut_asset_chain(
         for (range, value) in edits {
             rewritten.replace_range(range, &value);
         }
-        rewritten = transliterate_xml_umlauts(&rewritten);
+        rewritten = transliterate_xml_umlauts_outside(&rewritten, &protected_references, fixes);
         if rewritten != xml || target_file != canonical {
             validate_xml_document(&rewritten).map_err(|error| {
                 format!(
@@ -1625,14 +2287,18 @@ pub(crate) fn repair_umlaut_asset_chain(
                 )
             })?;
             let staged = stage_serz_xml(&canonical, &target_file, &rewritten, serz_path)?;
-            staged_by_source.insert(canonical, staged);
+            staged_by_source.insert(RouteFile::Path(canonical), staged);
         }
     }
 
+    // Файлы из переименованных папок переезжают вместе с папками: их имена и
+    // содержимое могут быть в порядке, но путь изменился.
     if scan_all_geometry {
-        for entry in WalkDir::new(&product_root).follow_links(false) {
+        // Обход ограничен папкой самого ассета: соседние папки продукта не
+        // относятся к нему, и трогать их не нужно.
+        for entry in WalkDir::new(&scope_root).follow_links(false) {
             let entry = entry.map_err(|error| {
-                format!("Ошибка обхода продукта {}: {error}", product_root.display())
+                format!("Ошибка обхода папки {}: {error}", scope_root.display())
             })?;
             if entry.file_type().is_file()
                 && entry
@@ -1643,93 +2309,117 @@ pub(crate) fn repair_umlaut_asset_chain(
                 queue.push(entry.into_path());
             }
         }
+
         while let Some(source) = queue.pop() {
-            let canonical = source.canonicalize().map_err(|error| {
-                format!("Не удалось открыть геометрию {}: {error}", source.display())
-            })?;
-            if !canonical.starts_with(&product_root) || !visited.insert(canonical.clone()) {
-                continue;
-            }
-            let xml = read_serz_xml(serz_path, &canonical)?;
-            for (reference, _) in referenced_geometry_paths(&xml) {
-                if transliterate_umlauts(&reference) != reference {
-                    changed_references += 1;
+                let canonical = source.canonicalize().map_err(|error| {
+                    format!("Не удалось открыть геометрию {}: {error}", source.display())
+                })?;
+                if !canonical.starts_with(&scope_root) || !visited.insert(canonical.clone()) {
+                    continue;
                 }
-                let extension = Path::new(&reference)
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("");
-                let Some(dependency) =
-                    resolve_product_reference(&product_root, &canonical, &reference)
-                else {
-                    if has_umlauts(&reference) {
+                let xml = read_serz_xml(serz_path, &canonical)?;
+                let mut protected_references: Vec<std::ops::Range<usize>> = Vec::new();
+                for (reference, range) in referenced_geometry_paths(&xml) {
+                    let reference_text = reference.to_text();
+                    if transliterate_umlauts(&reference_text) != reference_text {
+                        changed_references += 1;
+                    }
+                    let Some((dependency, _)) = resolve_product_reference(
+                        &assets_root,
+                        &product_root,
+                        &canonical,
+                        &reference,
+                    ) else {
+                        if has_umlauts(&reference_text) {
+                            return Err(unresolved_reference_error(
+                                &canonical,
+                                &reference,
+                                &assets_root,
+                                &product_root,
+                            ));
+                        }
+                        continue;
+                    };
+                    let dependency = dependency.canonicalize().map_err(|error| {
+                        format!(
+                            "Не удалось проверить зависимость {}: {error}",
+                            dependency.display()
+                        )
+                    })?;
+                    if !dependency.starts_with(&product_root) {
                         return Err(format!(
-                            "Ссылка с умляутом не разрешается в файл: {} → {reference}",
-                            canonical.display()
+                            "Ссылка выходит за пределы продукта {}: {}",
+                            product_root.display(),
+                            dependency.display()
                         ));
                     }
-                    continue;
-                };
-                let dependency = dependency.canonicalize().map_err(|error| {
-                    format!(
-                        "Не удалось проверить зависимость {}: {error}",
-                        dependency.display()
-                    )
-                })?;
-                if !dependency.starts_with(&product_root) {
-                    return Err(format!(
-                        "Ссылка выходит за пределы продукта {}: {}",
-                        product_root.display(),
-                        dependency.display()
-                    ));
+                    if !dependency.starts_with(&scope_root) {
+                        // Файл лежит за пределами папки ассета: его не трогаем, и
+                        // ссылку на него тоже оставляем как есть.
+                        protected_references.push(range);
+                        continue;
+                    }
+                    let extension = dependency
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("");
+                    if extension.eq_ignore_ascii_case("GeoPcDx") {
+                        queue.push(dependency.clone());
+                    } else if extension.eq_ignore_ascii_case("TgPcDx")
+                        && has_umlauts(&reference_text)
+                    {
+                        let target = transliterated_asset_path(&assets_root, &dependency, fixes)?;
+                        renamed_tg_files.insert(dependency, target);
+                    }
                 }
-                if extension.eq_ignore_ascii_case("GeoPcDx") {
-                    queue.push(dependency.clone());
-                } else if extension.eq_ignore_ascii_case("TgPcDx") && has_umlauts(&reference) {
-                    let target = transliterated_asset_path(&assets_root, &dependency)?;
-                    renamed_tg_files.insert(dependency, target);
+                let target = transliterated_asset_path(&assets_root, &canonical, fixes)?;
+                let rewritten = transliterate_xml_umlauts_outside(&xml, &protected_references, fixes);
+                if rewritten != xml || target != canonical {
+                    validate_xml_document(&rewritten).map_err(|error| {
+                        format!(
+                            "Некорректный XML после обработки {}: {error}",
+                            canonical.display()
+                        )
+                    })?;
+                    let staged = stage_serz_xml(&canonical, &target, &rewritten, serz_path)?;
+                    staged_by_source.insert(RouteFile::Path(canonical), staged);
                 }
             }
-            let target = transliterated_asset_path(&assets_root, &canonical)?;
-            let rewritten = transliterate_xml_umlauts(&xml);
-            if rewritten != xml || target != canonical {
-                validate_xml_document(&rewritten).map_err(|error| {
-                    format!(
-                        "Некорректный XML после обработки {}: {error}",
-                        canonical.display()
-                    )
-                })?;
-                let staged = stage_serz_xml(&canonical, &target, &rewritten, serz_path)?;
-                staged_by_source.insert(canonical, staged);
-            }
-        }
     }
 
+    let mut renamed_staged: Vec<(RouteFile, StagedUmlautFile)> = Vec::new();
     for (source, target) in &renamed_tg_files {
-        if !staged_by_source.contains_key(source) {
-            staged_by_source.insert(source.clone(), stage_renamed_file(source, target)?);
+        let key = RouteFile::Path(source.clone());
+        if staged_by_source.contains_key(&key) {
+            continue;
         }
+        let staged = stage_renamed_file(source, target)?;
+        renamed_staged.push((key, staged));
     }
+    staged_by_source.extend(renamed_staged);
 
     let new_parts: Vec<_> = new_relative_asset.split('/').collect();
     let replacement_blueprint = Path::new(&new_parts[2..].join("\\"))
         .with_extension("xml")
         .to_string_lossy()
         .into_owned();
-    let mut route_sources: HashSet<PathBuf> = HashSet::new();
+    let mut route_sources: HashSet<RouteFile> = HashSet::new();
     if new_relative_asset != asset_relative_path {
         for usage in uses {
-            let source = usage.source_file.canonicalize().map_err(|error| {
-                format!(
-                    "Не удалось открыть файл маршрута {}: {error}",
-                    usage.source_file.display()
-                )
-            })?;
-            if !source.starts_with(&route_root) {
-                return Err(format!(
-                    "Файл использования находится вне маршрута: {}",
-                    source.display()
-                ));
+            let source = usage.source_file.clone();
+            if let RouteFile::Path(path) = &source {
+                let canonical = path.canonicalize().map_err(|error| {
+                    format!(
+                        "Не удалось открыть файл маршрута {}: {error}",
+                        usage.source_file.display()
+                    )
+                })?;
+                if !canonical.starts_with(&route_root) {
+                    return Err(format!(
+                        "Файл использования находится вне маршрута: {}",
+                        source.display()
+                    ));
+                }
             }
             route_sources.insert(source);
         }
@@ -1748,14 +2438,24 @@ pub(crate) fn repair_umlaut_asset_chain(
                 source.display()
             ));
         }
-        let temp = create_temporary_work_directory(source.parent().unwrap_or(&route_root))?;
+        // Запись из архива лежит только внутри архива: папки с таким именем на
+        // диске нет, поэтому временные файлы кладём в папку маршрута.
+        let source_parent = match &source {
+            RouteFile::Path(path) => path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| route_root.clone()),
+            RouteFile::Archive { .. } => route_root.clone(),
+        };
+        let temp = create_temporary_work_directory(&source_parent)?;
+        let file_path = source.materialize(temp.path())?;
         let xml_path = temp.path().join("route.xml");
         if is_binary {
-            let conversion = convert_bin_to_xml(serz_path, &source, &xml_path).or_else(|error| {
+            let conversion = convert_bin_to_xml(serz_path, &file_path, &xml_path).or_else(|error| {
                 let Some(fallback) = fallback_serz_path(serz_path) else {
                     return Err(error);
                 };
-                convert_bin_to_xml(&fallback, &source, &xml_path).map_err(|fallback_error| {
+                convert_bin_to_xml(&fallback, &file_path, &xml_path).map_err(|fallback_error| {
                     format!(
                         "{error}; повторная попытка через {} не удалась: {fallback_error}",
                         fallback.display()
@@ -1764,7 +2464,7 @@ pub(crate) fn repair_umlaut_asset_chain(
             });
             conversion?;
         } else {
-            fs::copy(&source, &xml_path)
+            fs::copy(&file_path, &xml_path)
                 .map_err(|error| format!("Не удалось подготовить {}: {error}", source.display()))?;
         }
         let mut xml = fs::read_to_string(&xml_path)
@@ -1820,7 +2520,9 @@ pub(crate) fn repair_umlaut_asset_chain(
             source.clone(),
             StagedUmlautFile {
                 source: source.clone(),
-                target: source,
+                // Файл из архива .ap кладём рядом с архивом: игра читает
+                // сначала архив, потом файлы рядом с ним.
+                target: source.install_target(&route_root),
                 staged: staged_path,
                 _temp: temp,
             },
@@ -1838,7 +2540,11 @@ pub(crate) fn repair_umlaut_asset_chain(
                 staged.target.display()
             ));
         }
-        if staged.target.exists() && staged.target != staged.source {
+        let original_path = match &staged.source {
+            RouteFile::Path(path) => Some(path.clone()),
+            RouteFile::Archive { .. } => None,
+        };
+        if staged.target.exists() && original_path.as_deref() != Some(staged.target.as_path()) {
             return Err(format!(
                 "После транслитерации возникнет конфликт имён: {} уже существует.",
                 staged.target.display()
@@ -1855,34 +2561,49 @@ pub(crate) fn repair_umlaut_asset_chain(
             })?;
         }
     }
-    let mut committed: Vec<(PathBuf, PathBuf, PathBuf)> = Vec::new();
+    let mut committed: Vec<(PathBuf, PathBuf, Option<PathBuf>)> = Vec::new();
     for staged in &prepared {
-        let backup = match next_backup_path(&staged.source) {
-            Ok(path) => path,
-            Err(error) => {
-                let rollback_errors = rollback_umlaut_changes(&committed);
-                let rollback_detail = if rollback_errors.is_empty() {
-                    String::new()
-                } else {
-                    format!(" Ошибки отката: {}", rollback_errors.join("; "))
-                };
-                return Err(format!("{error}.{rollback_detail}"));
-            }
+        // Файл из архива .ap: оригинал остаётся в архиве, а изменённая копия
+        // кладётся рядом и перекроет его, поэтому резервная копия не нужна.
+        let original = match &staged.source {
+            RouteFile::Path(path) => Some(path.clone()),
+            RouteFile::Archive { .. } => None,
         };
-        if let Err(error) = fs::rename(&staged.source, &backup) {
-            let rollback_errors = rollback_umlaut_changes(&committed);
-            let rollback_detail = if rollback_errors.is_empty() {
-                String::new()
-            } else {
-                format!(" Ошибки отката: {}", rollback_errors.join("; "))
+        let backup = match &original {
+            Some(original) => {
+                let backup = match next_backup_path(original) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let rollback_errors = rollback_umlaut_changes(&committed);
+                        let rollback_detail = if rollback_errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" Ошибки отката: {}", rollback_errors.join("; "))
+                        };
+                        return Err(format!("{error}.{rollback_detail}"));
+                    }
+                };
+                if let Err(error) = fs::rename(original, &backup) {
+                    let rollback_errors = rollback_umlaut_changes(&committed);
+                    let rollback_detail = if rollback_errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Ошибки отката: {}", rollback_errors.join("; "))
+                    };
+                    return Err(format!(
+                        "Не удалось создать резервную копию {}: {error}.{rollback_detail}",
+                        original.display()
+                    ));
+                }
+                Some(backup)
+            }
+            None => None,
+        };
+        if let Err(error) = install_staged_file(staged) {
+            let restore = match (&backup, &original) {
+                (Some(backup), Some(original)) => fs::rename(backup, original),
+                _ => Ok(()),
             };
-            return Err(format!(
-                "Не удалось создать резервную копию {}: {error}.{rollback_detail}",
-                staged.source.display()
-            ));
-        }
-        if let Err(error) = fs::rename(&staged.staged, &staged.target) {
-            let restore = fs::rename(&backup, &staged.source);
             let rollback_errors = rollback_umlaut_changes(&committed);
             let rollback_detail = if rollback_errors.is_empty() {
                 String::new()
@@ -1894,10 +2615,20 @@ pub(crate) fn repair_umlaut_asset_chain(
             };
             return Err(match restore {
                 Ok(()) => format!("Не удалось установить {}: {error}. Файл восстановлен.{rollback_detail}", staged.target.display()),
-                Err(restore_error) => format!("Не удалось установить {}: {error}; восстановление {} тоже не удалось: {restore_error}.{rollback_detail}", staged.target.display(), staged.source.display()),
+                Err(restore_error) => format!("Не удалось установить {}: {error}; восстановление тоже не удалось: {restore_error}.{rollback_detail}", staged.target.display()),
             });
         }
-        committed.push((staged.source.clone(), staged.target.clone(), backup));
+        committed.push((
+            original.unwrap_or_else(|| staged.target.clone()),
+            staged.target.clone(),
+            backup,
+        ));
+    }
+    // Старые папки с умляутами остались пустыми: убираем их, чтобы в Assets
+    // не осталось дублей с непонятным назначением.
+    emptied_folders.sort_by_key(|folder| std::cmp::Reverse(folder.components().count()));
+    for folder in &emptied_folders {
+        let _ = fs::remove_dir(folder);
     }
     Ok(UmlautRepairReport {
         changed_files: committed.len(),
@@ -1906,14 +2637,40 @@ pub(crate) fn repair_umlaut_asset_chain(
             .iter()
             .flat_map(|(source, target, _)| [source.clone(), target.clone()])
             .collect(),
-        backups: committed.into_iter().map(|(_, _, backup)| backup).collect(),
+        backups: committed
+            .into_iter()
+            .filter_map(|(_, _, backup)| backup)
+            .collect(),
         new_asset_path: new_relative_asset,
         log_file: None,
         log_error: None,
     })
 }
 
-fn rollback_umlaut_changes(committed: &[(PathBuf, PathBuf, PathBuf)]) -> Vec<String> {
+/// Ставит подготовленный файл на место.
+///
+/// Файл из архива .ap не переносится: вместо этого рядом с архивом кладётся
+/// изменённая копия, которую игра прочитает вместо записи архива.
+fn install_staged_file(staged: &StagedUmlautFile) -> Result<(), String> {
+    match &staged.source {
+        RouteFile::Path(_) => fs::rename(&staged.staged, &staged.target)
+            .map_err(|error| format!("Не удалось установить {}: {error}", staged.target.display())),
+        RouteFile::Archive { .. } => {
+            if let Some(parent) = staged.target.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    format!("Не удалось создать папку {}: {error}", parent.display())
+                })?;
+            }
+            fs::copy(&staged.staged, &staged.target)
+                .map(|_| ())
+                .map_err(|error| {
+                    format!("Не удалось записать {}: {error}", staged.target.display())
+                })
+        }
+    }
+}
+
+fn rollback_umlaut_changes(committed: &[(PathBuf, PathBuf, Option<PathBuf>)]) -> Vec<String> {
     let mut errors = Vec::new();
     for (source, target, backup) in committed.iter().rev() {
         if target.exists() {
@@ -1922,6 +2679,9 @@ fn rollback_umlaut_changes(committed: &[(PathBuf, PathBuf, PathBuf)]) -> Vec<Str
                 continue;
             }
         }
+        let Some(backup) = backup else {
+            continue;
+        };
         if let Err(error) = fs::rename(backup, source) {
             errors.push(format!(
                 "не удалось восстановить {} из {}: {error}",
@@ -2099,502 +2859,18 @@ pub(crate) fn legacy_windows_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn capture_value_range(capture: &regex::Match<'_>) -> std::ops::Range<usize> {
-    let value = capture.as_str();
-    let leading = value.len() - value.trim_start().len();
-    let trimmed = value.trim();
-    capture.start() + leading..capture.start() + leading + trimmed.len()
-}
-
-/// Ищет первое вхождение подстроки без учёта регистра ASCII.
-///
-/// Нужен для ручного разбора XML: регулярное выражение с ленивым `.*?` заново
-/// просматривает остаток файла для каждого найденного блока, из-за чего разбор
-/// маршрута дорожает квадратично.
-fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    let first = needle[0];
-    let last = haystack.len() - needle.len();
-    let mut index = from;
-    while index <= last {
-        let offset = haystack[index..=last]
-            .iter()
-            .position(|byte| *byte == first)?;
-        let start = index + offset;
-        if haystack[start..start + needle.len()].eq_ignore_ascii_case(needle) {
-            return Some(start);
-        }
-        index = start + 1;
-    }
-    None
-}
-
-/// Ищет элемент `<Тег ...>значение</Тег>` начиная с заданного места.
-///
-/// Возвращает диапазон значения без окружающих пробелов и позицию сразу за
-/// закрывающим тегом. Значение не может содержать `<`, как и в исходном
-/// шаблоне `([^<]*)`.
-fn parse_tagged_value(
-    haystack: &[u8],
-    tag: &str,
-    start: usize,
-) -> Option<(std::ops::Range<usize>, usize)> {
-    let tag_bytes = tag.as_bytes();
-    let after_open = start.checked_add(1)?;
-    if haystack.get(start)? != &b'<' {
-        return None;
-    }
-    if !haystack
-        .get(after_open..after_open.checked_add(tag_bytes.len())?)?
-        .eq_ignore_ascii_case(tag_bytes)
-    {
-        return None;
-    }
-    let tag_start = after_open + tag_bytes.len();
-    let tag_end = tag_start
-        + haystack
-            .get(tag_start..)?
-            .iter()
-            .position(|byte| *byte == b'>')?;
-    let value_start = tag_end + 1;
-    let value_end = value_start
-        + haystack
-            .get(value_start..)?
-            .iter()
-            .position(|byte| *byte == b'<')?;
-    if haystack.get(value_end)? != &b'<' || haystack.get(value_end + 1)? != &b'/' {
-        return None;
-    }
-    let close_tag_start = value_end + 2;
-    if !haystack
-        .get(close_tag_start..close_tag_start.checked_add(tag_bytes.len())?)?
-        .eq_ignore_ascii_case(tag_bytes)
-    {
-        return None;
-    }
-    let close_end = close_tag_start + tag_bytes.len();
-    if haystack.get(close_end)? != &b'>' {
-        return None;
-    }
-    let value = &haystack[value_start..value_end];
-    let leading = value
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(value.len());
-    let trimmed = value
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map(|last| last + 1)
-        .unwrap_or(leading);
-    Some((value_start + leading..value_start + trimmed, close_end + 1))
-}
-
-/// Позиция следующего открывающего тега после заданного места.
-fn next_tag_start(haystack: &[u8], from: usize) -> Option<usize> {
-    haystack
-        .get(from..)?
-        .iter()
-        .position(|byte| *byte == b'<')
-        .map(|offset| from + offset)
-}
-
-/// Ищет элемент по имени в заданном диапазоне файла.
-fn find_tagged_value(
-    haystack: &[u8],
-    tag: &str,
-    from: usize,
-    limit: usize,
-) -> Option<(std::ops::Range<usize>, usize)> {
-    let mut cursor = from;
-    while cursor < limit {
-        let position = next_tag_start(haystack, cursor)?;
-        if position >= limit {
-            return None;
-        }
-        if let Some((range, end)) = parse_tagged_value(haystack, tag, position) {
-            if end <= limit {
-                return Some((range, end));
-            }
-        }
-        cursor = position + 1;
-    }
-    None
-}
-
-/// Блоки `iBlueprintLibrary-cAbsoluteBlueprintID` с границами разметки.
-fn absolute_blueprint_blocks(haystack: &[u8]) -> Vec<(usize, usize, usize, usize)> {
-    let open = b"<iBlueprintLibrary-cAbsoluteBlueprintID>";
-    let close = b"</iBlueprintLibrary-cAbsoluteBlueprintID>";
-    let mut blocks = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(open_at) = find_ignore_ascii_case(haystack, open, cursor) {
-        let content_start = open_at + open.len();
-        let Some(close_at) = find_ignore_ascii_case(haystack, close, content_start) else {
-            break;
-        };
-        blocks.push((open_at, close_at + close.len(), content_start, close_at));
-        cursor = close_at + close.len();
-    }
-    blocks
-}
-
-#[cfg(test)]
-fn absolute_blueprint_regex() -> &'static Regex {
-    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?is)<iBlueprintLibrary-cAbsoluteBlueprintID>(.*?)</iBlueprintLibrary-cAbsoluteBlueprintID>",
-        )
-        .expect("Шаблон поиска блока абсолютного блюпринта должен быть корректным")
-    })
-}
-
-#[cfg(test)]
-fn provider_regex() -> &'static Regex {
-    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r"(?is)<Provider[^>]*>([^<]*)</Provider>")
-            .expect("Шаблон поиска Provider должен быть корректным")
-    })
-}
-
-#[cfg(test)]
-fn product_regex() -> &'static Regex {
-    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r"(?is)<Product[^>]*>([^<]*)</Product>")
-            .expect("Шаблон поиска Product должен быть корректным")
-    })
-}
-
-#[cfg(test)]
-fn blueprint_id_regex() -> &'static Regex {
-    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r"(?is)<BlueprintID[^>]*>([^<]*)</BlueprintID>")
-            .expect("Шаблон поиска BlueprintID должен быть корректным")
-    })
-}
-
-#[cfg(test)]
-fn bare_blueprint_regex() -> &'static Regex {
-    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?is)<Provider[^>]*>([^<]*)</Provider>[^<]*<Product[^>]*>([^<]*)</Product>[^<]*<BlueprintID[^>]*>([^<]*)</BlueprintID>",
-        )
-        .expect("Шаблон поиска голой ссылки на блюпринт должен быть корректным")
-    })
-}
-
-#[cfg(test)]
-fn trimmed_range(capture: &regex::Match<'_>, offset: usize) -> std::ops::Range<usize> {
-    let value = capture.as_str();
-    let leading = value.len() - value.trim_start().len();
-    let trimmed = value.trim();
-    let start = capture.start() + offset + leading;
-    start..start + trimmed.len()
-}
-
-fn asset_relative_path(provider: &str, product: &str, blueprint: &str) -> Option<String> {
-    let blueprint_path = Path::new(blueprint);
-    let extension = blueprint_path.extension()?;
-    let file_name = if extension.eq_ignore_ascii_case("xml") {
-        blueprint_path.with_extension("bin")
-    } else if extension.eq_ignore_ascii_case("bin") {
-        blueprint_path.to_path_buf()
-    } else {
-        return None;
-    };
-    let relative_path = Path::new(provider).join(product).join(file_name);
-    let components: Vec<_> = relative_path.components().collect();
-    if components.is_empty()
-        || components
-            .iter()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return None;
-    }
-    Some(relative_path.to_string_lossy().replace('\\', "/"))
-}
-
-fn build_asset_reference(
-    provider: &str,
-    product: &str,
-    blueprint: &str,
-    provider_range: std::ops::Range<usize>,
-    product_range: std::ops::Range<usize>,
-    blueprint_range: std::ops::Range<usize>,
-) -> Option<AssetReference> {
-    let provider = decode_xml_text(provider.trim());
-    let product = decode_xml_text(product.trim());
-    let blueprint = decode_xml_text(blueprint.trim());
-    if provider.is_empty() || product.is_empty() || blueprint.is_empty() {
-        return None;
-    }
-    let path = asset_relative_path(&provider, &product, &blueprint)?;
-    Some(AssetReference {
-        path,
-        provider_range,
-        product_range,
-        blueprint_range,
-    })
-}
-
-/// Собирает все ссылки на ассеты маршрута.
-///
-/// Основной источник — блоки `iBlueprintLibrary-cAbsoluteBlueprintID`, внутри которых
-/// Provider, Product и путь к блюпринту принадлежат одной ссылке. Такой разбор не даёт
-/// пустым заготовкам `ReskinBlueprintID` «съесть» ссылку следующего за ними объекта.
-///
-/// Разбор идёт вручную, без регулярных выражений с ленивым `.*?`: такие шаблоны
-/// просматривают остаток файла заново для каждого блока и делают проверку маршрута
-/// квадратичной по размеру XML.
-fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetReference> {
-    let haystack = xml.as_bytes();
-    let mut references: Vec<(usize, AssetReference)> = Vec::new();
-    let mut covered: Vec<std::ops::Range<usize>> = Vec::new();
-
-    for (open_at, block_end, content_start, content_end) in absolute_blueprint_blocks(haystack) {
-        covered.push(open_at..block_end);
-        let Some((provider_range, _)) =
-            find_tagged_value(haystack, "Provider", content_start, content_end)
-        else {
-            continue;
-        };
-        let Some((product_range, _)) =
-            find_tagged_value(haystack, "Product", content_start, content_end)
-        else {
-            continue;
-        };
-        let Some((blueprint_range, _)) =
-            find_tagged_value(haystack, "BlueprintID", content_start, content_end)
-        else {
-            continue;
-        };
-        let Some(reference) = build_asset_reference(
-            &xml[provider_range.clone()],
-            &xml[product_range.clone()],
-            &xml[blueprint_range.clone()],
-            provider_range,
-            product_range,
-            blueprint_range,
-        ) else {
-            continue;
-        };
-        references.push((open_at, reference));
-    }
-
-    // Запасной вариант для файлов без обёртки `iBlueprintLibrary-cAbsoluteBlueprintID`.
-    let mut covered_index = 0usize;
-    let mut cursor = 0usize;
-    while let Some(position) = find_ignore_ascii_case(haystack, b"<Provider", cursor) {
-        let Some((provider_range, product_range, blueprint_range, end)) =
-            match_bare_blueprint(haystack, position)
-        else {
-            cursor = position + 1;
-            continue;
-        };
-        cursor = end;
-        while covered_index < covered.len() && covered[covered_index].end <= position {
-            covered_index += 1;
-        }
-        if covered_index < covered.len() && covered[covered_index].contains(&position) {
-            continue;
-        }
-        let Some(reference) = build_asset_reference(
-            &xml[provider_range.clone()],
-            &xml[product_range.clone()],
-            &xml[blueprint_range.clone()],
-            provider_range,
-            product_range,
-            blueprint_range,
-        ) else {
-            continue;
-        };
-        references.push((position, reference));
-    }
-
-    references.sort_by_key(|(position, _)| *position);
-    references
-        .into_iter()
-        .map(|(_, reference)| reference)
-        .collect()
-}
-
-/// Разбирает «голую» ссылку `<Provider>…</Provider><Product>…</Product><BlueprintID>…</BlueprintID>`.
-///
-/// Между элементами допускается только текст: как и в исходном шаблоне
-/// `[^<]*`, никакой другой тег между ними стоять не может.
-fn match_bare_blueprint(
-    haystack: &[u8],
-    start: usize,
-) -> Option<(
-    std::ops::Range<usize>,
-    std::ops::Range<usize>,
-    std::ops::Range<usize>,
-    usize,
-)> {
-    let (provider_range, after_provider) = parse_tagged_value(haystack, "Provider", start)?;
-    let product_start = next_tag_start(haystack, after_provider)?;
-    let (product_range, after_product) = parse_tagged_value(haystack, "Product", product_start)?;
-    let blueprint_start = next_tag_start(haystack, after_product)?;
-    let (blueprint_range, end) = parse_tagged_value(haystack, "BlueprintID", blueprint_start)?;
-    Some((provider_range, product_range, blueprint_range, end))
-}
-
-#[cfg(test)]
-pub(crate) fn extract_asset_references(xml: &str) -> HashSet<String> {
-    extract_asset_references_with_locations(xml)
-        .into_iter()
-        .map(|reference| reference.path)
-        .collect()
-}
-
-/// Прежняя реализация разбора на регулярных выражениях.
-///
-/// Оставлена для сверки: ручной разбор обязан давать ровно тот же результат.
-#[cfg(test)]
-fn extract_asset_references_with_locations_regex(xml: &str) -> Vec<AssetReference> {
-    let mut references: Vec<(usize, AssetReference)> = Vec::new();
-    let mut covered: Vec<std::ops::Range<usize>> = Vec::new();
-
-    for block in absolute_blueprint_regex().captures_iter(xml) {
-        let Some(whole) = block.get(0) else {
-            continue;
-        };
-        let Some(inner) = block.get(1) else {
-            continue;
-        };
-        covered.push(whole.start()..whole.end());
-        let block_text = inner.as_str();
-        let Some(provider_match) = provider_regex().captures(block_text) else {
-            continue;
-        };
-        let Some(product_match) = product_regex().captures(block_text) else {
-            continue;
-        };
-        let Some(blueprint_match) = blueprint_id_regex().captures(block_text) else {
-            continue;
-        };
-        let Some(provider_capture) = provider_match.get(1) else {
-            continue;
-        };
-        let Some(product_capture) = product_match.get(1) else {
-            continue;
-        };
-        let Some(blueprint_capture) = blueprint_match.get(1) else {
-            continue;
-        };
-        let offset = inner.start();
-        let Some(reference) = build_asset_reference(
-            provider_capture.as_str(),
-            product_capture.as_str(),
-            blueprint_capture.as_str(),
-            trimmed_range(&provider_capture, offset),
-            trimmed_range(&product_capture, offset),
-            trimmed_range(&blueprint_capture, offset),
-        ) else {
-            continue;
-        };
-        references.push((whole.start(), reference));
-    }
-
-    let mut covered_index = 0usize;
-    for captures in bare_blueprint_regex().captures_iter(xml) {
-        let Some(whole) = captures.get(0) else {
-            continue;
-        };
-        while covered_index < covered.len() && covered[covered_index].end <= whole.start() {
-            covered_index += 1;
-        }
-        if covered_index < covered.len() && covered[covered_index].contains(&whole.start()) {
-            continue;
-        }
-        let Some(provider_capture) = captures.get(1) else {
-            continue;
-        };
-        let Some(product_capture) = captures.get(2) else {
-            continue;
-        };
-        let Some(blueprint_capture) = captures.get(3) else {
-            continue;
-        };
-        let Some(reference) = build_asset_reference(
-            provider_capture.as_str(),
-            product_capture.as_str(),
-            blueprint_capture.as_str(),
-            trimmed_range(&provider_capture, 0),
-            trimmed_range(&product_capture, 0),
-            trimmed_range(&blueprint_capture, 0),
-        ) else {
-            continue;
-        };
-        references.push((whole.start(), reference));
-    }
-
-    references.sort_by_key(|(position, _)| *position);
-    references
-        .into_iter()
-        .map(|(_, reference)| reference)
-        .collect()
-}
-
-fn route_tile_label(route_path: &Path, source_file: &Path) -> String {
-    let relative = source_file.strip_prefix(route_path).unwrap_or(source_file);
-    let stem = source_file
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default();
-    let bytes = stem.as_bytes();
-    if bytes.len() >= 14 {
-        for start in 0..=bytes.len() - 14 {
-            let tile = &bytes[start..start + 14];
-            if (tile[0] == b'+' || tile[0] == b'-')
-                && tile[1..7].iter().all(u8::is_ascii_digit)
-                && (tile[7] == b'+' || tile[7] == b'-')
-                && tile[8..14].iter().all(u8::is_ascii_digit)
-            {
-                return format!(
-                    "тайл X={} Z={}",
-                    String::from_utf8_lossy(&tile[..7]),
-                    String::from_utf8_lossy(&tile[7..])
-                );
-            }
-        }
-    }
-    relative.display().to_string()
-}
-
-pub(crate) fn asset_kind(path: &str) -> AssetKind {
-    let components: Vec<_> = path.split('/').collect();
-    if components
-        .iter()
-        .any(|component| component.eq_ignore_ascii_case("Networks"))
-    {
-        AssetKind::Loft
-    } else if components
-        .iter()
-        .any(|component| component.eq_ignore_ascii_case("Scenery"))
-    {
-        AssetKind::Scenery
-    } else {
-        AssetKind::Other
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_kind, collect_route_files, extract_asset_references_with_locations,
-        find_similar_asset_files, has_umlauts, has_umlauts_in_xml, inspect_umlaut_asset,
-        leftover_temporary_work_directories, name_distance, referenced_geometry_paths,
-        resolve_asset_path, route_tile_label, transliterate_umlauts, transliterate_xml_umlauts,
-        transliterated_asset_path, AssetKind, AssetUse, UmlautAsset, TEMP_WORK_DIRECTORY_PREFIX,
+        asset_kind, asset_kind_name, check_asset_kind_compatibility, collect_route_files,
+        extract_asset_references_with_locations, find_similar_asset_files, folders_with_umlauts,
+        has_umlauts, has_umlauts_in_xml, inspect_umlaut_asset, leftover_temporary_work_directories,
+        name_distance, referenced_geometry_paths, resolve_asset_path, route_tile_label,
+        transliterate_umlauts, transliterate_xml_umlauts, transliterated_asset_path, AssetKind,
+        AssetUse, UmlautAsset, TEMP_WORK_DIRECTORY_PREFIX,
     };
-    use crate::app::{asset_inventory_rows, InventoryLayout};
+    use crate::inventory_ui::InventoryLayout;
+    use crate::RouteFile;
     use eframe::egui;
     use std::path::Path;
     use std::path::PathBuf;
@@ -2816,8 +3092,9 @@ mod tests {
 
         // Поэтому ассет не считается потерянным, а предлагается переименование.
         let uses = [AssetUse {
-            source_file: PathBuf::from(r"C:\Route\Scenery\+000041+000009.bin"),
+            source_file: RouteFile::Path(PathBuf::from(r"C:\Route\Scenery\+000041+000009.bin")),
             tile: "тайл X=+000041 Z=+000009".to_owned(),
+            kind: AssetKind::Scenery,
         }];
         let (asset, _) =
             inspect_umlaut_asset(reference, &uses, assets, Path::new("missing-serz.exe"));
@@ -2828,18 +3105,35 @@ mod tests {
             .any(|evidence| evidence.contains("называется иначе")));
     }
 
+    /// Прогоняет кадр egui без окна.
+    ///
+    /// Текстуры кадра никуда не выгружаются, поэтому дельты сбрасываются: иначе
+    /// контекст паникует при удалении.
+    fn run_headless(
+        context: &egui::Context,
+        input: egui::RawInput,
+        mut run: impl FnMut(&mut egui::Ui),
+    ) {
+        let mut output = context.run_ui(input, &mut run);
+        output.textures_delta.clear();
+    }
+
     /// Готовит строку таблицы инвентаря с заданным числом тайлов.
     fn inventory_row(tile_count: usize) -> (Vec<AssetUse>, UmlautAsset) {
         let uses: Vec<AssetUse> = (0..tile_count)
             .map(|index| AssetUse {
-                source_file: PathBuf::from(format!("route/rail/{index}.bin")),
+                source_file: RouteFile::Path(PathBuf::from(format!("route/rail/{index}.bin"))),
                 tile: format!("тайл {}", index + 1),
+                kind: AssetKind::Scenery,
             })
             .collect();
         let umlaut = UmlautAsset {
             path: "Scenery/Prüfung.xml".to_string(),
             uses: uses.clone(),
             evidence: vec!["имя содержит умляут".to_string()],
+            unsupported: Vec::new(),
+            kind: AssetKind::Scenery,
+            needs_transliteration: true,
         };
         (uses, umlaut)
     }
@@ -2847,7 +3141,7 @@ mod tests {
     /// Рисует таблицу инвентаря в headless-контексте egui и возвращает её высоту.
     fn render_inventory_height(tile_count: usize) -> f32 {
         let (uses, umlaut) = inventory_row(tile_count);
-        let rows: Vec<crate::app::InventoryRow<'_>> =
+        let rows: Vec<crate::inventory_ui::InventoryRow<'_>> =
             vec![("Scenery/Prüfung.xml", uses.as_slice(), true, Some(&umlaut))];
 
         let context = egui::Context::default();
@@ -2858,20 +3152,20 @@ mod tests {
             )),
             ..Default::default()
         };
-        let layout = InventoryLayout::new(880.0, 8.0, true);
+        let layout = InventoryLayout::new(880.0, true);
         let mut height = 0.0;
-        let _ = context.run(input, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let mut actions = crate::app::InventoryRowActions::default();
-                asset_inventory_rows(
-                    ui,
-                    &rows,
-                    Path::new("C:\\RailWorks\\Content\\Assets"),
-                    &layout,
-                    true,
-                    false,
-                    &mut actions,
-                );
+        run_headless(&context, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let mut actions = crate::inventory_ui::InventoryRowActions::default();
+                let mut sort = crate::inventory_ui::InventorySort::default();
+                let table_data = crate::inventory_ui::InventoryTable {
+                    rows: &rows,
+                    assets_root: Path::new("C:\\RailWorks\\Content\\Assets"),
+                    layout,
+                    show_tiles: true,
+                    repair_busy: false,
+                };
+                crate::inventory_ui::asset_inventory_table(ui, &table_data, &mut sort, &mut actions);
                 height = ui.min_rect().height();
             });
         });
@@ -2890,10 +3184,11 @@ mod tests {
         );
     }
 
+    /// Название ассета должно начинаться с левого края таблицы.
     #[test]
     fn asset_column_starts_at_the_left_edge_of_the_table() {
         let (uses, umlaut) = inventory_row(1);
-        let rows: Vec<crate::app::InventoryRow<'_>> =
+        let rows: Vec<crate::inventory_ui::InventoryRow<'_>> =
             vec![("Scenery/Prüfung.xml", uses.as_slice(), true, Some(&umlaut))];
 
         let context = egui::Context::default();
@@ -2904,93 +3199,60 @@ mod tests {
             )),
             ..Default::default()
         };
-        let layout = InventoryLayout::new(880.0, 8.0, true);
-        let mut actions = crate::app::InventoryRowActions::default();
-        let mut grid_rect = egui::Rect::ZERO;
-        let _ = context.run(input, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                grid_rect = asset_inventory_rows(
-                    ui,
-                    &rows,
-                    Path::new("C:\\RailWorks\\Content\\Assets"),
-                    &layout,
-                    true,
-                    false,
-                    &mut actions,
-                );
+        let layout = InventoryLayout::new(880.0, true);
+        let mut actions = crate::inventory_ui::InventoryRowActions::default();
+        let mut sort = crate::inventory_ui::InventorySort::default();
+        let mut table_left = 0.0;
+        run_headless(&context, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                table_left = ui.max_rect().left();
+                let table_data = crate::inventory_ui::InventoryTable {
+                    rows: &rows,
+                    assets_root: Path::new("C:\\RailWorks\\Content\\Assets"),
+                    layout,
+                    show_tiles: true,
+                    repair_busy: false,
+                };
+                crate::inventory_ui::asset_inventory_table(ui, &table_data, &mut sort, &mut actions);
             });
         });
 
-        let cell = actions.path_rects[0];
+        let label = actions.path_rects[0];
         assert!(
-            (cell.left() - grid_rect.left()).abs() < 1.0,
+            (label.left() - table_left).abs() < 1.0,
             "столбец ассетов должен начинаться с левого края таблицы: {:?} против {:?}",
-            cell.left(),
-            grid_rect.left()
-        );
-        assert!(
-            (cell.width() - layout.path_width).abs() < 1.0,
-            "столбец ассетов должен быть заданной ширины: {:?}",
-            cell.width()
+            label.left(),
+            table_left
         );
     }
 
-    /// Текст в ячейке выравнивается по заданному краю.
+    /// Строки сортируются по названию ассета и по числу использований.
     #[test]
-    fn cell_text_is_aligned_by_the_requested_edge() {
-        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 0.0), egui::vec2(200.0, 18.0));
-        assert_eq!(crate::app::text_offset_x(egui::Align::Min, rect, 50.0), 100.0);
-        assert_eq!(crate::app::text_offset_x(egui::Align::Center, rect, 50.0), 175.0);
-        assert_eq!(crate::app::text_offset_x(egui::Align::Max, rect, 50.0), 250.0);
-    }
-
-    /// Столбцы шапки и строк должны совпадать, иначе подписи съезжают.
-    #[test]
-    fn inventory_header_columns_match_row_columns() {
+    fn inventory_rows_are_sorted_by_the_selected_column() {
         let (uses, umlaut) = inventory_row(1);
-        let rows: Vec<crate::app::InventoryRow<'_>> =
-            vec![("Scenery/Prüfung.xml", uses.as_slice(), true, Some(&umlaut))];
-
-        let context = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(900.0, 700.0),
-            )),
-            ..Default::default()
-        };
-        let layout = InventoryLayout::new(880.0, 8.0, true);
-        let mut actions = crate::app::InventoryRowActions::default();
-        let mut header_cells = None;
-        let _ = context.run(input, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                header_cells = crate::app::asset_inventory_header(ui, &layout, true);
-                asset_inventory_rows(
-                    ui,
-                    &rows,
-                    Path::new("C:\\RailWorks\\Content\\Assets"),
-                    &layout,
-                    true,
-                    false,
-                    &mut actions,
-                );
-            });
-        });
-
-        let header = header_cells.expect("шапка должна вернуть ячейки");
-        let row = actions.path_rects[0];
-        assert!(
-            (header.path.0.left() - row.left()).abs() < 1.0
-                && (header.path.0.right() - row.right()).abs() < 1.0,
-            "столбец ассетов в шапке и в строке должен совпадать: {:?} против {:?}",
-            header.path.0,
-            row
+        let mut rows: Vec<crate::inventory_ui::InventoryRow<'_>> = vec![
+            ("B/second.bin", uses.as_slice(), false, Some(&umlaut)),
+            ("A/first.bin", uses.as_slice(), false, Some(&umlaut)),
+        ];
+        crate::inventory_ui::sort_inventory_rows(
+            &mut rows,
+            crate::inventory_ui::InventorySort {
+                column: crate::inventory_ui::InventorySortColumn::Path,
+                descending: false,
+            },
         );
-        assert!(
-            header.usage.0.left() > header.path.0.right(),
-            "столбец использований должен идти после столбца ассетов: {:?}",
-            header.usage.0
+        assert_eq!(rows[0].0, "A/first.bin");
+        assert_eq!(rows[1].0, "B/second.bin");
+
+        crate::inventory_ui::sort_inventory_rows(
+            &mut rows,
+            crate::inventory_ui::InventorySort {
+                column: crate::inventory_ui::InventorySortColumn::Path,
+                descending: true,
+            },
         );
+        assert_eq!(rows[0].0, "B/second.bin");
+        assert_eq!(rows[1].0, "A/first.bin");
     }
 
     /// По двойному клику открывается папка, в которой лежит ассет.
@@ -2999,7 +3261,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let assets = temp.path().join("Assets");
         std::fs::create_dir_all(assets.join("Scenery")).unwrap();
-        let folder = crate::app::asset_folder_to_open(&assets, "Scenery/Prüfung.xml").unwrap();
+        let folder = crate::inventory_ui::asset_folder_to_open(&assets, "Scenery/Prüfung.xml").unwrap();
         assert_eq!(folder, assets.join("Scenery"));
     }
 
@@ -3009,7 +3271,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let assets = temp.path().join("Assets");
         std::fs::create_dir_all(&assets).unwrap();
-        let folder = crate::app::asset_folder_to_open(&assets, "Scenery/Missing/Prüfung.xml").unwrap();
+        let folder = crate::inventory_ui::asset_folder_to_open(&assets, "Scenery/Missing/Prüfung.xml").unwrap();
         assert_eq!(folder, assets);
     }
 
@@ -3027,20 +3289,21 @@ mod tests {
         let mut shortened = String::new();
         let mut truncated = false;
         let mut width = 0.0;
-        let _ = context.run(input, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let (text, was_truncated) = crate::app::elide_asset_path(
+        run_headless(&context, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let (text, was_truncated) = crate::inventory_ui::elide_asset_path(
                     ui,
                     "CS_Addon/HeKl/Vegetace/Stromy3D/Akat3D/170SmrekZiomennyPen0001.bin",
                     300.0,
                 );
                 shortened = text;
                 truncated = was_truncated;
-                width = crate::app::measure_cell_text(
-                    ui,
-                    &shortened,
-                    &egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body)),
-                );
+                let font_id = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
+                width = ui
+                    .painter()
+                    .layout_no_wrap(shortened.clone(), font_id, ui.visuals().text_color())
+                    .size()
+                    .x;
             });
         });
         assert!(shortened.starts_with('…'), "путь должен обрезаться слева: {shortened}");
@@ -3053,6 +3316,434 @@ mod tests {
             width <= 300.0,
             "обрезанный путь должен помещаться в столбец: {width}"
         );
+    }
+    /// Ячейка измеряется по полному тексту, а рисуется укороченным: по полному
+    /// тексту столбец подгоняется двойным кликом по границе.
+    #[test]
+    fn fitted_label_measures_full_text_but_shows_short_one() {
+        let full = "AP/WherryLines/Scenery/Level_Crossings/Girlings_Bungalow/ATS_MWL_LC.bin";
+        let shown = "…ATS_MWL_LC.bin";
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let mut full_width = 0.0;
+        let mut short_width = 0.0;
+        run_headless(&context, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let font_id = egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
+                full_width = ui
+                    .painter()
+                    .layout_no_wrap(full.to_owned(), font_id.clone(), ui.visuals().text_color())
+                    .size()
+                    .x;
+                short_width = ui
+                    .painter()
+                    .layout_no_wrap(shown.to_owned(), font_id.clone(), ui.visuals().text_color())
+                    .size()
+                    .x;
+                ui.add(crate::inventory_ui::FittedLabel {
+                    full: full.to_owned(),
+                    shown: shown.to_owned(),
+                    color: ui.visuals().text_color(),
+                    font_id,
+                    measure_full: true,
+                    align: egui::Align::Min,
+                });
+            });
+        });
+        assert!(
+            full_width > short_width + 50.0,
+            "полный путь должен быть заметно шире укороченного: {full_width} против {short_width}"
+        );
+    }
+
+    /// Двойной клик по границе столбца подгоняет ширину под содержимое, как в Excel.
+    #[test]
+    fn double_click_on_column_border_fits_the_column() {
+        let (uses, umlaut) = inventory_row(1);
+        let rows: Vec<crate::inventory_ui::InventoryRow<'_>> =
+            vec![("Scenery/Prüfung.xml", uses.as_slice(), true, Some(&umlaut))];
+
+        let context = egui::Context::default();
+        let layout = InventoryLayout::new(880.0, true);
+
+        let frame = |context: &egui::Context, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut actions = crate::inventory_ui::InventoryRowActions::default();
+            let mut sort = crate::inventory_ui::InventorySort::default();
+            let mut table_left = 0.0;
+            run_headless(context, input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    table_left = ui.max_rect().left();
+                    let table_data = crate::inventory_ui::InventoryTable {
+                        rows: &rows,
+                        assets_root: Path::new("C:\\RailWorks\\Content\\Assets"),
+                        layout,
+                        show_tiles: true,
+                        repair_busy: false,
+                    };
+                    crate::inventory_ui::asset_inventory_table(ui, &table_data, &mut sort, &mut actions);
+                });
+            });
+            (actions, table_left)
+        };
+
+        // Первый кадр: рисуем таблицу и запоминаем, где стоят столбцы.
+        let (actions, table_left) = frame(&context, Vec::new());
+        let usage_center = actions.usage_rects[0].center().x;
+        let separator_x = table_left + layout.path_width;
+
+        // Второй кадр: двойной клик по границе столбца с ассетами.
+        let click = |pressed: bool| egui::Event::PointerButton {
+            pos: egui::pos2(separator_x, 100.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(
+            &context,
+            vec![
+                click(true),
+                click(false),
+                click(true),
+                click(false),
+            ],
+        );
+
+        // Третий кадр: столбец подгоняется под содержимое, а на четвёртом
+        // новая ширина уже применяется.
+        frame(&context, Vec::new());
+        let (actions, _) = frame(&context, Vec::new());
+        let new_center = actions.usage_rects[0].center().x;
+        assert!(
+            new_center < usage_center - 10.0,
+            "столбец ассетов должен сузиться под содержимое: {new_center} против {usage_center}"
+        );
+    }
+
+    /// Французские буквы переводятся на английский по правилам языка.
+    #[test]
+    fn transliterates_french_letters() {
+        assert_eq!(
+            super::transliterate_umlauts("Café Étoile Façade"),
+            "Cafe Etoile Facade"
+        );
+        assert_eq!(super::transliterate_umlauts("Cœur"), "Coeur");
+        assert_eq!(super::transliterate_umlauts("Forêt"), "Foret");
+    }
+
+    /// Символы, которые игра не грузит, пользователь заменяет сам.
+    #[test]
+    fn detects_unsupported_characters_and_applies_user_fixes() {
+        let unsupported = super::unsupported_characters("Oelfa\u{0441}_Nr1");
+        assert_eq!(
+            unsupported.into_iter().collect::<Vec<char>>(),
+            vec!['\u{0441}'],
+            "кириллическая буква должна попасть в список"
+        );
+        assert!(super::unsupported_characters("Oelfass_Nr1").is_empty());
+
+        let mut fixes = super::CharacterFixes::new();
+        fixes.insert('\u{0441}', "s".to_owned());
+        assert_eq!(
+            super::transliterate_text("Oelfa\u{0441}_Nr1", &fixes),
+            "Oelfas_Nr1"
+        );
+        assert_eq!(super::default_replacement('\u{0441}'), "c");
+        assert_eq!(super::default_replacement('\u{FFDF}'), "ss");
+        assert_eq!(super::describe_character('\u{0441}'), "кириллическая буква");
+    }
+
+    /// Тип ассета определяется по содержимому, а не по имени папки.
+    #[test]
+    fn detects_asset_kind_by_content() {
+        assert_eq!(
+            super::asset_kind_from_xml(
+                "<SceneryRenderBlueprint><BlueprintSetID>x</BlueprintSetID></SceneryRenderBlueprint>"
+            ),
+            AssetKind::Scenery
+        );
+        assert_eq!(
+            super::asset_kind_from_xml(
+                "<RenderBlueprint><BlueprintSetID>x</BlueprintSetID></RenderBlueprint>"
+            ),
+            AssetKind::Loft
+        );
+        assert_eq!(super::asset_kind_from_xml("<Vehicle/>"), AssetKind::Other);
+    }
+
+    /// Ассет с кириллической буквой вместо латинской находится по сходству имени.
+    #[test]
+    fn finds_asset_with_cyrillic_letter_in_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("Dominique/Scenery/Engins de chantier");
+        std::fs::create_dir_all(&folder).unwrap();
+        // В игре встречается кириллическая «Е» вместо латинской.
+        let file = folder.join("Bulldozer \u{0415} Pneus en stationnement.bin");
+        std::fs::write(&file, b"data").unwrap();
+
+        let found = super::resolve_asset_path(
+            assets,
+            "Dominique/Scenery/Engins de chantier/Bulldozer E Pneus en stationnement.bin",
+        )
+        .unwrap();
+        assert_eq!(found, Some(file));
+    }
+
+    /// Файлы с разными именами не путаются между собой.
+    #[test]
+    fn does_not_confuse_different_asset_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("paverybs/Scenery/Procedural");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("PR_pastureFence_02.bin"), b"data").unwrap();
+        std::fs::write(folder.join("PR_pastureFence_02b.bin"), b"data").unwrap();
+
+        // Ссылка ведёт на 02b, а рядом лежит ещё и 02: спутать их нельзя.
+        let found = super::resolve_asset_path(
+            assets,
+            "paverybs/Scenery/Procedural/PR_pastureFence_02b.bin",
+        )
+        .unwrap();
+        assert_eq!(found, Some(folder.join("PR_pastureFence_02b.bin")));
+    }
+
+    /// Архивы .ap распаковываются: без них список ассетов остаётся пустым.
+    #[test]
+    fn extracts_route_archives() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let route = temp.path();
+        let archive_path = route.join("MainContent.ap");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "Networks/Loft Tiles/+000000+000000.bin",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"data").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let members = super::collect_archive_members(route).unwrap();
+        assert_eq!(members.len(), 1);
+        assert!(
+            members[0].file_name().ends_with("+000000+000000.bin"),
+            "запись архива должна сохранять имя файла"
+        );
+    }
+
+    /// Файл рядом с архивом перекрывает одноимённый файл из архива.
+    #[test]
+    fn files_outside_archive_override_archive_members() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let route = temp.path();
+        {
+            let file = std::fs::File::create(route.join("MainContent.ap")).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "TemplateRoutes/route.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"<root/>").unwrap();
+            zip.finish().unwrap();
+        }
+        let members = super::collect_archive_members(route).unwrap();
+        let inside = members[0].route_name(route).unwrap();
+        assert_eq!(inside, "TemplateRoutes/route.xml");
+
+        // Тот же файл рядом с архивом: игра читает его вместо файла из архива.
+        let outside = route.join("TemplateRoutes/route.xml");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, b"<root/>").unwrap();
+        let name = crate::RouteFile::Path(outside)
+            .route_name(route)
+            .unwrap();
+        assert!(name.eq_ignore_ascii_case(&inside));
+    }
+
+    /// Изменённый файл из архива кладётся рядом с архивом: так он перекроет
+    /// оригинал, а сам архив останется нетронутым.
+    #[test]
+    fn changed_archive_file_is_installed_next_to_the_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let route = temp.path();
+        let inside = crate::RouteFile::Archive {
+            archive: route.join("MainContent.ap"),
+            name: "TemplateRoutes/route.xml".to_owned(),
+        };
+        let target = inside.install_target(route);
+        assert_eq!(target, route.join("TemplateRoutes/route.xml"));
+    }
+
+    /// Ссылки на составы лежат внутри iRailVehicleBlueprint: такие ассеты —
+    /// файлы поездов, а не объекты маршрута.
+    #[test]
+    fn detects_vehicle_references_by_their_context() {
+        let xml = r#"
+            <root>
+                <SceneryRenderBlueprint>
+                    <iBlueprintLibrary-cAbsoluteBlueprintID>
+                        <BlueprintSetID><iBlueprintLibrary-cBlueprintSetID>
+                            <Provider d:type="cDeltaString">Prov</Provider>
+                            <Product d:type="cDeltaString">Prod</Product>
+                        </iBlueprintLibrary-cBlueprintSetID></BlueprintSetID>
+                        <BlueprintID d:type="cDeltaString">Scenery/House.bin</BlueprintID>
+                    </iBlueprintLibrary-cAbsoluteBlueprintID>
+                </SceneryRenderBlueprint>
+                <iRailVehicleBlueprint>
+                    <iBlueprintLibrary-cAbsoluteBlueprintID>
+                        <BlueprintSetID><iBlueprintLibrary-cBlueprintSetID>
+                            <Provider d:type="cDeltaString">Loco</Provider>
+                            <Product d:type="cDeltaString">Wagons</Product>
+                        </iBlueprintLibrary-cBlueprintSetID></BlueprintSetID>
+                        <BlueprintID d:type="cDeltaString">Trains/Loco.bin</BlueprintID>
+                    </iBlueprintLibrary-cAbsoluteBlueprintID>
+                </iRailVehicleBlueprint>
+            </root>
+        "#;
+        let references = extract_asset_references_with_locations(xml);
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].kind, AssetKind::Scenery);
+        assert_eq!(references[1].kind, AssetKind::Vehicle);
+    }
+
+    /// Замена ассета в маршруте, упакованном в .ap: файл из архива читается
+    /// прямо из zip, а изменённая копия кладётся рядом с архивом.
+    #[test]
+    fn replaces_asset_in_route_packed_into_archive() {
+        use std::io::Write;
+
+        let serz = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\serz.exe");
+        if !serz.is_file() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let route = temp.path();
+        let archive = route.join("MainContent.ap");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "Scenery/Grass.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(
+                br#"<root xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices"><SceneryRenderBlueprint><iBlueprintLibrary-cAbsoluteBlueprintID><BlueprintSetID><iBlueprintLibrary-cBlueprintSetID><Provider d:type="cDeltaString">Prov</Provider><Product d:type="cDeltaString">Prod</Product></iBlueprintLibrary-cBlueprintSetID></BlueprintSetID><BlueprintID d:type="cDeltaString">Scenery/Old.bin</BlueprintID></iBlueprintLibrary-cAbsoluteBlueprintID></SceneryRenderBlueprint></root>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let assets = temp.path().join("Assets");
+        std::fs::create_dir_all(assets.join("Prov2/Prod2/Scenery")).unwrap();
+        std::fs::write(assets.join("Prov2/Prod2/Scenery/New.bin"), b"new").unwrap();
+
+        let uses = [AssetUse {
+            source_file: RouteFile::Archive {
+                archive: archive.clone(),
+                name: "Scenery/Grass.xml".to_owned(),
+            },
+            tile: "тайл X=+000000 Z=+000000".to_owned(),
+            kind: AssetKind::Scenery,
+        }];
+
+        let xml = std::fs::read_to_string(&archive).ok();
+        let _ = xml;
+        let extracted = super::extract_asset_references_with_locations(
+            "<root><SceneryRenderBlueprint><iBlueprintLibrary-cAbsoluteBlueprintID><BlueprintSetID><iBlueprintLibrary-cBlueprintSetID><Provider d:type=\"cDeltaString\">Prov</Provider><Product d:type=\"cDeltaString\">Prod</Product></iBlueprintLibrary-cBlueprintSetID></BlueprintSetID><BlueprintID d:type=\"cDeltaString\">Scenery/Old.bin</BlueprintID></iBlueprintLibrary-cAbsoluteBlueprintID></SceneryRenderBlueprint></root>",
+        );
+        eprintln!("DBG references: {:?}", extracted.iter().map(|reference| reference.path.clone()).collect::<Vec<_>>());
+
+        let report = super::replace_missing_asset(
+            route,
+            &assets,
+            &serz,
+            "Prov/Prod/Scenery/Old.bin",
+            &assets.join("Prov2/Prod2/Scenery/New.bin"),
+            &uses,
+        )
+        .expect("замена ассета в архиве должна проходить");
+
+        assert_eq!(report.replaced_files, 1);
+        // Изменённый файл лежит рядом с архивом: игра прочитает его вместо
+        // записи внутри архива.
+        let installed = route.join("Scenery/Grass.xml");
+        assert!(installed.is_file(), "изменённый файл должен лежать рядом с архивом");
+        let contents = std::fs::read_to_string(&installed).unwrap();
+        assert!(
+            contents.contains(r"Scenery\New.xml"),
+            "ссылка в файле должна вести на новый ассет: {contents}"
+        );
+    }
+
+    /// Пути, отличающиеся только регистром, — это один и тот же ассет: игра
+    /// регистр не различает.
+    #[test]
+    fn assets_with_different_case_are_the_same_asset() {
+        assert_eq!(
+            super::asset_key("RSSLO_Routes/Wien/Scenery/Grass/Grass_Mix_06.bin"),
+            super::asset_key("RSSLO_Routes/wien/scenery/grass/grass_mix_06.bin")
+        );
+    }
+
+    /// Ссылки, отличающиеся регистром, попадают в один ассет: игра читает
+    /// пути без учёта регистра.
+    #[test]
+    fn merges_assets_referenced_with_different_case() {
+        let serz = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\serz.exe");
+        if !serz.is_file() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let route = temp.path();
+        std::fs::create_dir_all(route.join("Scenery")).unwrap();
+        for (name, folder) in [
+            ("a.xml", "Scenery"),
+            ("b.xml", "scenery"),
+        ] {
+            let xml = format!(
+                "<root xmlns:d=\"http://schemas.microsoft.com/ado/2007/08/dataservices\"><SceneryRenderBlueprint><iBlueprintLibrary-cAbsoluteBlueprintID><BlueprintSetID><iBlueprintLibrary-cBlueprintSetID><Provider d:type=\"cDeltaString\">Prov</Provider><Product d:type=\"cDeltaString\">Prod</Product></iBlueprintLibrary-cBlueprintSetID></BlueprintSetID><BlueprintID d:type=\"cDeltaString\">{folder}/Grass.bin</BlueprintID></iBlueprintLibrary-cAbsoluteBlueprintID></SceneryRenderBlueprint></root>"
+            );
+            std::fs::write(route.join(name), xml).unwrap();
+        }
+        let assets = temp.path().join("Assets");
+        std::fs::create_dir_all(&assets).unwrap();
+
+        let result = super::check_route(route, &assets, &serz, true, 1, |_| {})
+            .expect("проверка маршрута должна пройти");
+
+        let scenery: Vec<_> = result
+            .asset_inventory
+            .iter()
+            .filter(|asset| asset.path.to_lowercase().contains("grass.bin"))
+            .collect();
+        assert_eq!(
+            scenery.len(),
+            1,
+            "ссылки с разным регистром должны попасть в один ассет"
+        );
+        assert_eq!(scenery[0].uses.len(), 2, "оба использования должны попасть в ассет");
     }
 
     /// Короткий путь не обрезается, и подсказка с полным названием не нужна.
@@ -3068,10 +3759,10 @@ mod tests {
         };
         let mut shortened = String::new();
         let mut truncated = true;
-        let _ = context.run(input, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
+        run_headless(&context, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let (text, was_truncated) =
-                    crate::app::elide_asset_path(ui, "Scenery/Prüfung.xml", 400.0);
+                    crate::inventory_ui::elide_asset_path(ui, "Scenery/Prüfung.xml", 400.0);
                 shortened = text;
                 truncated = was_truncated;
             });
@@ -3294,7 +3985,7 @@ mod tests {
             r"<GeometryID>Bruecke Fu&#223;ganger 5.GeoPcDx</GeometryID>"
         ));
         assert_eq!(
-            transliterate_xml_umlauts(r"<GeometryID>Bruecke Fu&#223;ganger 5.GeoPcDx</GeometryID>"),
+            transliterate_xml_umlauts(r"<GeometryID>Bruecke Fu&#223;ganger 5.GeoPcDx</GeometryID>", &super::CharacterFixes::new()),
             r"<GeometryID>Bruecke Fussganger 5.GeoPcDx</GeometryID>"
         );
         let route_xml = r#"
@@ -3332,8 +4023,9 @@ mod tests {
         );
 
         let uses = [AssetUse {
-            source_file: PathBuf::from(r"C:\Route\Scenery\+000041+000009.bin"),
+            source_file: RouteFile::Path(PathBuf::from(r"C:\Route\Scenery\+000041+000009.bin")),
             tile: "тайл X=+000041 Z=+000009".to_owned(),
+            kind: AssetKind::Scenery,
         }];
         let (asset, _) = inspect_umlaut_asset(
             &references[0].path,
@@ -3375,8 +4067,9 @@ mod tests {
         std::fs::create_dir_all(asset_file.parent().unwrap()).unwrap();
         std::fs::write(&asset_file, b"fixture").unwrap();
         let uses = [AssetUse {
-            source_file: PathBuf::from(r"C:\Route\Scenery\+000001+000002.bin"),
+            source_file: RouteFile::Path(PathBuf::from(r"C:\Route\Scenery\+000001+000002.bin")),
             tile: "тайл X=+000001 Z=+000002".to_owned(),
+            kind: AssetKind::Scenery,
         }];
         let (asset, _) =
             inspect_umlaut_asset(relative, &uses, &assets, Path::new("missing-serz.exe"));
@@ -3406,11 +4099,110 @@ mod tests {
         );
     }
 
+    /// Замена ассета допустима только на ассет того же типа.
+    #[test]
+    fn rejects_replacement_with_another_asset_kind() {
+        assert!(
+            check_asset_kind_compatibility(
+                "Provider/Product/Networks/Track.bin",
+                "Provider/Product/Networks/Other.bin"
+            )
+            .is_ok()
+        );
+        assert!(
+            check_asset_kind_compatibility(
+                "Provider/Product/Scenery/Building.bin",
+                "Provider/Product/Scenery/Other.bin"
+            )
+            .is_ok()
+        );
+        let error = check_asset_kind_compatibility(
+            "Provider/Product/Networks/Track.bin",
+            "Provider/Product/Scenery/Building.bin",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Networks"),
+            "для loft-объекта нужен ассет из Networks: {error}"
+        );
+        let error = check_asset_kind_compatibility(
+            "Provider/Product/Scenery/Building.bin",
+            "Provider/Product/Networks/Track.bin",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Scenery"),
+            "для scenery-объекта нужен ассет из Scenery: {error}"
+        );
+    }
+
+    /// Название типа ассета для интерфейса.
+    #[test]
+    fn names_asset_kinds_for_the_interface() {
+        assert_eq!(asset_kind_name(AssetKind::Loft), "loft-объект");
+        assert_eq!(asset_kind_name(AssetKind::Scenery), "scenery-объект");
+        assert_eq!(asset_kind_name(AssetKind::Other), "объект другого типа");
+    }
+
+    /// Папка с умляутом переименовывается вместе с файлом.
+    #[test]
+    fn renames_folders_with_umlauts_together_with_the_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let folder = assets.join("icepak/ice/Oelfa\u{00DF}_Nr1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let asset = folder.join("Oelfa\u{00DF}_Nr1.bin");
+        std::fs::write(&asset, b"data").unwrap();
+
+        let target = transliterated_asset_path(assets, &asset, &super::CharacterFixes::new()).unwrap();
+        assert_eq!(
+            target,
+            assets.join("icepak/ice/Oelfass_Nr1/Oelfass_Nr1.bin"),
+            "путь ассета должен быть транслитерирован целиком"
+        );
+
+        let folders = folders_with_umlauts(assets, &asset).unwrap();
+        assert_eq!(folders.len(), 1, "папка с умляутом должна быть найдена");
+    }
+
+    /// Папки Provider и Product не переименовываются: это затронуло бы другие
+    /// ассеты.
+    #[test]
+    fn keeps_provider_and_product_folders_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let asset = assets.join("icepak/ice/Oelfass_Nr1/Oelfass_Nr1.bin");
+        std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        std::fs::write(&asset, b"data").unwrap();
+
+        assert!(folders_with_umlauts(assets, &asset).unwrap().is_empty());
+        assert!(transliterated_asset_path(assets, &asset, &super::CharacterFixes::new()).is_ok());
+    }
+
+    /// Умляут в имени Provider останавливает переименование.
+    #[test]
+    fn refuses_to_rename_provider_with_umlaut() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        let asset = assets.join("\u{00DC}berice/ice/Oelfass_Nr1/Oelfass_Nr1.bin");
+        std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        std::fs::write(&asset, b"data").unwrap();
+
+        let error = transliterated_asset_path(assets, &asset, &super::CharacterFixes::new()).unwrap_err();
+        assert!(
+            error.contains("Provider"),
+            "переименование Provider должно быть запрещено: {error}"
+        );
+    }
+
     #[test]
     fn extracts_tile_coordinates_from_route_file_names() {
         let route = Path::new(r"C:\Routes\RouteA");
         let source = route.join("Scenery").join("+000012-000034.bin");
-        assert_eq!(route_tile_label(route, &source), "тайл X=+000012 Z=-000034");
+        assert_eq!(
+            route_tile_label(route, &RouteFile::Path(source.clone())),
+            "тайл X=+000012 Z=-000034"
+        );
     }
 
     #[test]
@@ -3432,12 +4224,202 @@ mod tests {
         let references = referenced_geometry_paths(xml);
 
         assert_eq!(references.len(), 2);
-        assert_eq!(references[0].0, r"RailVehicles\Brücke.GeoPcDx");
-        assert_eq!(references[1].0, r"Textures\Bäume.TgPcDx");
+        assert_eq!(references[0].0.to_text(), r"RailVehicles\Brücke.GeoPcDx");
+        assert_eq!(references[1].0.to_text(), r"Textures\Bäume.TgPcDx");
+    }
+
+    /// Проверка настоящего ассета: умляуты в папке, файле и ссылках.
+    #[test]
+    #[ignore]
+    fn repairs_real_asset_with_umlauts() {
+        let source = PathBuf::from(
+            r"X:\SteamLibrary\steamapps\common\RailWorks\Assets\icepak\ice\Oelfass_Nr1",
+        );
+        if !source.is_dir() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path().join("Assets");
+        let folder = assets.join("icepak/ice/Oelfass_Nr1");
+        std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+        copy_dir_all(&source, &folder);
+        // Возвращаем копии вид «до ремонта»: в именах снова умляут.
+        restore_umlaut_names(&folder);
+        let serz = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\serz.exe");
+        let route = temp.path().join("route");
+        std::fs::create_dir_all(&route).unwrap();
+        // Имя файла берём из копии: после ремонта он уже может быть переименован.
+        let bin_name = std::fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.to_lowercase().ends_with(".bin"))
+            .expect("в папке должен быть BIN");
+        let asset_relative = format!("icepak/ice/Oelfass_Nr1/{bin_name}");
+
+        let report = super::repair_umlaut_asset_chain(
+            &route,
+            &assets,
+            &serz,
+            &asset_relative,
+            &[],
+            &super::CharacterFixes::new(),
+        )
+        .expect("ремонт должен пройти");
+
+        eprintln!("REPORT files={:?}", report.files);
+        eprintln!("REPORT new_path={}", report.new_asset_path);
+        let names: Vec<String> = std::fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        eprintln!("REPORT folder={names:?}");
+        let moved = assets.join("icepak/ice/Oelfass_Nr1");
+        let geometry_name = std::fs::read_dir(&moved)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.to_lowercase().ends_with(".geopcdx"))
+            .expect("в папке должна быть геометрия");
+        let geometry = super::read_serz_xml(&serz, &moved.join(&geometry_name)).unwrap();
+        for (reference, _) in super::referenced_geometry_paths(&geometry) {
+            eprintln!("REPORT geometry reference={}", reference.to_text());
+        }
+        let textures: Vec<String> = std::fs::read_dir(moved.join("textures"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        eprintln!("REPORT textures={textures:?}");
+    }
+
+    fn copy_dir_all(source: &Path, target: &Path) {
+        std::fs::create_dir_all(target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let destination = target.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir_all(&entry.path(), &destination);
+            } else {
+                std::fs::copy(entry.path(), &destination).unwrap();
+            }
+        }
+    }
+
+    /// Возвращает именам файлов вид «до ремонта»: «ss» → «ß».
+    fn restore_umlaut_names(folder: &Path) {
+        for entry in std::fs::read_dir(folder).unwrap().filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().unwrap().is_dir() {
+                restore_umlaut_names(&entry.path());
+                continue;
+            }
+            if name.contains("ss") {
+                let restored = name.replace("ss", "\u{00DF}");
+                std::fs::rename(entry.path(), folder.join(restored)).unwrap();
+            }
+        }
+    }
+
+    /// Папка с кириллической «с» вместо латинской: ссылка на неё должна
+    /// находиться по сходству имени.
+    #[test]
+    fn resolves_reference_to_folder_with_cyrillic_letter() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path();
+        // В игре встречается папка «Oelfaс_Nr1» с кириллической «с».
+        let folder = assets.join("icepak/ice/Oelfa\u{0441}_Nr1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let geometry = folder.join("Oelfa\u{00DF}_Nr1.GeoPcDx");
+        std::fs::write(&geometry, b"data").unwrap();
+
+        let reference = super::GeometryReference::parse(
+            "icepak\\ice\\Oelfa\u{FFDF}_Nr1\\Oelfa\u{FFDF}_Nr1",
+        )
+        .expect("ссылка должна разбираться");
+        let (found, _) = super::resolve_product_reference(
+            assets,
+            &assets.join("icepak/ice"),
+            &folder.join("Oelfa\u{00DF}_Nr1.bin"),
+            &reference,
+        )
+        .expect("файл должен находиться по сходству имени");
+        assert_eq!(found, geometry);
+    }
+
+    /// Ремонт ассета не должен задевать соседние папки продукта.
+    #[test]
+    #[ignore]
+    fn repair_keeps_neighbour_folders_untouched() {
+        let source = PathBuf::from(
+            r"X:\SteamLibrary\steamapps\common\RailWorks\Assets\icepak\ice\Oelfass_Nr1",
+        );
+        if !source.is_dir() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path().join("Assets");
+        let folder = assets.join("icepak/ice/Oelfa\u{00DF}_Nr1");
+        std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+        copy_dir_all(&source, &folder);
+        // Соседний ассет с умляутом в имени: его переименовывать нельзя.
+        let neighbour = assets.join("icepak/ice/Oelfa\u{00DF}_Nr2");
+        std::fs::create_dir_all(&neighbour).unwrap();
+        copy_dir_all(&source, &neighbour);
+        let serz = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\serz.exe");
+        let route = temp.path().join("route");
+        std::fs::create_dir_all(&route).unwrap();
+
+        let result = super::repair_umlaut_asset_chain(
+            &route,
+            &assets,
+            &serz,
+            "icepak/ice/Oelfa\u{00DF}_Nr1/Oelfa\u{00DF}_Nr1.bin",
+            &[],
+            &super::CharacterFixes::new(),
+        );
+        match &result {
+            Ok(report) => eprintln!(
+                "REPAIR изменено файлов: {}, новый путь: {}, файлы: {:?}",
+                report.changed_files, report.new_asset_path, report.files
+            ),
+            Err(error) => eprintln!("REPAIR ошибка: {error}"),
+        }
+        assert!(
+            neighbour.join("Oelfa\u{00DF}_Nr1.GeoPcDx").is_file(),
+            "соседняя папка не должна затрагиваться"
+        );
+        assert!(
+            !neighbour.join("Oelfass_Nr1.GeoPcDx").exists(),
+            "файлы соседней папки не должны переименовываться"
+        );
+    }
+
+    /// Игра пишет ссылки на объекты без расширения и с суффиксом варианта.
+    #[test]
+    fn detects_references_with_variant_suffix_and_without_extension() {
+        let xml = r#"
+            <GeometryID d:type="cDeltaString">icepak\ice\Oelfa&#xFFDF;_Nr1\[00]Oelfa&#xFFDF;_Nr1</GeometryID>
+            <GeometryID d:type="cDeltaString">textures\[00]fa&#xFFDF;</GeometryID>
+        "#;
+        eprintln!("DBG raw={:?}", xml);
+        let references = referenced_geometry_paths(xml);
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(
+            references[0].0.to_text(),
+            r"icepak\ice\Oelfa￟_Nr1\[00]Oelfa￟_Nr1"
+        );
+        assert_eq!(references[0].0.path, r"icepak\ice\Oelfa￟_Nr1\Oelfa￟_Nr1");
+        assert_eq!(references[0].0.variant, "[00]");
+        assert_eq!(references[0].0.extension, None);
+        assert_eq!(references[1].0.to_text(), r"textures\[00]fa￟");
+        assert_eq!(references[1].0.path, r"textures\fa￟");
     }
 
     #[test]
-    fn transliterates_asset_file_names_but_rejects_directory_renames() {
+    fn transliterates_asset_file_names_and_nested_folders() {
         let temp = tempfile::tempdir().unwrap();
         let assets = temp.path().join("Assets");
         let file = assets
@@ -3446,7 +4428,7 @@ mod tests {
             .join("Scenery")
             .join("Brücke.bin");
         assert_eq!(
-            transliterated_asset_path(&assets, &file).unwrap(),
+            transliterated_asset_path(&assets, &file, &super::CharacterFixes::new()).unwrap(),
             assets
                 .join("Provider")
                 .join("Product")
@@ -3454,12 +4436,20 @@ mod tests {
                 .join("Bruecke.bin")
         );
 
+        // Вложенная папка переименовывается вместе с файлом.
         let nested_directory = assets
             .join("Provider")
             .join("Product")
             .join("Bäume")
             .join("bridge.bin");
-        assert!(transliterated_asset_path(&assets, &nested_directory).is_err());
+        assert_eq!(
+            transliterated_asset_path(&assets, &nested_directory, &super::CharacterFixes::new()).unwrap(),
+            assets
+                .join("Provider")
+                .join("Product")
+                .join("Baeume")
+                .join("bridge.bin")
+        );
     }
 
     /// Проверка настоящего маршрута: замеряет время и сверяет итог.

@@ -268,14 +268,14 @@ mod tests {
             route_id: Some("route-id".to_owned()),
             route_name: Some("Route".to_owned()),
             route_path: Some(temp.path().join("route")),
-            original_files: vec![temp.path().join("route/Scenery/tile.bin")],
+            original_files: vec![temp.path().join("route/Scenery/tile.bin").display().to_string()],
             missing_asset: Some("A/B/Scenery/old.bin".to_owned()),
             replacement_asset: Some("A/B/Scenery/new.bin".to_owned()),
             replaced_files: 1,
             replaced_instances: 2,
             uses: vec![crate::AssetReplacementLogUse {
                 tile: "тайл X=+000001 Z=-000002".to_owned(),
-                source_file: temp.path().join("route/Scenery/tile.bin"),
+                source_file: temp.path().join("route/Scenery/tile.bin").display().to_string(),
             }],
             backups: vec![temp.path().join("route/Scenery/tile.bin.bak1")],
         };

@@ -8,6 +8,7 @@
 //! хранится не каждая ссылка, а счётчик вхождений. Пути ассетов вынесены в
 //! общую таблицу: на большом маршруте это уменьшает кэш в десятки раз.
 
+use crate::AssetKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -20,7 +21,7 @@ pub(crate) const ANALYSIS_CACHE_FILE_NAME: &str = ".ts-checker-analysis-cache.js
 /// Версия формата кэша.
 ///
 /// Меняется при любом изменении формата: старый кэш тогда использовать нельзя.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 /// Признаки файла, по которым определяется его неизменность.
 #[derive(Clone, Copy)]
@@ -49,8 +50,9 @@ impl FileStamp {
 /// Разобранный файл маршрута.
 pub(crate) struct CachedFile {
     pub(crate) stamp: FileStamp,
-    /// Сколько раз каждый ассет встречается в файле.
-    pub(crate) uses: Vec<(String, u32)>,
+    /// Сколько раз каждый ассет встречается в файле и что он из себя
+    /// представляет: объект маршрута или файл состава.
+    pub(crate) uses: Vec<(String, u32, AssetKind)>,
 }
 
 /// Хранилище разобранных файлов маршрута.
@@ -86,9 +88,9 @@ impl AnalysisCache {
             let uses = stored
                 .uses
                 .into_iter()
-                .filter_map(|[asset, count]| {
+                .filter_map(|[asset, count, kind]| {
                     let path = cache.assets.get(asset as usize)?.clone();
-                    Some((path, count))
+                    Some((path, count, AssetKind::from_code(kind as u8)))
                 })
                 .collect();
             files.insert(
@@ -134,7 +136,7 @@ impl AnalysisCache {
         let mut files = HashMap::with_capacity(self.files.len());
         for (name, file) in &self.files {
             let mut uses = Vec::with_capacity(file.uses.len());
-            for (asset, count) in &file.uses {
+            for (asset, count, kind) in &file.uses {
                 let index = match asset_indexes.get(asset.as_str()) {
                     Some(index) => *index,
                     None => {
@@ -144,7 +146,7 @@ impl AnalysisCache {
                         index
                     }
                 };
-                uses.push([index, *count]);
+                uses.push([index, *count, kind.to_code().into()]);
             }
             files.insert(
                 name.clone(),
@@ -191,8 +193,8 @@ struct StoredCache {
 struct StoredFile {
     modified: u64,
     size: u64,
-    /// Пары «индекс ассета в таблице, число вхождений».
-    uses: Vec<[u32; 2]>,
+    /// Тройки «индекс ассета в таблице, число вхождений, код типа ассета».
+    uses: Vec<[u32; 3]>,
 }
 
 #[cfg(test)]
@@ -204,7 +206,7 @@ mod tests {
             stamp,
             uses: uses
                 .iter()
-                .map(|(path, count)| (path.to_string(), *count))
+                .map(|(path, count)| (path.to_string(), *count, AssetKind::Other))
                 .collect(),
         }
     }
