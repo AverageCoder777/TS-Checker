@@ -1,7 +1,6 @@
-//! egui application state, windows, and user interactions.
+﻿//! egui application state, windows, and user interactions.
 
 use super::*;
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 enum CheckMessage {
@@ -78,7 +77,6 @@ pub(crate) struct CheckerApp {
     scenario_window_open: bool,
     /// Кэш разрешённых путей блюпринтов техники, чтобы не обходить Assets
     /// повторно при каждом кадре отрисовки окна сценария.
-    blueprint_cache: RefCell<HashMap<(String, String, String), Option<PathBuf>>>,
     /// Результат проверки наличия файлов для составов открытого сценария,
     /// считается один раз, чтобы не пересчитывать при каждом кадре egui.
     scenario_consist_info: Option<Vec<(String, bool)>>,
@@ -168,7 +166,6 @@ impl Default for CheckerApp {
             selected_scenario: None,
             selected_consist: None,
             scenario_window_open: false,
-            blueprint_cache: RefCell::new(HashMap::new()),
             scenario_consist_info: None,
             scenario_vehicle_files: None,
             search_query: String::new(),
@@ -983,16 +980,9 @@ impl CheckerApp {
         provider: &str,
         product: &str,
     ) -> Option<PathBuf> {
-        let key = (blueprint.to_owned(), provider.to_owned(), product.to_owned());
-        {
-            let cache = self.blueprint_cache.borrow();
-            if let Some(cached) = cache.get(&key) {
-                return cached.clone();
-            }
-        }
-        let found = resolve_blueprint_file(rw_path, route_path, blueprint, provider, product);
-        self.blueprint_cache.borrow_mut().insert(key, found.clone());
-        found
+        crate::blueprint::resolve_blueprint_file_cached_free(
+            rw_path, route_path, blueprint, provider, product,
+        )
     }
 
     fn receive_background_results(&mut self) {
@@ -1413,166 +1403,6 @@ impl CheckerApp {
             }
         }
     }
-}
-
-thread_local! {
-    static BLUEPRINT_CACHE: RefCell<HashMap<(String, String, String), Option<PathBuf>>> =
-        RefCell::new(HashMap::new());
-}
-
-/// Кэшированная версия resolve_blueprint_file.
-fn resolve_blueprint_file_cached_free(
-    rw_path: &Path,
-    route_path: &Path,
-    blueprint: &str,
-    provider: &str,
-    product: &str,
-) -> Option<PathBuf> {
-    let key = (
-        blueprint.to_owned(),
-        provider.to_owned(),
-        product.to_owned(),
-    );
-    BLUEPRINT_CACHE.with(|cell| {
-        if let Some(cached) = cell.borrow().get(&key) {
-            return cached.clone();
-        }
-        let found = resolve_blueprint_file(rw_path, route_path, blueprint, provider, product);
-        cell.borrow_mut().insert(key, found.clone());
-        found
-    })
-}
-
-/// Разрешает ссылку на блюпринт состава (例如 `RailVehicles\...\имя.xml`) в
-/// реальный файл на диске. Ищется относительно папки Assets и папки маршрута,
-/// с известными расширениями RailWorks. Если указаны провайдер и продукт,
-/// сначала пробуется полный путь Assets\{provider}\{product}\{blueprint}.
-fn resolve_blueprint_file(
-    rw_path: &Path,
-    route_path: &Path,
-    blueprint: &str,
-    provider: &str,
-    product: &str,
-) -> Option<PathBuf> {
-    let blueprint = blueprint.trim();
-    if blueprint.is_empty() {
-        return None;
-    }
-    let assets_path = rw_path.join("Assets");
-    let normalized = blueprint.replace('/', "\\");
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // Полный путь через провайдера и продукт: Assets\ATS\FLIRTPack01\...
-    if !provider.is_empty() && !product.is_empty() {
-        let joined = format!(
-            "{}\\{}\\{}",
-            provider.replace('/', "\\"),
-            product.replace('/', "\\"),
-            normalized
-        );
-        candidates.push(PathBuf::from(&joined));
-    }
-
-    candidates.push(PathBuf::from(&normalized));
-    if let Some(extension) = Path::new(&normalized).extension() {
-        let stem = Path::new(&normalized)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| normalized.clone());
-        for ext in ["bin", "GeoPcDx", "TgPcDx", "xml"] {
-            if ext.eq_ignore_ascii_case(extension.to_str().unwrap_or("")) {
-                continue;
-            }
-            candidates.push(PathBuf::from(format!("{stem}.{ext}")));
-        }
-    }
-
-    let roots: Vec<PathBuf> = vec![assets_path.clone(), route_path.to_path_buf()];
-    for root in &roots {
-        for candidate in &candidates {
-            let path = root.join(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-    }
-
-    // Путь в блюпринте может быть неполным (без провайдера/продукта), поэтому
-    // ищем файл по имени. Обходим не всё дерево Assets, а только папку
-    // провайдера/продукта из блюпринта — это на порядок быстрее.
-    let file_stem = Path::new(&normalized)
-        .file_stem()
-        .map(|name| name.to_string_lossy().into_owned())?;
-
-    // Определяем корневые папки для поиска.
-    let mut search_roots: Vec<PathBuf> = Vec::new();
-    if !provider.is_empty() {
-        let provider_dir = assets_path.join(provider.replace('/', "\\"));
-        if !product.is_empty() {
-            let product_dir = provider_dir.join(product.replace('/', "\\"));
-            if product_dir.is_dir() {
-                search_roots.push(product_dir);
-            }
-        }
-        if provider_dir.is_dir() {
-            search_roots.push(provider_dir);
-        }
-    }
-    if search_roots.is_empty() {
-        search_roots.push(assets_path.clone());
-    }
-
-    for root in &search_roots {
-        // Проверяем файлы на диске.
-        if let Some(found) = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-            .find(|e| {
-                e.path()
-                    .file_stem()
-                    .map(|s| s.eq_ignore_ascii_case(&file_stem))
-                    .unwrap_or(false)
-            })
-        {
-            return Some(found.into_path());
-        }
-        // Проверяем архивы .ap в этой папке.
-        if let Ok(entries) = fs::read_dir(root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file()
-                    || !path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("ap"))
-                {
-                    continue;
-                }
-                if let Ok(file) = fs::File::open(&path) {
-                    if let Ok(mut zip) = zip::ZipArchive::new(file) {
-                        for i in 0..zip.len() {
-                            if let Ok(member) = zip.by_index(i) {
-                                if member.is_file() {
-                                    let member_name = member.name().map(|c| c.to_string()).unwrap_or_default();
-                                    let member_stem = Path::new(&member_name)
-                                        .file_stem()
-                                        .map(|s| s.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    if member_stem.eq_ignore_ascii_case(&file_stem) {
-                                        // Файл найден в .ap архиве.
-                                        return Some(path.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 fn render_asset_editor(
@@ -2723,7 +2553,7 @@ impl eframe::App for CheckerApp {
                                                         true
                                                     } else {
                                                         route_path.as_deref().map_or(false, |rp| {
-                                                            resolve_blueprint_file_cached_free(
+                                                            crate::blueprint::resolve_blueprint_file_cached_free(
                                                                 &rw_path,
                                                                 rp,
                                                                 &v.blueprint,
@@ -2893,7 +2723,7 @@ impl eframe::App for CheckerApp {
                                              if blueprint_response.double_clicked() {
                                                  if let Some(route_path) = route_path.as_deref() {
                                                      if let Some(file_path) =
-                                                         resolve_blueprint_file_cached_free(
+                                                         crate::blueprint::resolve_blueprint_file_cached_free(
                                                              &rw_path,
                                                              route_path,
                                                              &vehicle.blueprint,

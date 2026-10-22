@@ -348,6 +348,7 @@ struct RouteScanCache {
 mod analysis_cache;
 mod app;
 mod assets;
+mod blueprint;
 mod dialogs;
 mod editor;
 mod inventory_ui;
