@@ -2,6 +2,7 @@
 
 use super::*;
 use std::collections::HashMap;
+use std::path::Path;
 
 enum CheckMessage {
     Progress(String),
@@ -113,6 +114,7 @@ pub(crate) struct CheckerApp {
     asset_viewer_save: Option<Receiver<Result<SavedAsset, String>>>,
     route_thumbnails_enabled: bool,
     serz_process_limit: usize,
+    locoswap_path: String,
     route_icon_textures: HashMap<PathBuf, egui::TextureHandle>,
     attempted_route_icons: HashSet<PathBuf>,
     asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
@@ -192,6 +194,7 @@ impl Default for CheckerApp {
             asset_viewer_save: None,
             route_thumbnails_enabled,
             serz_process_limit,
+            locoswap_path: load_locoswap_path(),
             route_icon_textures: HashMap::new(),
             attempted_route_icons: HashSet::new(),
             asset_inventory_state: Arc::new(Mutex::new(AssetInventoryWindowState::default())),
@@ -2596,6 +2599,28 @@ impl eframe::App for CheckerApp {
                     ui.style_mut().interaction.selectable_labels = true;
                     ui.label(format!("Идентификатор: {}", scenario.id));
                     ui.small(scenario.path.display().to_string());
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                    ui.label("LocoSwap:");
+                    let locoswap_path = self.locoswap_path.clone();
+                    let locoswap_ok = !locoswap_path.is_empty() && Path::new(&locoswap_path).is_file();
+                    if locoswap_ok {
+                        if ui.button("Открыть в LocoSwap").clicked() {
+                            match std::process::Command::new(&locoswap_path).spawn() {
+                                Ok(_) => {}
+                                Err(error) => {
+                                    self.status = format!("Не удалось запустить LocoSwap: {error}");
+                                }
+                            }
+                        }
+                    } else {
+                        ui.add_enabled(false, egui::Button::new("Открыть в LocoSwap"));
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            "Путь к LocoSwap.exe не задан в настройках.",
+                        );
+                    }
+                    });
                     if !scenario.date.is_empty() {
                         ui.label(format!("Дата: {}", scenario.date));
                     }
@@ -2746,17 +2771,51 @@ impl eframe::App for CheckerApp {
                                                      }
                                                  }
                                              }
-                                            if !vehicle.provider.is_empty()
-                                                || !vehicle.product.is_empty()
-                                            {
-                                                ui.small(format!(
-                                                    "{}/{}",
-                                                    vehicle.provider, vehicle.product
-                                                ));
-                                            }
-                                        });
-                                    }
-                                });
+                                             if !vehicle.provider.is_empty()
+                                                 || !vehicle.product.is_empty()
+                                             {
+                                                 ui.small(format!(
+                                                     "{}/{}",
+                                                     vehicle.provider, vehicle.product
+                                                 ));
+                                             }
+                                             let locoswap_ok =
+                                                 !self.locoswap_path.is_empty()
+                                                    && Path::new(&self.locoswap_path).is_file();
+                                             if locoswap_ok
+                                                 && ui
+                                                    .button("Редактировать в LocoSwap")
+                                                    .clicked()
+                                             {
+                                                 let scenario_path = scenario
+                                                    .path
+                                                    .to_string_lossy()
+                                                    .to_string();
+                                                let args = vec![
+                                                    "--edit-only".to_owned(),
+                                                    scenario_path,
+                                                    "--consist".to_owned(),
+                                                    consist_index.to_string(),
+                                                    "--vehicle".to_owned(),
+                                                    vi.to_string(),
+                                                ];
+                                                 match std::process::Command::new(
+                                                    &self.locoswap_path,
+                                                 )
+                                                 .args(&args)
+                                                 .spawn()
+                                                 {
+                                                    Ok(_) => {}
+                                                    Err(error) => {
+                                                        self.status = format!(
+                                                            "Не удалось запустить LocoSwap: {error}"
+                                                        );
+                                                    }
+                                                 }
+                                             }
+                                         });
+                                     }
+                                 });
                         });
                     });
                 });
@@ -2808,6 +2867,31 @@ impl eframe::App for CheckerApp {
                     ui.small(
                         "Иконки RouteInformation будут показываться в списках маршрутов.",
                     );
+                    ui.separator();
+                    ui.label("Путь к LocoSwap.exe:");
+                    ui.horizontal(|ui| {
+                        let mut locoswap_path = self.locoswap_path.clone();
+                        if ui.text_edit_singleline(&mut locoswap_path).changed() {
+                            self.locoswap_path = locoswap_path.clone();
+                            let _ = save_locoswap_path(&self.locoswap_path);
+                        }
+                        if ui.button("Выбрать файл…").clicked() {
+                            if let Some(picked) = crate::settings::locoswap_pick_file() {
+                                self.locoswap_path = picked.clone();
+                                let _ = save_locoswap_path(&self.locoswap_path);
+                            }
+                        }
+                    });
+                    let path_ok =
+                        !self.locoswap_path.is_empty() && Path::new(&self.locoswap_path).is_file();
+                    if path_ok {
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, "LocoSwap найден.");
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            "Укажите путь к LocoSwap.exe.",
+                        );
+                    }
                     ui.separator();
                     let previous_limit = self.serz_process_limit;
                     ui.add(

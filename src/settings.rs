@@ -26,12 +26,64 @@ pub(crate) fn serz_process_limit_setting_file() -> Option<PathBuf> {
     })
 }
 
+pub(crate) fn locoswap_path_file() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| {
+        PathBuf::from(app_data)
+            .join("TS-Checker")
+            .join("locoswap_path.txt")
+    })
+}
+
+pub(crate) fn load_locoswap_path() -> String {
+    locoswap_path_file()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_locoswap_path(path: &str) -> Result<(), String> {
+    let path_file = locoswap_path_file()
+        .ok_or_else(|| "Windows APPDATA не определена; путь к LocoSwap не сохранить.".to_owned())?;
+    let parent = path_file
+        .parent()
+        .ok_or_else(|| "Некорректный путь к настройкам LocoSwap.".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
+    fs::write(&path_file, path).map_err(|error| {
+        format!(
+            "Не удалось сохранить путь к LocoSwap {}: {error}",
+            path_file.display()
+        )
+    })
+}
+
 pub(crate) fn asset_replacement_log_file() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|app_data| {
         PathBuf::from(app_data)
             .join("TS-Checker")
             .join("replacement_log.jsonl")
     })
+}
+
+/// Открывает стандартное окно выбора файла Windows и возвращает выбранный путь.
+pub(crate) fn locoswap_pick_file() -> Option<String> {
+    let ps = "Add-Type -AssemblyName System.Windows.Forms;$f=New-Object System.Windows.Forms.OpenFileDialog;$f.Filter='LocoSwap.exe|LocoSwap.exe|Все файлы|*.*';$f.Title='Выберите LocoSwap.exe';if($f.ShowDialog()-eq'OK'){$f.FileName}";
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 pub(crate) fn append_asset_replacement_log(
