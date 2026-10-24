@@ -445,11 +445,8 @@ fn build_inventory_rows(state: &app::AssetInventoryWindowState, show_missing: bo
             .map(|(tile, count)| format!("{} ({})", tile.trim_start_matches("тайл "), count))
             .collect::<Vec<_>>()
             .join(", ");
-        let path_text = if a.missing {
-            format!("<font color=\"#ff6666\">{}</font>", a.path)
-        } else {
-            a.path.clone()
-        };
+        let path_text = a.path.clone();
+
         let mut item0 = slint::StandardListViewItem::default();
         item0.text = path_text.as_str().into();
         let mut item1 = slint::StandardListViewItem::default();
@@ -527,6 +524,27 @@ fn main() {
         };
         if let Ok(mut app) = app_clone.lock() {
             app.receive_background_results();
+            if !app.is_checking() && app.result.is_none() && app.selected_route.is_none() && !app.routes.is_empty() {
+                if let Some(idx) = app.routes.iter().position(|r| r.id == "8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7") {
+                    app.selected_route = Some(idx);
+                    app.start_check();
+                }
+            }
+            // Show missing-assets popup after route check finishes
+            if !app.is_checking() && app.result.is_some() && app.missing_assets_popup.is_some() && !app.missing_assets_shown {
+                let paths: Vec<slint::SharedString> = app
+                    .missing_assets_popup
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().into())
+                    .collect();
+                if let Some(mw) = missing_handle.upgrade() {
+                    mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(paths)));
+                    let _ = mw.show();
+                    app.missing_assets_shown = true;
+                }
+            }
             let q = ui.get_search_query().to_string();
             app.search_query = q.clone();
             if app.routes.len() == last_count && q == last_query {
@@ -559,30 +577,6 @@ fn main() {
             ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
             ui.set_status(app.status.clone().into());
             ui.set_has_result(app.result.is_some());
-            if app.is_checking() {
-                missing_window_shown = false;
-            }
-            let missing_rows: Vec<slint::SharedString> = app
-                .result
-                .as_ref()
-                .map(|result| {
-                    result
-                        .missing_assets
-                        .iter()
-                        .map(|asset| asset.path.clone().into())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(mw) = missing_handle.upgrade() {
-                mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(missing_rows.clone())));
-                if !missing_rows.is_empty() && !missing_window_shown {
-                    let _ = mw.show();
-                    missing_window_shown = true;
-                }
-                if missing_rows.is_empty() {
-                    missing_window_shown = false;
-                }
-            }
         }
     });
     let ui_handle2 = ui.as_weak();
@@ -751,11 +745,12 @@ fn main_backup() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_xml_text, extract_asset_references, extract_scenario_clues, fallback_serz_path,
+        check_route, decode_xml_text, extract_asset_references, extract_scenario_clues, fallback_serz_path,
         inspect_route_folder, is_skipped_route_scan_directory, is_valid_game_path,
         parse_asset_launch_args, parse_route_name, preferred_serz_path, scan_routes,
         scan_routes_with_ignored, validate_serz_process, ScenarioClueCollection,
     };
+    use crate::app::CheckerApp;
         use image::GenericImageView;
     use std::ffi::OsString;
     use std::fs;
@@ -1363,5 +1358,48 @@ mod tests {
             result.incomplete_folders[0].suggested_name.as_deref(),
             Some("Nordbahn")
         );
+    }
+    #[test]
+    fn repro_route_check_hang() {
+        let route = std::path::PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7");
+        let rw = std::path::PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks");
+        let assets = rw.join("Assets");
+        let mut serz = rw.join("serz64.exe");
+        if !serz.is_file() { serz = rw.join("serz.exe"); }
+        println!("using serz: {} exists={}", serz.display(), serz.is_file());
+        let start = std::time::Instant::now();
+        let res = check_route(&route, &assets, &serz, true, 8, |msg| {
+            println!("[{:.1}s] {}", start.elapsed().as_secs_f32(), msg);
+        });
+        println!("RESULT after {:.1}s: {:?}", start.elapsed().as_secs_f32(), res.map(|r| (r.route_files, r.converted_bin_files, r.referenced_assets, r.missing_assets.len(), r.conversion_errors.len(), r.structure_issues.len())));
+    }
+    #[test]
+    fn repro_ui_check_flow() {
+        let mut app = CheckerApp::default();
+        app.rw_path = r"X:\SteamLibrary\steamapps\common\RailWorks".to_owned();
+        app.start_route_scan();
+        let start = std::time::Instant::now();
+        loop {
+            app.receive_background_results();
+            if !app.routes.is_empty() { break; }
+            if start.elapsed().as_secs() > 60 { panic!("route scan timeout"); }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        println!("routes: {}", app.routes.len());
+        // select the target route
+        if let Some(idx) = app.routes.iter().position(|r| r.id == "8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7") {
+            app.selected_route = Some(idx);
+        }
+        assert!(app.selected_route.is_some(), "no selected route");
+        app.start_check();
+        let start = std::time::Instant::now();
+        loop {
+            app.receive_background_results();
+            if !app.is_checking() { break; }
+            if start.elapsed().as_secs() > 120 { panic!("check timeout after {:?}", start.elapsed()); }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        println!("check done status={}", app.status);
+        assert!(app.result.is_some());
     }
 }

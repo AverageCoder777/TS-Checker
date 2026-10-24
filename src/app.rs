@@ -1,4 +1,4 @@
-﻿//! egui application state, windows, and user interactions.
+//! egui application state, windows, and user interactions.
 
 use super::*;
 use std::collections::HashMap;
@@ -36,9 +36,7 @@ pub(crate) struct AssetInventoryWindowState {
 
 pub(crate) fn decode_route_icon(path: &Path) -> image::ImageResult<image::DynamicImage> {
     let reader = image::ImageReader::open(path).map_err(image::ImageError::IoError)?;
-    let reader = reader
-        .with_guessed_format()
-        .map_err(image::ImageError::IoError)?;
+    let reader = reader.with_guessed_format().map_err(image::ImageError::IoError)?;
     reader.decode()
 }
 
@@ -120,14 +118,15 @@ pub(crate) struct CheckerApp {
     inventory_action_tx: Sender<InventoryAction>,
     inventory_action_rx: Receiver<InventoryAction>,
     inventory_scan: Option<Receiver<Result<InventoryScanOutcome, String>>>,
+    pub(crate) missing_assets_popup: Option<Vec<String>>,
+    pub(crate) missing_assets_shown: bool,
 }
 
 impl Default for CheckerApp {
     fn default() -> Self {
         let rw_path = load_last_game_path();
         let (ignored_route_ids, mut status) = match load_ignored_route_ids() {
-            Ok(ids) => (
-                ids,
+            Ok(ids) => (ids,
                 "Укажите путь к RailWorks и просканируйте маршруты.".to_owned(),
             ),
             Err(error) => (HashSet::new(), error),
@@ -194,11 +193,13 @@ impl Default for CheckerApp {
             route_thumbnails_enabled,
             serz_process_limit,
             locoswap_path: load_locoswap_path(),
-    attempted_route_icons: HashSet::new(),
+            attempted_route_icons: HashSet::new(),
             asset_inventory_state: Arc::new(Mutex::new(AssetInventoryWindowState::default())),
             inventory_action_tx,
             inventory_action_rx,
             inventory_scan: None,
+            missing_assets_popup: None,
+            missing_assets_shown: false,
         }
     }
 }
@@ -212,9 +213,7 @@ impl CheckerApp {
                 return;
             }
         };
-        if !is_open {
-            return;
-        }
+        if !is_open {return;}
 
         let state = Arc::clone(&self.asset_inventory_state);
         let action_tx = self.inventory_action_tx.clone();
@@ -227,9 +226,7 @@ impl CheckerApp {
         let scan_busy = repair_busy || self.inventory_scan.is_some();
         ctx.show_viewport_deferred(
             egui::ViewportId::from_hash_of("asset_inventory"),
-            egui::ViewportBuilder::default()
-                .with_title("Инвентарь ассетов маршрута")
-                .with_inner_size([900.0, 700.0]),
+            egui::ViewportBuilder::default().with_title("Инвентарь ассетов маршрута").with_inner_size([900.0, 700.0]),
             move |ui, _class| {
                 let mut state = match state.lock() {
                     Ok(state) => state,
@@ -238,9 +235,7 @@ impl CheckerApp {
                         return;
                     }
                 };
-                if ui
-                    .ctx()
-                    .input(|input| input.viewport().close_requested())
+                if ui.ctx().input(|input| input.viewport().close_requested())
                 {
                     state.open = false;
                     return;
@@ -250,12 +245,10 @@ impl CheckerApp {
                     ui.heading("Все используемые ассеты маршрута");
                     ui.horizontal(|ui| {
                         ui.label(format!("Всего: {}", state.assets.len()));
-                        if ui
-                            .add_enabled(
+                        if ui.add_enabled(
                                 !state.scanning_umlauts && !scan_busy,
                                 egui::Button::new("Проверить все ассеты на умляуты"),
-                            )
-                            .clicked()
+                            ).clicked()
                         {
                             state.scanning_umlauts = true;
                             state.show_umlauts = true;
@@ -264,19 +257,11 @@ impl CheckerApp {
                                 state.scanning_umlauts = false;
                                 state.error =
                                     Some(format!("Не удалось запустить проверку: {error}"));
-                            } else {
-                            }
-
+                            } else {}
                         }
                         ui.selectable_value(&mut state.show_umlauts, false, "Все ассеты");
                         ui.selectable_value(&mut state.show_umlauts, true, "Требуют проверки");
-                        if ui
-                            .button(if state.show_tiles {
-                                "Скрыть тайлы"
-                            } else {
-                                "Показать тайлы"
-                            })
-                            .clicked()
+                        if ui.button(if state.show_tiles {"Скрыть тайлы"} else {"Показать тайлы"}).clicked()
                         {
                             state.show_tiles = !state.show_tiles;
                         }
@@ -287,90 +272,56 @@ impl CheckerApp {
                             ui.label("Проверка имён и цепочек ссылок...");
                         });
                     } else if state.show_umlauts {
-                        ui.label(format!(
-                            "Найдено для проверки: {}",
-                            state.umlaut_assets.len()
-                        ));
+                        ui.label(format!("Найдено для проверки: {}",state.umlaut_assets.len()));
                     }
                     if let Some(error) = &state.error {
                         ui.colored_label(egui::Color32::LIGHT_RED, error);
                     }
                     ui.add(
-                        egui::TextEdit::singleline(&mut state.search)
-                            .hint_text("Поиск по пути, тайлу или исходному файлу"),
+                        egui::TextEdit::singleline(&mut state.search).hint_text("Поиск по пути, тайлу или исходному файлу"),
                     );
                     ui.separator();
 
                     let search = state.search.to_lowercase();
                     // Карты собираются один раз на кадр: поиск по списку для
                     // каждой строки стоил бы времени при тысячах ассетов.
-                    let umlaut_by_path: HashMap<&str, &UmlautAsset> = state
-                        .umlaut_assets
-                        .iter()
-                        .map(|asset| (asset.path.as_str(), asset))
-                        .collect();
+                    let umlaut_by_path: HashMap<&str, &UmlautAsset> = state.umlaut_assets.iter()
+                        .map(|asset| (asset.path.as_str(), asset)).collect();
                     let missing_by_path: HashMap<&str, bool> = state
-                        .assets
-                        .iter()
-                        .map(|asset| (asset.path.as_str(), asset.missing))
-                        .collect();
+                        .assets.iter().map(|asset| (asset.path.as_str(), asset.missing)).collect();
                     let mut rows: Vec<InventoryRow<'_>> =
                         if state.show_umlauts {
-                            state
-                                .umlaut_assets
-                                .iter()
-                                .filter(|asset| {
+                            state.umlaut_assets.iter().filter(|asset| {
                                     search.is_empty()
                                         || asset.path.to_lowercase().contains(&search)
                                         || asset.uses.iter().any(|usage| {
                                             usage.tile.to_lowercase().contains(&search)
-                                                || usage
-                                                    .source_file
-                                                    .display()
-                                                    .to_string()
-                                                    .to_lowercase()
-                                                    .contains(&search)
+                                            || usage.source_file.display().to_string().to_lowercase().contains(&search)
                                         })
-                                })
-                                .map(|asset| {
-                                    let missing = missing_by_path
-                                        .get(asset.path.as_str())
-                                        .copied()
-                                        .unwrap_or(false);
+                                }).map(|asset| {
+                                    let missing = missing_by_path.get(asset.path.as_str()).copied().unwrap_or(false);
                                     (
                                         asset.path.as_str(),
                                         asset.uses.as_slice(),
                                         missing,
                                         Some(asset),
                                     )
-                                })
-                                .collect()
+                                }).collect()
                         } else {
-                            state
-                                .assets
-                                .iter()
-                                .filter(|asset| {
+                            state.assets.iter().filter(|asset| {
                                     search.is_empty()
                                         || asset.path.to_lowercase().contains(&search)
                                         || asset.uses.iter().any(|usage| {
                                             usage.tile.to_lowercase().contains(&search)
-                                                || usage
-                                                    .source_file
-                                                    .display()
-                                                    .to_string()
-                                                    .to_lowercase()
-                                                    .contains(&search)
+                                            || usage.source_file.display().to_string().to_lowercase().contains(&search)
                                         })
-                                })
-                                .map(|asset| {
-                                    (
+                                }).map(|asset| {(
                                         asset.path.as_str(),
                                         asset.uses.as_slice(),
                                         asset.missing,
                                         umlaut_by_path.get(asset.path.as_str()).copied(),
                                     )
-                                })
-                                .collect()
+                                }).collect()
                         };
 
                     let mut actions = InventoryRowActions::default();
@@ -473,17 +424,13 @@ impl CheckerApp {
         self.inventory_scan = Some(rx);
         self.status = "Проверка ассетов маршрута на умляуты...".to_owned();
         thread::spawn(move || {
-            let result =
-                scan_umlaut_assets(&inventory, &assets_path, &serz_path, max_concurrent_serz);
+            let result =scan_umlaut_assets(&inventory, &assets_path, &serz_path, max_concurrent_serz);
             let _ = tx.send(result);
         });
     }
 
     fn start_umlaut_repair(&mut self, asset: UmlautAsset, fixes: CharacterFixes) {
-        let Some(route) = self
-            .selected_route
-            .and_then(|index| self.routes.get(index))
-            .cloned()
+        let Some(route) = self.selected_route.and_then(|index| self.routes.get(index)).cloned()
         else {
             return;
         };
@@ -505,18 +452,12 @@ impl CheckerApp {
                 &fixes,
             )
             .map(|mut report| {
-                let mut uses: Vec<_> = asset
-                    .uses
-                    .iter()
-                    .map(|usage| AssetReplacementLogUse {
+                let mut uses: Vec<_> = asset.uses.iter().map(|usage| AssetReplacementLogUse {
                         tile: usage.tile.clone(),
                         source_file: usage.source_file.display(),
-                    })
-                    .collect();
+                    }).collect();
                 uses.sort_by(|left, right| {
-                    left.tile
-                        .cmp(&right.tile)
-                        .then_with(|| left.source_file.cmp(&right.source_file))
+                    left.tile.cmp(&right.tile).then_with(|| left.source_file.cmp(&right.source_file))
                 });
                 let mut entry = AssetReplacementLogEntry {
                     timestamp_unix_seconds: 0,
@@ -524,11 +465,7 @@ impl CheckerApp {
                     route_id: Some(route.id.clone()),
                     route_name: Some(route.name.clone()),
                     route_path: Some(route.path.clone()),
-                    original_files: report
-                        .files
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect(),
+                    original_files: report.files.iter().map(|path| path.display().to_string()).collect(),
                     missing_asset: Some(path.clone()),
                     replacement_asset: Some(report.new_asset_path.clone()),
                     replaced_files: report.changed_files,
@@ -536,13 +473,9 @@ impl CheckerApp {
                     uses,
                     backups: report.backups.clone(),
                 };
-                match asset_replacement_log_file()
-                    .ok_or_else(|| {
-                        "Windows APPDATA не определена; журнал замен не сохранён.".to_owned()
-                    })
-                    .and_then(|log_path| {
-                        append_asset_replacement_log(&log_path, &mut entry).map(|()| log_path)
-                    }) {
+                match asset_replacement_log_file().ok_or_else(|| {"Windows APPDATA не определена; журнал замен не сохранён.".to_owned()})
+                    .and_then(|log_path| {append_asset_replacement_log(&log_path, &mut entry).map(|()| log_path)}) 
+                {
                     Ok(log_path) => report.log_file = Some(log_path),
                     Err(error) => report.log_error = Some(error),
                 }
@@ -560,13 +493,8 @@ impl CheckerApp {
         replacement_relative: String,
         fixes: CharacterFixes,
     ) {
-        let Some(route) = self
-            .selected_route
-            .and_then(|index| self.routes.get(index))
-            .cloned()
-        else {
-            return;
-        };
+        let Some(route) = self.selected_route.and_then(|index| self.routes.get(index)).cloned()
+        else {return;};
         let rw_path = PathBuf::from(self.rw_path.trim());
         let assets_path = rw_path.join("Assets");
         let serz_path = preferred_serz_path(&rw_path);
@@ -833,6 +761,8 @@ impl CheckerApp {
         let (tx, rx) = mpsc::channel();
         self.check = Some(rx);
         self.result = None;
+        self.missing_assets_popup = None;
+        self.missing_assets_shown = false;
         if let Ok(mut state) = self.asset_inventory_state.lock() {
             state.open = false;
             state.assets.clear();
@@ -1151,6 +1081,17 @@ impl CheckerApp {
                             check_result.umlaut_assets.len(),
                         )
                     });
+                    if let Some(check_result) = self.result.as_ref() {
+                        let paths: Vec<String> =
+                            check_result.missing_assets.iter().map(|a| a.path.clone()).collect();
+                        if paths.is_empty() {
+                            self.missing_assets_popup = None;
+                            self.missing_assets_shown = false;
+                        } else {
+                            self.missing_assets_popup = Some(paths);
+                        }
+                    }
+                    self.missing_assets_shown = false;
                     self.asset_replacement_feedback = Some(Ok(format!(
                         "Заменено размещений: {}; изменено файлов тайлов: {}. {log_message}",
                         report.replaced_instances, report.replaced_files,
@@ -1324,7 +1265,7 @@ impl CheckerApp {
             }
         }
 
-        let check_message = self.check.as_ref().and_then(|rx| match rx.try_recv() {
+let check_message = self.check.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(message) => Some(Ok(message)),
             Err(TryRecvError::Disconnected) => Some(Err(
                 "Не удалось получить результат проверки маршрута.".to_owned(),
@@ -1344,6 +1285,11 @@ impl CheckerApp {
                                     "отсутствует ассетов: {}",
                                     result.missing_assets.len()
                                 ));
+                                let paths: Vec<String> = result.missing_assets
+                                    .iter()
+                                    .map(|a| a.path.clone())
+                                    .collect();
+                                self.missing_assets_popup = Some(paths);
                             }
                             if !result.conversion_errors.is_empty() {
                                 summary.push(format!(
