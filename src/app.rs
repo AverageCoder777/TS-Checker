@@ -18,20 +18,20 @@ enum InventoryAction {
 }
 
 #[derive(Default)]
-struct AssetInventoryWindowState {
+pub(crate) struct AssetInventoryWindowState {
     open: bool,
-    search: String,
+    pub(crate) search: String,
     show_umlauts: bool,
     show_tiles: bool,
     scanning_umlauts: bool,
     error: Option<String>,
-    assets: Vec<ReferencedAsset>,
+    pub(crate) assets: Vec<ReferencedAsset>,
     umlaut_assets: Vec<UmlautAsset>,
     /// Ассет, для которого открыто окно подтверждения транслитерации.
     pending_repair: Option<UmlautAsset>,
     /// Замены символов, предложенные пользователем.
     character_fixes: CharacterFixes,
-    sort: InventorySort,
+    pub(crate) sort: InventorySort,
 }
 
 pub(crate) fn decode_route_icon(path: &Path) -> image::ImageResult<image::DynamicImage> {
@@ -62,10 +62,10 @@ type SavedAsset = (PathBuf, String, Option<PathBuf>);
 type InventoryScanOutcome = (Vec<UmlautAsset>, Vec<String>);
 
 pub(crate) struct CheckerApp {
-    rw_path: String,
+    pub(crate) rw_path: String,
     startup_scan_started: bool,
     pub(crate) routes: Vec<Route>,
-    selected_route: Option<usize>,
+    pub(crate) selected_route: Option<usize>,
     /// Сценарии выбранного маршрута.
     scenarios: Vec<RouteScenario>,
     /// Маршрут, для которого прочитаны сценарии.
@@ -85,8 +85,8 @@ pub(crate) struct CheckerApp {
     scenario_vehicle_files: Option<Vec<Vec<bool>>>,
     pub(crate) search_query: String,
     ignore_scenarios: bool,
-    result: Option<CheckResult>,
-    status: String,
+    pub(crate) result: Option<CheckResult>,
+    pub(crate) status: String,
     pub(crate) incomplete_folders: Vec<IncompleteRouteFolder>,
     incomplete_window_open: bool,
     selected_incomplete: Option<usize>,
@@ -116,7 +116,7 @@ pub(crate) struct CheckerApp {
     serz_process_limit: usize,
     locoswap_path: String,
     attempted_route_icons: HashSet<PathBuf>,
-    asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
+    pub(crate) asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
     inventory_action_tx: Sender<InventoryAction>,
     inventory_action_rx: Receiver<InventoryAction>,
     inventory_scan: Option<Receiver<Result<InventoryScanOutcome, String>>>,
@@ -439,7 +439,7 @@ impl CheckerApp {
         );
     }
 
-    fn open_asset_inventory(&mut self) {
+    pub(crate) fn open_asset_inventory(&mut self) {
         let Some(result) = self.result.as_ref() else {
             return;
         };
@@ -552,7 +552,7 @@ impl CheckerApp {
         });
     }
 
-    fn start_asset_replacement(
+    pub(crate) fn start_asset_replacement(
         &mut self,
         missing: MissingAsset,
         replacement: PathBuf,
@@ -786,7 +786,7 @@ impl CheckerApp {
         }
     }
 
-    fn start_route_scan(&mut self) {
+    pub(crate) fn start_route_scan(&mut self) {
         self.begin_route_scan(false, true);
     }
 
@@ -817,7 +817,7 @@ impl CheckerApp {
         });
     }
 
-    fn start_check(&mut self) {
+    pub(crate) fn start_check(&mut self) {
         let Some(route) = self
             .selected_route
             .and_then(|index| self.routes.get(index))
@@ -952,7 +952,11 @@ impl CheckerApp {
         )
     }
 
-    fn receive_background_results(&mut self) {
+    pub(crate) fn is_checking(&self) -> bool {
+        self.check.is_some()
+    }
+
+    pub(crate) fn receive_background_results(&mut self) {
         loop {
             match self.inventory_action_rx.try_recv() {
                 Ok(InventoryAction::ScanUmlauts) => self.start_inventory_scan(),

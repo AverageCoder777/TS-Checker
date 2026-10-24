@@ -1,17 +1,29 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView } from "std-widgets.slint";
+
+export struct RouteItem {
+    name: string,
+    icon-source: image,
+}
 
 export component MainWindow inherits Window {
     title: "TS-Checker";
     min-width: 1100px;
     min-height: 700px;
 
-    in property <[string]> routes: [];
+    in property <[RouteItem]> route-items: [];
     in-out property <bool> ignore-list-open: false;
     in property <[string]> ignored-routes: [];
     in property <[string]> incomplete-folders: [];
     in property <float> check_progress: 0.0;
     in property <string> status: "";
     in-out property <string> search-query: "";
+    in-out property <int> selected-route: -1;
+    in property <bool> has-result: false;
+
+    callback route-selected(int);
+    callback start-check();
+    callback open-route-folder();
+    callback show-inventory();
 
     VerticalBox {
         LineEdit {
@@ -19,7 +31,48 @@ export component MainWindow inherits Window {
             text <=> search-query;
         }
         ListView {
-            for route in routes: Text { text: route; }
+            for item[i] in route-items: Rectangle {
+                background: i == selected-route ? #3a3a3a : transparent;
+                TouchArea {
+                    clicked => {
+                        selected-route = i;
+                        route-selected(i);
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        padding: 2px;
+                        Image {
+                            source: item.icon-source;
+                            width: 32px;
+                            height: 32px;
+                            preferred-width: 32px;
+                            preferred-height: 32px;
+                        }
+                        Text {
+                            text: item.name;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalBox {
+            Button {
+                text: "Проверить маршрут";
+                enabled: selected-route >= 0;
+                clicked => { start-check(); }
+            }
+            Button {
+                text: "Открыть маршрут в проводнике";
+                enabled: selected-route >= 0;
+                clicked => { open-route-folder(); }
+            }
+            Button {
+                text: "Показать все объекты";
+                enabled: has-result;
+                clicked => { show-inventory(); }
+            }
         }
         CheckBox {
             text: "Игнор-лист маршрутов";
@@ -32,6 +85,7 @@ export component MainWindow inherits Window {
             Button { text: "Запуск"; }
             Button { text: "Остановка"; }
         }
+        Text { text: status; }
     }
 }
 
@@ -40,11 +94,48 @@ export component AssetInventoryWindow inherits Window {
     min-width: 900px;
     min-height: 700px;
 
-    in property <[string]> rows;
+    in property <[ [StandardListViewItem] ]> inventory-rows;
+    in property <bool> show-missing-only: false;
+    in-out property <string> search-query: "";
+    in-out property <int> current-row: -1;
+
+    callback toggle-missing-only();
+    callback search-changed(string);
+    callback next-match();
+    callback prev-match();
+    callback sort-ascending(int);
+    callback sort-descending(int);
 
     VerticalBox {
-        ListView {
-            for row in rows: Text { text: row; }
+        HorizontalBox {
+            LineEdit {
+                placeholder-text: "Поиск по пути, тайлу или исходному файлу";
+                text <=> search-query;
+                edited(text) => { root.search-changed(text); }
+            }
+            Button {
+                text: show-missing-only ? "Показать все" : "Только недостающие";
+                clicked => { toggle-missing-only(); }
+            }
+            Button {
+                text: "Следующее";
+                clicked => { root.next-match(); }
+            }
+            Button {
+                text: "Предыдущее";
+                clicked => { root.prev-match(); }
+            }
+        }
+        StandardTableView {
+            columns: [
+                { title: "Путь ассета", min-width: 200px, horizontal-stretch: 2, sort-order: SortOrder.ascending },
+                { title: "Кол-во использований", min-width: 120px, horizontal-stretch: 0 },
+                { title: "Тайлы", min-width: 120px, horizontal-stretch: 1 },
+            ];
+            rows: inventory-rows;
+            current-row <=> current-row;
+            sort-ascending(col) => { root.sort-ascending(col); }
+            sort-descending(col) => { root.sort-descending(col); }
         }
     }
 }
@@ -88,6 +179,33 @@ export component ScenarioWindow inherits Window {
     VerticalBox {
         ListView {
             for scenario in scenarios: Text { text: scenario; }
+        }
+    }
+}
+
+export component MissingAssetsWindow inherits Window {
+    title: "Недостающие ассеты";
+    min-width: 700px;
+    min-height: 400px;
+
+    in property <[string]> missing-assets: [];
+    callback replace-missing(int);
+
+    VerticalBox {
+        Text { text: "Недостающие ассеты маршрута:"; }
+        ListView {
+            for asset[i] in missing-assets: HorizontalLayout {
+                spacing: 6px;
+                padding: 2px;
+                Text {
+                    text: asset;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: "Заменить...";
+                    clicked => { replace-missing(i); }
+                }
+            }
         }
     }
 }

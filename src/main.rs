@@ -1,7 +1,7 @@
-slint::include_modules!();
-
 use eframe::egui;
-use image::GenericImageView;
+slint::include_modules!();
+use slint::Model;
+
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,6 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 use tempfile::tempdir;
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -390,24 +389,363 @@ fn parse_asset_launch_args(
     Ok(Some(path))
 }
 
+fn load_route_icon_image(icon_path: &std::path::Path) -> slint::Image {
+    match image::open(icon_path) {
+        Ok(img) => {
+            let rgba = img.resize_exact(32, 32, image::imageops::FilterType::Triangle).to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let raw = rgba.into_raw();
+            let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
+            slint::Image::from_rgba8(buffer)
+        }
+        Err(_) => slint::Image::default(),
+    }
+}
+
+fn build_inventory_rows(state: &app::AssetInventoryWindowState, show_missing: bool) -> Vec<slint::ModelRc<slint::StandardListViewItem>> {
+    let mut assets: Vec<&ReferencedAsset> = state.assets.iter().collect();
+    match state.sort.column {
+        inventory_ui::InventorySortColumn::Path => {
+            if state.sort.descending {
+                assets.sort_by(|a, b| b.path.cmp(&a.path));
+            } else {
+                assets.sort_by(|a, b| a.path.cmp(&b.path));
+            }
+        }
+        inventory_ui::InventorySortColumn::Usage => {
+            if state.sort.descending {
+                assets.sort_by(|a, b| b.uses.len().cmp(&a.uses.len()));
+            } else {
+                assets.sort_by(|a, b| a.uses.len().cmp(&b.uses.len()));
+            }
+        }
+    }
+    let search = state.search.to_lowercase();
+    let mut rows = Vec::new();
+    for a in assets {
+        if show_missing && !a.missing {
+            continue;
+        }
+        if !search.is_empty() {
+            let matches = a.path.to_lowercase().contains(&search)
+                || a.uses.iter().any(|u| {
+                    u.tile.to_lowercase().contains(&search)
+                        || u.source_file.display().to_lowercase().contains(&search)
+                });
+            if !matches {
+                continue;
+            }
+        }
+        let mut by_tile: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for u in a.uses.iter() {
+            *by_tile.entry(u.tile.clone()).or_insert(0) += 1;
+        }
+        let tiles: String = by_tile
+            .iter()
+            .map(|(tile, count)| format!("{} ({})", tile.trim_start_matches("тайл "), count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let path_text = if a.missing {
+            format!("<font color=\"#ff6666\">{}</font>", a.path)
+        } else {
+            a.path.clone()
+        };
+        let mut item0 = slint::StandardListViewItem::default();
+        item0.text = path_text.as_str().into();
+        let mut item1 = slint::StandardListViewItem::default();
+        item1.text = a.uses.len().to_string().as_str().into();
+        let mut item2 = slint::StandardListViewItem::default();
+        item2.text = tiles.as_str().into();
+        let row_items = vec![item0, item1, item2];
+        let row: slint::ModelRc<slint::StandardListViewItem> =
+            slint::ModelRc::new(slint::VecModel::from(row_items));
+        rows.push(row);
+    }
+    rows
+}
+
 fn main() {
     let app = std::sync::Arc::new(std::sync::Mutex::new(app::CheckerApp::default()));
     let ui = MainWindow::new().unwrap();
-    if let Ok(app) = app.lock() {
-        let query = app.search_query.to_lowercase();
-        let routes: Vec<slint::SharedString> = app
-            .routes
-            .iter()
-            .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
-            .map(|r| r.name.clone().into())
-            .collect();
-        ui.set_routes(slint::ModelRc::new(slint::VecModel::from(routes)));
-        let ignored: Vec<slint::SharedString> = app.ignored_route_ids.iter().map(|s| s.clone().into()).collect();
-        ui.set_ignored_routes(slint::ModelRc::new(slint::VecModel::from(ignored)));
-        let incomplete: Vec<slint::SharedString> = app.incomplete_folders.iter().map(|f| f.id.clone().into()).collect();
-        ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
+    let ui_handle = ui.as_weak();
+    if let Ok(mut app) = app.lock() {
+        app.start_route_scan();
     }
+    let app_clone = app.clone();
+    let app_clone2 = app.clone();
+    let app_clone3 = app.clone();
+    let app_clone4 = app.clone();
+    let app_clone5 = app.clone();
+    let app_clone6 = app.clone();
+    let app_clone8 = app.clone();
+    let app_clone9 = app.clone();
+    let app_clone10 = app.clone();
+    let mut last_count: usize = 0;
+    let mut last_query = String::new();
+    let app_clone7 = app.clone();
+    let missing_win = MissingAssetsWindow::new().unwrap();
+    let missing_handle = missing_win.as_weak();
+    missing_win.on_replace_missing(move |idx| {
+        let (missing, rw_path) = {
+            if let Ok(app) = app_clone7.lock() {
+                if let Some(result) = app.result.as_ref() {
+                    if let Some(missing) = result.missing_assets.get(idx as usize) {
+                        (Some(missing.clone()), app.rw_path.clone())
+                    } else {
+                        (None, String::new())
+                    }
+                } else {
+                    (None, String::new())
+                }
+            } else {
+                (None, String::new())
+            }
+        };
+        if let Some(missing) = missing {
+            let assets_path = PathBuf::from(rw_path.trim()).join("Assets");
+            let start_dir = existing_directory_upwards(&asset_directory(&assets_path, &missing.path))
+                .unwrap_or_else(|| assets_path.clone());
+            let selected = rfd::FileDialog::new()
+                .set_title("Выберите BIN нового объекта")
+                .add_filter("RailWorks BIN", &["bin"])
+                .set_directory(&start_dir)
+                .pick_file();
+            if let Some(replacement) = selected {
+                if let Ok(mut app) = app_clone7.lock() {
+                    let replacement_relative = replacement.strip_prefix(&assets_path).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| replacement.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                    app.start_asset_replacement(missing, replacement, false, replacement_relative, std::collections::BTreeMap::new());
+                }
+            }
+        }
+    });
+    let mut missing_window_shown = false;
+    let timer = slint::Timer::default();
+    timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+        let ui = match ui_handle.upgrade() {
+            Some(ui) => ui,
+            None => return,
+        };
+        if let Ok(mut app) = app_clone.lock() {
+            app.receive_background_results();
+            let q = ui.get_search_query().to_string();
+            app.search_query = q.clone();
+            if app.routes.len() == last_count && q == last_query {
+                ui.set_status(app.status.clone().into());
+                ui.set_has_result(app.result.is_some());
+                return;
+            }
+            last_count = app.routes.len();
+            last_query = q.clone();
+            let query = q.to_lowercase();
+            let items: Vec<RouteItem> = app
+                .routes
+                .iter()
+                .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
+                .map(|r| {
+                    let icon = match r.icon_path.clone() {
+                        Some(p) => load_route_icon_image(&p),
+                        None => slint::Image::default(),
+                    };
+                    RouteItem {
+                        name: r.name.clone().into(),
+                        icon_source: icon,
+                    }
+                })
+                .collect();
+            ui.set_route_items(slint::ModelRc::new(slint::VecModel::from(items)));
+            let ignored: Vec<slint::SharedString> = app.ignored_route_ids.iter().map(|s| s.clone().into()).collect();
+            ui.set_ignored_routes(slint::ModelRc::new(slint::VecModel::from(ignored)));
+            let incomplete: Vec<slint::SharedString> = app.incomplete_folders.iter().map(|f| f.id.clone().into()).collect();
+            ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
+            ui.set_status(app.status.clone().into());
+            ui.set_has_result(app.result.is_some());
+            if app.is_checking() {
+                missing_window_shown = false;
+            }
+            let missing_rows: Vec<slint::SharedString> = app
+                .result
+                .as_ref()
+                .map(|result| {
+                    result
+                        .missing_assets
+                        .iter()
+                        .map(|asset| asset.path.clone().into())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(mw) = missing_handle.upgrade() {
+                mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(missing_rows.clone())));
+                if !missing_rows.is_empty() && !missing_window_shown {
+                    let _ = mw.show();
+                    missing_window_shown = true;
+                }
+                if missing_rows.is_empty() {
+                    missing_window_shown = false;
+                }
+            }
+        }
+    });
+    let ui_handle2 = ui.as_weak();
+    ui.on_route_selected(move |idx| {
+        if let Some(ui) = ui_handle2.upgrade() {
+            ui.set_selected_route(idx);
+        }
+        if let Ok(mut app) = app_clone2.lock() {
+            let q = app.search_query.to_lowercase();
+            let filtered: Vec<&Route> = app
+                .routes
+                .iter()
+                .filter(|r| q.is_empty() || r.name.to_lowercase().contains(&q))
+                .collect();
+            if idx >= 0 && ((idx as usize) < filtered.len()) {
+                app.selected_route = Some(app.routes.iter().position(|r| r.name == filtered[idx as usize].name && r.path == filtered[idx as usize].path).unwrap_or(idx as usize));
+            } else {
+                app.selected_route = None;
+            }
+        }
+    });
+    let ui_handle3 = ui.as_weak();
+    ui.on_start_check(move || {
+        if let Ok(mut app) = app_clone3.lock() {
+            app.start_check();
+        }
+    });
+    let inventory_win = AssetInventoryWindow::new().unwrap();
+    let inv_handle = inventory_win.as_weak();
+    let inv_handle2 = inventory_win.as_weak();
+    let inv_handle3 = inventory_win.as_weak();
+    let inv_handle4 = inventory_win.as_weak();
+    let inv_handle5 = inventory_win.as_weak();
+    let inv_handle6 = inventory_win.as_weak();
+    let inv_handle7 = inventory_win.as_weak();
+    let ui_handle4 = ui.as_weak();
+    ui.on_open_route_folder(move || {
+        if let Ok(app) = app_clone4.lock() {
+            if let Some(idx) = app.selected_route {
+                if let Some(route) = app.routes.get(idx) {
+                    let _ = open_in_file_explorer(&route.path);
+                }
+            }
+        }
+    });
+    inventory_win.on_toggle_missing_only(move || {
+        if let Some(inv) = inv_handle2.upgrade() {
+            let cur = inv.get_show_missing_only();
+            inv.set_show_missing_only(!cur);
+            let show_missing = !cur;
+            if let Ok(app) = app_clone6.lock() {
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let rows = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                }
+            }
+        }
+    });
+    inventory_win.on_sort_ascending(move |column| {
+        if let Some(inv) = inv_handle3.upgrade() {
+            let show_missing = inv.get_show_missing_only();
+            if let Ok(mut app) = app_clone8.lock() {
+                if let Ok(mut state) = app.asset_inventory_state.lock() {
+                    match column {
+                        0 => {
+                            state.sort.column = inventory_ui::InventorySortColumn::Path;
+                            state.sort.descending = false;
+                        }
+                        1 => {
+                            state.sort.column = inventory_ui::InventorySortColumn::Usage;
+                            state.sort.descending = false;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let rows = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                }
+            }
+        }
+    });
+    inventory_win.on_sort_descending(move |column| {
+        if let Some(inv) = inv_handle4.upgrade() {
+            let show_missing = inv.get_show_missing_only();
+            if let Ok(mut app) = app_clone9.lock() {
+                if let Ok(mut state) = app.asset_inventory_state.lock() {
+                    match column {
+                        0 => {
+                            state.sort.column = inventory_ui::InventorySortColumn::Path;
+                            state.sort.descending = true;
+                        }
+                        1 => {
+                            state.sort.column = inventory_ui::InventorySortColumn::Usage;
+                            state.sort.descending = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let rows = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                }
+            }
+        }
+    });
+    inventory_win.on_search_changed(move |text| {
+        if let Some(inv) = inv_handle5.upgrade() {
+            let show_missing = inv.get_show_missing_only();
+            if let Ok(mut app) = app_clone10.lock() {
+                if let Ok(mut state) = app.asset_inventory_state.lock() {
+                    state.search = text.to_string();
+                }
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let rows = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                }
+            }
+        }
+    });
+    inventory_win.on_next_match(move || {
+        if let Some(inv) = inv_handle6.upgrade() {
+            let count = inv.get_inventory_rows().row_count() as i32;
+            if count <= 0 {
+                return;
+            }
+            let cur = inv.get_current_row();
+            let next = if cur < 0 { 0 } else { (cur + 1) % count };
+            inv.set_current_row(next);
+        }
+    });
+    inventory_win.on_prev_match(move || {
+        if let Some(inv) = inv_handle7.upgrade() {
+            let count = inv.get_inventory_rows().row_count() as i32;
+            if count <= 0 {
+                return;
+            }
+            let cur = inv.get_current_row();
+            let prev = if cur <= 0 { count - 1 } else { cur - 1 };
+            inv.set_current_row(prev);
+        }
+    });
+    ui.on_show_inventory(move || {
+        if let Ok(mut app) = app_clone5.lock() {
+            app.open_asset_inventory();
+            if let Some(inv) = inv_handle.upgrade() {
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    inv.set_show_missing_only(false);
+                    inv.set_search_query(state.search.clone().as_str().into());
+                    let rows = build_inventory_rows(&state, false);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                }
+                inv.show().unwrap();
+            }
+        }
+    });
     ui.run().unwrap();
+}
+
+#[cfg(test)]
+
+#[cfg(test)]
+fn main_backup() {
 }
 
 #[cfg(test)]
@@ -418,7 +756,7 @@ mod tests {
         parse_asset_launch_args, parse_route_name, preferred_serz_path, scan_routes,
         scan_routes_with_ignored, validate_serz_process, ScenarioClueCollection,
     };
-    use image::GenericImageView;
+        use image::GenericImageView;
     use std::ffi::OsString;
     use std::fs;
     use std::io::Write;
