@@ -1,0 +1,15 @@
+import { VerticalBox, ListView } from "std-widgets.slint";
+
+export component AssetInventoryWindow inherits Window {
+    title: "Инвентарь ассетов маршрута";
+    min-width: 900px;
+    min-height: 700px;
+
+    in property <[string]> rows;
+
+    VerticalBox {
+        ListView {
+            for row in rows: Text { text: row; }
+        }
+    }
+}

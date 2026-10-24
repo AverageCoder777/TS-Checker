@@ -1,0 +1,93 @@
+import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "TS-Checker";
+    min-width: 1100px;
+    min-height: 700px;
+
+    in property <[string]> routes: [];
+    in-out property <bool> ignore-list-open: false;
+    in property <[string]> ignored-routes: [];
+    in property <[string]> incomplete-folders: [];
+    in property <float> check_progress: 0.0;
+    in property <string> status: "";
+    in-out property <string> search-query: "";
+
+    VerticalBox {
+        LineEdit {
+            placeholder-text: "Поиск маршрутов...";
+            text <=> search-query;
+        }
+        ListView {
+            for route in routes: Text { text: route; }
+        }
+        CheckBox {
+            text: "Игнор-лист маршрутов";
+            checked <=> ignore-list-open;
+        }
+        ListView {
+            for folder in incomplete-folders: Text { text: folder; }
+        }
+        HorizontalBox {
+            Button { text: "Запуск"; }
+            Button { text: "Остановка"; }
+        }
+    }
+}
+
+export component AssetInventoryWindow inherits Window {
+    title: "Инвентарь ассетов маршрута";
+    min-width: 900px;
+    min-height: 700px;
+
+    in property <[string]> rows;
+
+    VerticalBox {
+        ListView {
+            for row in rows: Text { text: row; }
+        }
+    }
+}
+
+export component IgnoreListWindow inherits Window {
+    title: "Игнор-лист маршрутов";
+    min-width: 400px;
+    min-height: 300px;
+
+    in property <[string]> ignored-routes;
+
+    VerticalBox {
+        ListView {
+            for r in ignored-routes: Text { text: r; }
+        }
+        Button { text: "Добавить выбранный маршрут в игнор-лист"; }
+    }
+}
+
+export component IncompleteFoldersWindow inherits Window {
+    title: "Неполные папки";
+    min-width: 500px;
+    min-height: 300px;
+
+    in property <[string]> folders;
+
+    VerticalBox {
+        ListView {
+            for f in folders: Text { text: f; }
+        }
+    }
+}
+
+export component ScenarioWindow inherits Window {
+    title: "Сценарий";
+    min-width: 600px;
+    min-height: 400px;
+
+    in property <[string]> scenarios;
+
+    VerticalBox {
+        ListView {
+            for scenario in scenarios: Text { text: scenario; }
+        }
+    }
+}

@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+slint::include_modules!();
 
 use eframe::egui;
 use image::GenericImageView;
@@ -390,25 +390,24 @@ fn parse_asset_launch_args(
     Ok(Some(path))
 }
 
-fn main() -> eframe::Result<()> {
-    let startup_asset = parse_asset_launch_args(std::env::args_os().skip(1));
-    eframe::run_native(
-        "TS Checker",
-        eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1440.0, 900.0])
-                .with_min_inner_size([1100.0, 700.0]),
-            ..eframe::NativeOptions::default()
-        },
-        Box::new(move |_creation_context| {
-            let app = match startup_asset {
-                Ok(Some(path)) => app::CheckerApp::asset_only(path),
-                Ok(None) => app::CheckerApp::default(),
-                Err(error) => app::CheckerApp::asset_only_error(error),
-            };
-            Ok(Box::new(app))
-        }),
-    )
+fn main() {
+    let app = std::sync::Arc::new(std::sync::Mutex::new(app::CheckerApp::default()));
+    let ui = MainWindow::new().unwrap();
+    if let Ok(app) = app.lock() {
+        let query = app.search_query.to_lowercase();
+        let routes: Vec<slint::SharedString> = app
+            .routes
+            .iter()
+            .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
+            .map(|r| r.name.clone().into())
+            .collect();
+        ui.set_routes(slint::ModelRc::new(slint::VecModel::from(routes)));
+        let ignored: Vec<slint::SharedString> = app.ignored_route_ids.iter().map(|s| s.clone().into()).collect();
+        ui.set_ignored_routes(slint::ModelRc::new(slint::VecModel::from(ignored)));
+        let incomplete: Vec<slint::SharedString> = app.incomplete_folders.iter().map(|f| f.id.clone().into()).collect();
+        ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
+    }
+    ui.run().unwrap();
 }
 
 #[cfg(test)]
