@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView, Slider } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView, Slider, TextEdit } from "std-widgets.slint";
 
 export struct RouteItem {
     name: string,
@@ -126,6 +126,7 @@ export component AssetInventoryWindow inherits Window {
     callback search-changed(string);
     callback row-clicked(int);
     callback open-in-editor();
+    callback scan-umlauts();
     callback sort-ascending(int);
     callback sort-descending(int);
 
@@ -143,6 +144,10 @@ export component AssetInventoryWindow inherits Window {
             Button {
                 text: "Открыть в редакторе";
                 clicked => { root.open-in-editor(); }
+            }
+            Button {
+                text: "Проверить на умляуты";
+                clicked => { root.scan-umlauts(); }
             }
         }
         StandardTableView {
@@ -273,7 +278,7 @@ export component MissingAssetsWindow inherits Window {
 export component SettingsWindow inherits Window {
     title: "Настройки";
     min-width: 500px;
-    min-height: 300px;
+    min-height: 200px;
 
     in-out property <float> serz-process-limit: 8;
     in-out property <string> locoswap-path: "";
@@ -284,14 +289,18 @@ export component SettingsWindow inherits Window {
 
     VerticalBox {
         HorizontalBox {
-            Text { text: "Потоки Serz:"; }
+            Text { horizontal-alignment: TextHorizontalAlignment.center;
+                overflow: TextOverflow.elide;
+                text: "Используется потоков процессора:";
+                vertical-alignment: TextVerticalAlignment.center; }
             Slider {
                 value <=> serz-process-limit;
                 minimum: 1;
-                maximum: 32;
+                maximum: 16;
             }
         }
         HorizontalBox {
+            alignment: LayoutAlignment.stretch;
             Text { text: "Путь к LocoSwap:"; }
             LineEdit { text <=> locoswap-path; }
             Button { text: "Обзор..."; clicked => { pick-locoswap(); } }
@@ -304,5 +313,44 @@ export component SettingsWindow inherits Window {
             text: "Сохранить";
             clicked => { save-settings(); }
         }
+    }
+}
+
+export component AssetEditorWindow inherits Window {
+    title: "Редактор BIN/GeoPcDx";
+    min-width: 900px;
+    opacity: 0;
+    maximized: false;
+    min-height: 600px;
+
+    accessible-role: AccessibleRole.none;
+    always-on-top: false;
+    default-font-family: @tr("");
+    default-font-size: 16px;
+    default-font-weight: 0;
+    in-out property <string> editor-text: "";
+    full-screen: false;
+    in property <string> status: "";
+    in property <bool> loading: false;
+
+    callback save();
+    callback search-changed(string);
+
+    VerticalBox {
+        HorizontalBox {
+            LineEdit {
+                placeholder-text: "Поиск...";
+                edited(text) => { root.search-changed(text); }
+            }
+            Button {
+                text: "Сохранить";
+                enabled: !loading;
+                clicked => { root.save(); }
+            }
+        }
+        TextEdit {
+            text <=> editor-text;
+        }
+        Text { text: status; }
     }
 }

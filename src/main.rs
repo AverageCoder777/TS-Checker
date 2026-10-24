@@ -1,4 +1,3 @@
-use eframe::egui;
 slint::include_modules!();
 use slint::Model;
 
@@ -348,7 +347,6 @@ mod analysis_cache;
 mod app;
 mod assets;
 mod blueprint;
-mod dialogs;
 mod editor;
 mod inventory_ui;
 mod reference;
@@ -359,7 +357,6 @@ mod translit;
 mod windows;
 
 pub(crate) use assets::*;
-pub(crate) use dialogs::*;
 pub(crate) use editor::*;
 pub(crate) use inventory_ui::*;
 pub(crate) use reference::*;
@@ -462,6 +459,52 @@ fn build_inventory_rows(state: &app::AssetInventoryWindowState, show_missing: bo
 }
 
 fn main() {
+    // Handle file association launch: TS-Checker opened with a .bin/.GeoPcDx file.
+    let startup_asset = parse_asset_launch_args(std::env::args_os().skip(1));
+    if let Ok(Some(_)) | Err(_) = startup_asset {
+        // asset-only mode
+        let app = std::sync::Arc::new(std::sync::Mutex::new(match startup_asset {
+            Ok(Some(path)) => app::CheckerApp::asset_only(path),
+            Ok(None) => app::CheckerApp::default(),
+            Err(error) => app::CheckerApp::asset_only_error(error),
+        }));
+        let editor_win = AssetEditorWindow::new().unwrap();
+        let editor_handle = editor_win.as_weak();
+        let editor_handle2 = editor_win.as_weak();
+        let app_clone = app.clone();
+        let app_clone2 = app.clone();
+        editor_win.on_save(move || {
+            if let Some(ew) = editor_handle.upgrade() {
+                let text = ew.get_editor_text();
+                if let Ok(mut app) = app_clone.lock() {
+                    if let Some(doc) = app.asset_viewer_document.as_mut() {
+                        doc.xml = text.to_string();
+                    }
+                    app.start_asset_save();
+                }
+            }
+        });
+        let timer = slint::Timer::default();
+        timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+            if let Ok(mut app) = app_clone2.lock() {
+                app.receive_background_results();
+                if app.asset_viewer_open && app.editor_sync_pending {
+                    if let Some(doc) = app.asset_viewer_document.as_ref() {
+                        let xml = doc.xml.clone().replace('\t', "    ");
+                        let status = app.status.clone();
+                        app.editor_sync_pending = false;
+                        if let Some(ew) = editor_handle2.upgrade() {
+                            ew.set_editor_text(xml.into());
+                            ew.set_status(status.into());
+                            let _ = ew.show();
+                        }
+                    }
+                }
+            }
+        });
+        editor_win.run().unwrap();
+        return;
+    }
     let app = std::sync::Arc::new(std::sync::Mutex::new(app::CheckerApp::default()));
     let ui = MainWindow::new().unwrap();
     let ui_handle = ui.as_weak();
@@ -485,6 +528,9 @@ fn main() {
     let app_clone16 = app.clone();
     let app_clone17 = app.clone();
     let app_clone18 = app.clone();
+    let app_clone19 = app.clone();
+    let app_clone20 = app.clone();
+    let app_clone21 = app.clone();
     let mut last_count: usize = 0;
     let mut last_query = String::new();
     let app_clone7 = app.clone();
@@ -524,6 +570,23 @@ fn main() {
         }
     });
     let mut missing_window_shown = false;
+    let editor_win = AssetEditorWindow::new().unwrap();
+    let editor_handle = editor_win.as_weak();
+    let editor_handle2 = editor_win.as_weak();
+    editor_win.on_save(move || {
+        if let Some(ew) = editor_handle.upgrade() {
+            let text = ew.get_editor_text();
+            if let Ok(mut app) = app_clone20.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    doc.xml = text.to_string();
+                }
+                app.start_asset_save();
+            }
+        }
+    });
+    // Show editor window when asset_viewer_open becomes true
+    // (handled in timer below)
+
     let timer = slint::Timer::default();
     timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
         let ui = match ui_handle.upgrade() {
@@ -532,12 +595,6 @@ fn main() {
         };
         if let Ok(mut app) = app_clone.lock() {
             app.receive_background_results();
-            if !app.is_checking() && app.result.is_none() && app.selected_route.is_none() && !app.routes.is_empty() {
-                if let Some(idx) = app.routes.iter().position(|r| r.id == "8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7") {
-                    app.selected_route = Some(idx);
-                    app.start_check();
-                }
-            }
             // Show missing-assets popup after route check finishes
             if !app.is_checking() && app.result.is_some() && app.missing_assets_popup.is_some() && !app.missing_assets_shown {
                 let paths: Vec<slint::SharedString> = app
@@ -551,6 +608,19 @@ fn main() {
                     mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(paths)));
                     let _ = mw.show();
                     app.missing_assets_shown = true;
+                }
+            }
+            // Sync asset editor text when document loaded
+            if app.asset_viewer_open && app.editor_sync_pending {
+                if let Some(doc) = app.asset_viewer_document.as_ref() {
+                    let xml = doc.xml.clone().replace('\t', "    ");
+                    let status = app.status.clone();
+                    app.editor_sync_pending = false;
+                    if let Some(ew) = editor_handle2.upgrade() {
+                        ew.set_editor_text(xml.into());
+                        ew.set_status(status.into());
+                        let _ = ew.show();
+                    }
                 }
             }
             let q = ui.get_search_query().to_string();
@@ -919,6 +989,11 @@ fn main() {
                     app.start_asset_view(full);
                 }
             }
+        }
+    });
+    inventory_win.on_scan_umlauts(move || {
+        if let Ok(app) = app_clone19.lock() {
+            let _ = app.inventory_action_tx.send(crate::app::InventoryAction::ScanUmlauts);
         }
     });
     let settings_handle3 = settings_win.as_weak();

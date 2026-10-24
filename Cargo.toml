@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard"] }
 rfd = "0.15"
 walkdir = "2.5"
 rayon = "1.12"
@@ -16,7 +15,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slint = "1.18.1"
 xml = "1.4"
-egui_extras = { version = "0.37", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }

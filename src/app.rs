@@ -9,7 +9,7 @@ enum CheckMessage {
     Finished(Result<CheckResult, String>),
 }
 
-enum InventoryAction {
+pub(crate) enum InventoryAction {
     ScanUmlauts,
     Repair {
         asset: UmlautAsset,
@@ -105,17 +105,18 @@ pub(crate) struct CheckerApp {
     delete_rx: Option<Receiver<Result<usize, String>>>,
     delete_feedback: Option<Result<usize, String>>,
     settings_window_open: bool,
-    asset_viewer_open: bool,
+    pub(crate) asset_viewer_open: bool,
     asset_editor_only: bool,
-    asset_viewer_document: Option<EditorDocument>,
-    asset_viewer_load: Option<Receiver<Result<EditorDocument, String>>>,
-    asset_viewer_save: Option<Receiver<Result<SavedAsset, String>>>,
+    pub(crate) asset_viewer_document: Option<EditorDocument>,
+    pub(crate) editor_sync_pending: bool,
+    pub(crate) asset_viewer_load: Option<Receiver<Result<EditorDocument, String>>>,
+    pub(crate) asset_viewer_save: Option<Receiver<Result<SavedAsset, String>>>,
     pub(crate) route_thumbnails_enabled: bool,
     pub(crate) serz_process_limit: usize,
     pub(crate) locoswap_path: String,
     attempted_route_icons: HashSet<PathBuf>,
     pub(crate) asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
-    inventory_action_tx: Sender<InventoryAction>,
+    pub(crate) inventory_action_tx: Sender<InventoryAction>,
     inventory_action_rx: Receiver<InventoryAction>,
     inventory_scan: Option<Receiver<Result<InventoryScanOutcome, String>>>,
     pub(crate) missing_assets_popup: Option<Vec<String>>,
@@ -188,6 +189,7 @@ impl Default for CheckerApp {
             asset_viewer_open: false,
             asset_editor_only: false,
             asset_viewer_document: None,
+            editor_sync_pending: false,
             asset_viewer_load: None,
             asset_viewer_save: None,
             route_thumbnails_enabled,
@@ -205,191 +207,6 @@ impl Default for CheckerApp {
 }
 
 impl CheckerApp {
-    fn show_asset_inventory_viewport(&self, ctx: &egui::Context) {
-        let is_open = match self.asset_inventory_state.lock() {
-            Ok(state) => state.open,
-            Err(error) => {
-                eprintln!("Не удалось получить состояние окна инвентаря: {error}");
-                return;
-            }
-        };
-        if !is_open {return;}
-
-        let state = Arc::clone(&self.asset_inventory_state);
-        let action_tx = self.inventory_action_tx.clone();
-        let assets_root = PathBuf::from(self.rw_path.trim()).join("Assets");
-        let repair_busy = self.check.is_some()
-            || self.asset_replacement.is_some()
-            || self.inventory_scan.is_some()
-            || self.umlaut_repair.is_some()
-            || self.selected_route.is_none();
-        let scan_busy = repair_busy || self.inventory_scan.is_some();
-        ctx.show_viewport_deferred(
-            egui::ViewportId::from_hash_of("asset_inventory"),
-            egui::ViewportBuilder::default().with_title("Инвентарь ассетов маршрута").with_inner_size([900.0, 700.0]),
-            move |ui, _class| {
-                let mut state = match state.lock() {
-                    Ok(state) => state,
-                    Err(error) => {
-                        eprintln!("Не удалось получить состояние окна инвентаря: {error}");
-                        return;
-                    }
-                };
-                if ui.ctx().input(|input| input.viewport().close_requested())
-                {
-                    state.open = false;
-                    return;
-                }
-
-                egui::CentralPanel::default().show(ui, |ui| {
-                    ui.heading("Все используемые ассеты маршрута");
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Всего: {}", state.assets.len()));
-                        if ui.add_enabled(
-                                !state.scanning_umlauts && !scan_busy,
-                                egui::Button::new("Проверить все ассеты на умляуты"),
-                            ).clicked()
-                        {
-                            state.scanning_umlauts = true;
-                            state.show_umlauts = true;
-                            state.error = None;
-                            if let Err(error) = action_tx.send(InventoryAction::ScanUmlauts) {
-                                state.scanning_umlauts = false;
-                                state.error =
-                                    Some(format!("Не удалось запустить проверку: {error}"));
-                            } else {}
-                        }
-                        ui.selectable_value(&mut state.show_umlauts, false, "Все ассеты");
-                        ui.selectable_value(&mut state.show_umlauts, true, "Требуют проверки");
-                        if ui.button(if state.show_tiles {"Скрыть тайлы"} else {"Показать тайлы"}).clicked()
-                        {
-                            state.show_tiles = !state.show_tiles;
-                        }
-                    });
-                    if state.scanning_umlauts {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Проверка имён и цепочек ссылок...");
-                        });
-                    } else if state.show_umlauts {
-                        ui.label(format!("Найдено для проверки: {}",state.umlaut_assets.len()));
-                    }
-                    if let Some(error) = &state.error {
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
-                    }
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.search).hint_text("Поиск по пути, тайлу или исходному файлу"),
-                    );
-                    ui.separator();
-
-                    let search = state.search.to_lowercase();
-                    // Карты собираются один раз на кадр: поиск по списку для
-                    // каждой строки стоил бы времени при тысячах ассетов.
-                    let umlaut_by_path: HashMap<&str, &UmlautAsset> = state.umlaut_assets.iter()
-                        .map(|asset| (asset.path.as_str(), asset)).collect();
-                    let missing_by_path: HashMap<&str, bool> = state
-                        .assets.iter().map(|asset| (asset.path.as_str(), asset.missing)).collect();
-                    let mut rows: Vec<InventoryRow<'_>> =
-                        if state.show_umlauts {
-                            state.umlaut_assets.iter().filter(|asset| {
-                                    search.is_empty()
-                                        || asset.path.to_lowercase().contains(&search)
-                                        || asset.uses.iter().any(|usage| {
-                                            usage.tile.to_lowercase().contains(&search)
-                                            || usage.source_file.display().to_string().to_lowercase().contains(&search)
-                                        })
-                                }).map(|asset| {
-                                    let missing = missing_by_path.get(asset.path.as_str()).copied().unwrap_or(false);
-                                    (
-                                        asset.path.as_str(),
-                                        asset.uses.as_slice(),
-                                        missing,
-                                        Some(asset),
-                                    )
-                                }).collect()
-                        } else {
-                            state.assets.iter().filter(|asset| {
-                                    search.is_empty()
-                                        || asset.path.to_lowercase().contains(&search)
-                                        || asset.uses.iter().any(|usage| {
-                                            usage.tile.to_lowercase().contains(&search)
-                                            || usage.source_file.display().to_string().to_lowercase().contains(&search)
-                                        })
-                                }).map(|asset| {(
-                                        asset.path.as_str(),
-                                        asset.uses.as_slice(),
-                                        asset.missing,
-                                        umlaut_by_path.get(asset.path.as_str()).copied(),
-                                    )
-                                }).collect()
-                        };
-
-                    let mut actions = InventoryRowActions::default();
-                    let show_tiles = state.show_tiles;
-                    // Ширина таблицы считается с запасом на полосу прокрутки, чтобы
-                    // шапка и строки оставались в одних и тех же границах.
-                    let table_width =
-                        (ui.available_width() - ui.spacing().scroll.allocated_width()).max(320.0);
-                    let layout = InventoryLayout::new(table_width, show_tiles);
-                    let mut sort = state.sort;
-                    sort_inventory_rows(&mut rows, sort);
-                    let table_data = InventoryTable {
-                        rows: &rows,
-                        assets_root: &assets_root,
-                        layout,
-                        show_tiles,
-                        repair_busy,
-                    };
-                    asset_inventory_table(ui, &table_data, &mut sort, &mut actions);
-                    state.sort = sort;
-                    if let Some(folder) = actions.open_folder {
-                        if let Err(error) = open_in_file_explorer(&folder) {
-                            state.error = Some(error);
-                        }
-                    }
-                    if let Some(asset) = actions.repair {
-                        state.pending_repair = Some(asset);
-                    }
-                    // Окно подтверждения открываем здесь же: в отдельном окне
-                    // инвентаря остаётся фокус клавиатуры, иначе в поля нельзя
-                    // вводить символы.
-                    if let Some(asset) = state.pending_repair.clone() {
-                        let mut fixes = state.character_fixes.clone();
-                        let decision = umlaut_repair_window(ui, &asset, &mut fixes);
-                        // Введённые символы сохраняем сразу: иначе они
-                        // теряются до следующего кадра.
-                        state.character_fixes = fixes.clone();
-                        match decision {
-                            Some(RepairDecision::Cancel) => {
-                                state.pending_repair = None;
-                            }
-                            Some(RepairDecision::Confirm) => {
-                                state.pending_repair = None;
-                                // Пустое поле означает значение по умолчанию.
-                                let mut effective = fixes;
-                                for character in &asset.unsupported {
-                                    effective
-                                        .entry(*character)
-                                        .or_insert_with(|| default_replacement(*character));
-                                }
-                                state.character_fixes = effective.clone();
-                                if let Err(error) = action_tx.send(InventoryAction::Repair {
-                                    asset,
-                                    fixes: effective,
-                                }) {
-                                    state.error = Some(format!(
-                                        "Не удалось запустить транслитерацию: {error}"
-                                    ));
-                                }
-                            }
-                            None => {}
-                        }
-                    }
-                });
-            },
-        );
-    }
-
     pub(crate) fn open_asset_inventory(&mut self) {
         let Some(result) = self.result.as_ref() else {
             return;
@@ -616,7 +433,7 @@ impl CheckerApp {
         });
     }
 
-    fn start_asset_save(&mut self) {
+    pub(crate) fn start_asset_save(&mut self) {
         let Some(document) = self.asset_viewer_document.as_mut() else {
             return;
         };
@@ -665,53 +482,6 @@ impl CheckerApp {
             return;
         };
         self.start_asset_view(path);
-    }
-
-    fn show_asset_editor(&mut self, ui: &mut egui::Ui) {
-        let save_shortcut = ui
-            .ctx()
-            .input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
-        let find_shortcut = ui
-            .ctx()
-            .input(|input| input.modifiers.command && input.key_pressed(egui::Key::F));
-        let saving = self.asset_viewer_save.is_some();
-        let mut save_requested = false;
-
-        if self.asset_editor_only {
-            egui::Panel::bottom("editor_status").show(ui, |ui| {
-                ui.label(&self.status);
-            });
-            egui::CentralPanel::default().show(ui, |ui| {
-                ui.heading("Редактор BIN/GeoPcDx — XML");
-                ui.separator();
-                save_requested = render_asset_editor(
-                    ui,
-                    self.asset_viewer_document.as_mut(),
-                    self.asset_viewer_load.is_some(),
-                    saving,
-                    save_shortcut,
-                    find_shortcut,
-                );
-            });
-        } else if self.asset_viewer_open {
-            egui::Window::new("Редактор BIN/GeoPcDx — XML")
-                .open(&mut self.asset_viewer_open)
-                .default_size([1000.0, 760.0])
-                .resizable(true)
-                .show(ui.ctx(), |ui| {
-                    save_requested = render_asset_editor(
-                        ui,
-                        self.asset_viewer_document.as_mut(),
-                        self.asset_viewer_load.is_some(),
-                        saving,
-                        save_shortcut,
-                        find_shortcut,
-                    );
-                });
-        }
-        if save_requested || (self.asset_editor_only && save_shortcut) {
-            self.start_asset_save();
-        }
     }
 
     pub(crate) fn start_route_scan(&mut self) {
@@ -976,6 +746,7 @@ impl CheckerApp {
                 Ok(document) => {
                     self.status = format!("Открыт для редактирования: {}", document.source);
                     self.asset_viewer_document = Some(document);
+                    self.editor_sync_pending = true;
                 }
                 Err(error) => self.status = error,
             }
@@ -1321,172 +1092,3 @@ let check_message = self.check.as_ref().and_then(|rx| match rx.try_recv() {
         }
     }
 }
-
-fn render_asset_editor(
-    ui: &mut egui::Ui,
-    document: Option<&mut EditorDocument>,
-    loading: bool,
-    saving: bool,
-    save_shortcut: bool,
-    find_shortcut: bool,
-) -> bool {
-    let mut save_requested = false;
-    if let Some(document) = document {
-        ui.horizontal(|ui| {
-            ui.label(&document.source);
-            if document.is_dirty() {
-                ui.colored_label(egui::Color32::YELLOW, "Есть несохранённые изменения");
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Проверить целостность XML").clicked() {
-                document.validate_xml();
-            }
-            match &document.xml_validation {
-                Some(Ok(())) => {
-                    ui.colored_label(egui::Color32::LIGHT_GREEN, "XML корректен");
-                }
-                Some(Err(error)) => {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
-                None => {
-                    ui.label("XML ещё не проверен");
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    document.is_dirty() && !saving,
-                    egui::Button::new("Сохранить (Ctrl+S)"),
-                )
-                .clicked()
-            {
-                save_requested = document.validate_xml();
-            }
-            if saving {
-                ui.spinner();
-                ui.label("Сохранение...");
-            }
-        });
-        if save_shortcut {
-            save_requested = document.validate_xml();
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Найти:");
-            let find_response = ui.add(
-                egui::TextEdit::singleline(&mut document.find_query)
-                    .id(ui.make_persistent_id("editor_find"))
-                    .desired_width(160.0),
-            );
-            if find_shortcut {
-                find_response.request_focus();
-            }
-            if let Err(error) = document.refresh_matches() {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
-            }
-            if ui.button("Предыдущее").clicked() {
-                document.move_match(false);
-            }
-            if ui.button("Следующее").clicked() {
-                document.move_match(true);
-            }
-            let match_status = if document.match_count() == 0 {
-                "Совпадений: 0".to_owned()
-            } else if !document.match_selected {
-                format!("Совпадений: {}", document.match_count())
-            } else {
-                format!(
-                    "Совпадение {} из {}",
-                    document.match_index + 1,
-                    document.match_count()
-                )
-            };
-            ui.label(match_status);
-            ui.checkbox(&mut document.case_sensitive, "Учитывать регистр");
-        });
-        ui.horizontal(|ui| {
-            ui.label("Заменить на:");
-            ui.add(
-                egui::TextEdit::singleline(&mut document.replace_text)
-                    .id(ui.make_persistent_id("editor_replace"))
-                    .desired_width(160.0),
-            );
-            if ui
-                .add_enabled(document.match_count() > 0, egui::Button::new("Заменить"))
-                .clicked()
-            {
-                document.replace_current();
-            }
-            if ui
-                .add_enabled(
-                    document.match_count() > 0,
-                    egui::Button::new("Заменить всё"),
-                )
-                .clicked()
-            {
-                document.replace_all();
-            }
-        });
-        ui.separator();
-        let editor_id = ui.make_persistent_id("asset_xml_editor");
-        let cursor_char = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
-            .and_then(|state| state.cursor.char_range())
-            .map_or(0, |range| range.primary.index.into());
-        let matching_tags = document.matching_tag_ranges(cursor_char);
-        let syntax = document.syntax().clone();
-        let xml = &mut document.xml;
-        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-            let job = xml_layout_job(
-                ui,
-                text.as_str(),
-                wrap_width,
-                &syntax,
-                matching_tags.as_ref(),
-            );
-            ui.painter().layout_job(job)
-        };
-        let pending_selection = document.pending_selection.take();
-        let mut text_changed = false;
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let output = egui::TextEdit::multiline(xml)
-                    .font(egui::TextStyle::Monospace)
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(30)
-                    .id_salt("asset_xml_editor")
-                    .layouter(&mut layouter)
-                    .show(ui);
-                text_changed = output.response.changed();
-                if let Some((start, end)) = pending_selection {
-                    let mut state = output.state;
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::two(
-                            egui::text::CCursor::new(start),
-                            egui::text::CCursor::new(end),
-                        )));
-                    state.store(ui.ctx(), output.response.id);
-                    output.response.request_focus();
-                }
-            });
-        if text_changed {
-            document.note_text_edited();
-            if let Err(error) = document.refresh_matches() {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
-            }
-        }
-    } else if loading {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("Конвертация BIN/GeoPcDx в XML...");
-        });
-    } else {
-        ui.label("Файл не загружен.");
-    }
-    save_requested
-}
-

@@ -222,52 +222,6 @@ fn find_markup_end(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
-pub(crate) fn xml_layout_job(
-    ui: &egui::Ui,
-    text: &str,
-    wrap_width: f32,
-    syntax: &XmlSyntax,
-    highlighted_pair: Option<&(Range<usize>, Range<usize>)>,
-) -> egui::text::LayoutJob {
-    let font = egui::TextStyle::Monospace.resolve(ui.style());
-    let normal = egui::TextFormat::simple(font.clone(), ui.visuals().text_color());
-    let mut job = egui::text::LayoutJob::default();
-    let mut tokens: Vec<_> = syntax
-        .tokens
-        .iter()
-        .filter(|token| token.range.end <= text.len())
-        .collect();
-    tokens.sort_by_key(|token| token.range.start);
-    let mut cursor = 0;
-    for token in tokens {
-        if token.range.start < cursor {
-            continue;
-        }
-        job.append(&text[cursor..token.range.start], 0.0, normal.clone());
-        let mut format = egui::TextFormat::simple(
-            font.clone(),
-            match token.kind {
-                XmlTokenKind::Delimiter => egui::Color32::from_rgb(180, 190, 210),
-                XmlTokenKind::Name => egui::Color32::from_rgb(120, 180, 255),
-                XmlTokenKind::Attribute => egui::Color32::from_rgb(150, 210, 150),
-                XmlTokenKind::Comment => egui::Color32::from_rgb(130, 145, 130),
-            },
-        );
-        let is_matching_tag = highlighted_pair.is_some_and(|(open, close)| {
-            (*open == token.range || *close == token.range)
-                && matches!(token.kind, XmlTokenKind::Name)
-        });
-        if is_matching_tag {
-            format.background = egui::Color32::from_rgb(75, 75, 25);
-        }
-        job.append(&text[token.range.clone()], 0.0, format);
-        cursor = token.range.end;
-    }
-    job.append(&text[cursor..], 0.0, normal);
-    job.wrap.max_width = wrap_width;
-    job
-}
-
 pub(crate) fn validate_xml_document(xml: &str) -> Result<(), String> {
     for event in xml::reader::EventReader::new(xml.as_bytes()) {
         event.map_err(|error| format!("Некорректный XML: {error}"))?;
