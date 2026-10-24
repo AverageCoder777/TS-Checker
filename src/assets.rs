@@ -1,6 +1,7 @@
 //! Serz conversion and asset-reference checks.
 
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) fn is_skipped_route_scan_directory(name: &str, ignore_scenarios: bool) -> bool {
     ignore_scenarios && name.eq_ignore_ascii_case("Scenarios")
@@ -949,9 +950,7 @@ pub(crate) fn inspect_umlaut_asset(
 ) -> (Option<UmlautAsset>, Option<String>) {
     let mut evidence = Vec::new();
     let mut unsupported = unsupported_characters(relative_asset);
-    let mut kind = AssetKind::Other;
     let path_has_umlauts = has_umlauts(relative_asset);
-    let mut needs_transliteration = path_has_umlauts;
     if path_has_umlauts {
         evidence.push(format!("Умляут в пути ассета: {relative_asset}"));
     }
@@ -985,8 +984,6 @@ pub(crate) fn inspect_umlaut_asset(
             Ok(found) => {
                 evidence.extend(found.evidence);
                 unsupported.extend(found.unsupported);
-                kind = found.kind;
-                needs_transliteration = needs_transliteration || found.has_umlauts;
             }
             Err(error) => {
                 evidence.push(format!(
@@ -997,16 +994,11 @@ pub(crate) fn inspect_umlaut_asset(
         }
     }
     // Ассета, которого нет на диске, чинить нечем: для него есть замена.
-    let has_unsupported = !unsupported.is_empty();
     let asset = (full_asset_path.is_some()
         && (!evidence.is_empty() || !unsupported.is_empty()))
     .then(|| UmlautAsset {
         path: relative_asset.to_owned(),
         uses: uses.to_vec(),
-        evidence,
-        unsupported: unsupported.into_iter().collect(),
-        kind,
-        needs_transliteration: needs_transliteration || has_unsupported,
     });
     (asset, scan_error)
 }
@@ -1359,10 +1351,8 @@ pub(crate) fn check_route(
     // к нижнему регистру, потому что игра регистр не различает.
     let mut asset_names: HashMap<String, String> = HashMap::new();
     let mut conversion_errors = Vec::new();
-    let mut converted_bin_files = 0;
     for analysis in analyses {
         if !analysis.from_cache {
-            converted_bin_files += usize::from(analysis.converted_bin);
             // В кэш попадают только заново разобранные файлы: для остальных
             // прежняя запись и так актуальна.
             if let Some(name) = analysis.file.route_name(route_path) {
@@ -1558,15 +1548,11 @@ pub(crate) fn check_route(
     asset_inventory.sort_by(|left, right| left.path.cmp(&right.path));
 
     Ok(CheckResult {
-        route_files: route_files.len(),
-        converted_bin_files,
-        referenced_assets: asset_inventory.len(),
         missing_assets,
         asset_inventory,
         umlaut_assets,
         conversion_errors,
         structure_issues,
-        scenarios: collect_route_scenarios(route_path),
     })
 }
 
@@ -1578,34 +1564,6 @@ fn asset_key(path: &str) -> String {
 
 /// Собирает список сценариев маршрута: имя папки и число файлов в ней.
 ///
-/// Сценарии — отдельная часть маршрута: в них лежат поезда и техника, а сами
-/// объекты маршрута (scenery и loft) живут в корне.
-fn collect_route_scenarios(route_path: &Path) -> Vec<crate::ScenarioInfo> {
-    let mut scenarios = Vec::new();
-    let Ok(entries) = fs::read_dir(route_path.join("Scenarios")) else {
-        return scenarios;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let file_count = fs::read_dir(&path)
-            .map(|entries| entries.flatten().count())
-            .unwrap_or(0);
-        scenarios.push(crate::ScenarioInfo {
-            name: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-            file_count,
-        });
-    }
-    scenarios.sort_by(|left, right| left.name.cmp(&right.name));
-    scenarios
-}
-
 pub(crate) fn replace_missing_asset(
     route_path: &Path,
     assets_path: &Path,
@@ -2900,8 +2858,7 @@ mod tests {
         std::fs::create_dir_all(&assets).unwrap();
 
         let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
-        assert_eq!(check.route_files, 2);
-        assert_eq!(check.referenced_assets, 2);
+        assert_eq!(check.asset_inventory.len(), 2);
         assert!(crate::analysis_cache::cache_path(&route).is_file());
         // Счётчик использований считает каждое вхождение, а не только файлы.
         let first_asset = check
@@ -2913,7 +2870,7 @@ mod tests {
 
         // Файлы не менялись — всё берётся из кэша.
         let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
-        assert_eq!(check.referenced_assets, 2);
+        assert_eq!(check.asset_inventory.len(), 2);
         let first_asset = check
             .asset_inventory
             .iter()
@@ -2928,7 +2885,7 @@ mod tests {
         )
         .unwrap();
         let check = super::check_route(&route, &assets, &serz, true, 2, |_| {}).unwrap();
-        assert_eq!(check.referenced_assets, 2);
+        assert_eq!(check.asset_inventory.len(), 2);
          let paths: Vec<&str> = check
             .asset_inventory
             .iter()
@@ -3097,10 +3054,6 @@ mod tests {
         let (asset, _) =
             inspect_umlaut_asset(reference, &uses, assets, Path::new("missing-serz.exe"));
         let asset = asset.expect("ассет с умляутом должен попасть в список на исправление");
-        assert!(asset
-            .evidence
-            .iter()
-            .any(|evidence| evidence.contains("называется иначе")));
     }
 
     /// Французские буквы переводятся на английский по правилам языка.
@@ -3722,10 +3675,6 @@ mod tests {
         let asset = asset.expect("asset path with ß must be reported");
         assert_eq!(asset.path, relative);
         assert_eq!(asset.uses.len(), 1);
-        assert!(asset
-            .evidence
-            .iter()
-            .any(|item| item.contains("Bruecke Fußganger 5.bin")));
     }
 
     #[test]
@@ -4119,10 +4068,8 @@ mod tests {
             eprintln!("PROFILE attempt {attempt}: {:?}", start.elapsed());
             let check = result.expect("проверка маршрута должна пройти");
             eprintln!(
-                "PROFILE attempt {attempt}: files: {}, converted: {}, referenced: {}, missing: {}, errors: {}",
-                check.route_files,
-                check.converted_bin_files,
-                check.referenced_assets,
+                "PROFILE attempt {attempt}: referenced: {}, missing: {}, errors: {}",
+                check.asset_inventory.len(),
                 check.missing_assets.len(),
                 check.conversion_errors.len(),
             );

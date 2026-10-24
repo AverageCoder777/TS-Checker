@@ -1,7 +1,7 @@
 //! egui application state, windows, and user interactions.
 
 use super::*;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 enum CheckMessage {
@@ -97,7 +97,6 @@ pub(crate) struct CheckerApp {
     asset_replacement_feedback: Option<Result<String, String>>,
     /// Ассет, для которого в главном окне открыто подтверждение транслитерации.
     pending_umlaut_repair: Option<UmlautAsset>,
-    pending_asset_replacement: Option<PendingAssetReplacement>,
     /// Замены символов, предложенные пользователем для сломанных имён.
     character_fixes: CharacterFixes,
     pending_delete: Option<Vec<PathBuf>>,
@@ -179,7 +178,6 @@ impl Default for CheckerApp {
             umlaut_repair: None,
             asset_replacement_feedback: None,
             pending_umlaut_repair: None,
-            pending_asset_replacement: None,
             character_fixes: CharacterFixes::new(),
             pending_delete: None,
             delete_paths: None,

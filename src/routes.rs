@@ -1,6 +1,7 @@
 //! Route discovery, structure reports, names, icons, and route-scan caching.
 
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 /// Реальные файлы в .ap сжимаются в десятки раз: в проверенных архивах максимум
 /// около 54x на текстурах и 6x на XML. «Бомба» даёт коэффициент в тысячи раз,

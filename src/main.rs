@@ -4,7 +4,6 @@ use slint::Model;
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -58,22 +57,11 @@ enum RouteScanItem {
 }
 
 struct CheckResult {
-    route_files: usize,
-    converted_bin_files: usize,
-    referenced_assets: usize,
     missing_assets: Vec<MissingAsset>,
     asset_inventory: Vec<ReferencedAsset>,
     umlaut_assets: Vec<UmlautAsset>,
     conversion_errors: Vec<String>,
     structure_issues: Vec<String>,
-    scenarios: Vec<ScenarioInfo>,
-}
-
-/// Сценарий маршрута: имя папки и сколько в ней файлов.
-#[derive(Clone)]
-struct ScenarioInfo {
-    name: String,
-    file_count: usize,
 }
 
 #[derive(Clone)]
@@ -93,13 +81,6 @@ struct ReferencedAsset {
 struct UmlautAsset {
     path: String,
     uses: Vec<AssetUse>,
-    evidence: Vec<String>,
-    /// Символы, которые игра не умеет загружать: их пользователь заменяет сам.
-    unsupported: Vec<char>,
-    /// Тип ассета: scenery, loft или что-то другое.
-    kind: AssetKind,
-    /// Нужно ли переводить имена ассета в английские.
-    needs_transliteration: bool,
 }
 
 #[derive(Clone)]
@@ -274,25 +255,6 @@ struct AssetReplacementReport {
     replacement_asset: String,
     log_file: Option<PathBuf>,
     log_error: Option<String>,
-}
-
-/// Замена ассета, выбранная пользователем и ждущая подтверждения в окне.
-struct PendingAssetReplacement {
-    /// Ассет, которого не хватает в маршруте.
-    missing: MissingAsset,
-    /// Выбранный файл нового ассета.
-    replacement: PathBuf,
-    /// Путь нового ассета относительно папки Assets.
-    replacement_relative: String,
-    /// Находится ли новый ассет внутри папки Assets: только там его можно
-    /// переименовать вместе со ссылками.
-    inside_assets: bool,
-    /// Проверка нового ассета на умляуты: выполняется в фоне.
-    umlaut_check: Option<mpsc::Receiver<Result<Option<UmlautAsset>, String>>>,
-    /// Результат проверки на умляуты.
-    umlaut_result: Option<Result<Option<UmlautAsset>, String>>,
-    /// Переименовать новый ассет и связанные файлы под английские имена.
-    transliterate: bool,
 }
 
 struct UmlautRepairReport {
@@ -1020,12 +982,6 @@ fn main() {
 }
 
 #[cfg(test)]
-
-#[cfg(test)]
-fn main_backup() {
-}
-
-#[cfg(test)]
 mod tests {
     use super::{
         check_route, decode_xml_text, extract_asset_references, extract_scenario_clues, fallback_serz_path,
@@ -1654,7 +1610,7 @@ mod tests {
         let res = check_route(&route, &assets, &serz, true, 8, |msg| {
             println!("[{:.1}s] {}", start.elapsed().as_secs_f32(), msg);
         });
-        println!("RESULT after {:.1}s: {:?}", start.elapsed().as_secs_f32(), res.map(|r| (r.route_files, r.converted_bin_files, r.referenced_assets, r.missing_assets.len(), r.conversion_errors.len(), r.structure_issues.len())));
+        println!("RESULT after {:.1}s: {:?}", start.elapsed().as_secs_f32(), res.map(|r| (r.asset_inventory.len(), r.missing_assets.len(), r.conversion_errors.len(), r.structure_issues.len())));
     }
     #[test]
     fn repro_ui_check_flow() {

@@ -1,6 +1,7 @@
 //! Persistent user settings, game path, and ignored-route list.
 
 use super::*;
+use std::collections::HashSet;
 
 pub(crate) fn last_game_path_file() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|app_data| {
