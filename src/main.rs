@@ -477,6 +477,14 @@ fn main() {
     let app_clone8 = app.clone();
     let app_clone9 = app.clone();
     let app_clone10 = app.clone();
+    let app_clone11 = app.clone();
+    let app_clone12 = app.clone();
+    let app_clone13 = app.clone();
+    let app_clone14 = app.clone();
+    let app_clone15 = app.clone();
+    let app_clone16 = app.clone();
+    let app_clone17 = app.clone();
+    let app_clone18 = app.clone();
     let mut last_count: usize = 0;
     let mut last_query = String::new();
     let app_clone7 = app.clone();
@@ -596,6 +604,12 @@ fn main() {
             } else {
                 app.selected_route = None;
             }
+            app.refresh_scenarios();
+            let scen: Vec<slint::SharedString> = app.scenarios.iter().map(|s| s.name.clone().into()).collect();
+            if let Some(ui) = ui_handle2.upgrade() {
+                ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen)));
+                ui.set_selected_scenario(-1);
+            }
         }
     });
     let ui_handle3 = ui.as_weak();
@@ -612,6 +626,163 @@ fn main() {
     let inv_handle5 = inventory_win.as_weak();
     let inv_handle6 = inventory_win.as_weak();
     let inv_handle7 = inventory_win.as_weak();
+    let inv_handle8 = inventory_win.as_weak();
+    let inv_handle9 = inventory_win.as_weak();
+    let inv_handle10 = inventory_win.as_weak();
+    let settings_win = SettingsWindow::new().unwrap();
+    let settings_handle = settings_win.as_weak();
+    let settings_handle2 = settings_win.as_weak();
+    if let Ok(app) = app_clone11.lock() {
+        settings_win.set_serz_process_limit(app.serz_process_limit as f32);
+        settings_win.set_locoswap_path(app.locoswap_path.clone().into());
+        settings_win.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
+    }
+    settings_win.on_pick_locoswap(move || {
+        if let Some(sw) = settings_handle.upgrade() {
+            let current = sw.get_locoswap_path().to_string();
+            let mut dialog = rfd::FileDialog::new().set_title("Выберите LocoSwap.exe");
+            if !current.is_empty() {
+                let p = std::path::PathBuf::from(&current);
+                if let Some(parent) = p.parent() { dialog = dialog.set_directory(parent); }
+            }
+            if let Some(path) = dialog.pick_file() {
+                sw.set_locoswap_path(path.to_string_lossy().to_string().into());
+            }
+        }
+    });
+    settings_win.on_save_settings(move || {
+        if let Some(sw) = settings_handle2.upgrade() {
+            let limit = sw.get_serz_process_limit() as usize;
+            let path = sw.get_locoswap_path().to_string();
+            let thumbs = sw.get_route_thumbnails_enabled();
+            if let Ok(mut app) = app_clone11.lock() {
+                app.serz_process_limit = limit;
+                app.locoswap_path = path.clone();
+                app.route_thumbnails_enabled = thumbs;
+                let _ = crate::settings::save_serz_process_limit(limit);
+                let _ = crate::settings::save_locoswap_path(&path);
+                let _ = crate::settings::save_route_thumbnail_setting(thumbs);
+            }
+        }
+    });
+    let scenario_win = ScenarioWindow::new().unwrap();
+    let scenario_handle = scenario_win.as_weak();
+    let scenario_handle2 = scenario_win.as_weak();
+    let scenario_handle3 = scenario_win.as_weak();
+    ui.on_scenario_selected(move |idx| {
+        // load scenario data and show window
+        if let Ok(mut app) = app_clone18.lock() {
+            // ensure scenarios loaded for selected route
+            app.refresh_scenarios();
+            let scen_idx = idx as usize;
+            if scen_idx >= app.scenarios.len() { return; }
+            // lazy load consists
+            let needs_load = app.scenarios[scen_idx].consists.is_none();
+            if needs_load {
+                let scenario_path = app.scenarios[scen_idx].path.clone();
+                let serz_path = crate::assets::preferred_serz_path(std::path::Path::new(app.rw_path.trim()));
+                let consists = crate::scenario::load_consists(&scenario_path, &serz_path);
+                app.scenarios[scen_idx].consists = Some(consists);
+            }
+            let scenario = app.scenarios[scen_idx].clone();
+            let rw_path = app.rw_path.clone();
+            let route_path = app.selected_route.and_then(|i| app.routes.get(i)).map(|r| r.path.clone()).unwrap_or_default();
+            // build consist names
+            let consist_names: Vec<slint::SharedString> = scenario.consists.as_ref().map(|c| c.iter().map(|x| x.name.clone().into()).collect()).unwrap_or_default();
+            // check vehicle files for all consists (cache once)
+            if app.scenario_consist_info.is_none() || app.scenario_consist_info.as_ref().map(|v| v.len()).unwrap_or(0) != consist_names.len() {
+                let mut info = Vec::new();
+                let mut vf: Vec<Vec<bool>> = Vec::new();
+                if let Some(consists) = scenario.consists.as_ref() {
+                    for c in consists {
+                        let mut all_ok = true;
+                        let mut flags = Vec::new();
+                        for v in &c.vehicles {
+                            let exists = crate::blueprint::resolve_blueprint_file_cached_free(
+                                std::path::Path::new(&rw_path), &route_path, &v.blueprint, &v.provider, &v.product,
+                            ).is_some();
+                            flags.push(exists);
+                            if !exists { all_ok = false; }
+                        }
+                        info.push((c.name.clone(), all_ok));
+                        vf.push(flags);
+                    }
+                }
+                app.scenario_consist_info = Some(info);
+                app.scenario_vehicle_files = Some(vf);
+            }
+            let consist_info = app.scenario_consist_info.clone().unwrap_or_default();
+            let vehicle_files = app.scenario_vehicle_files.clone().unwrap_or_default();
+            // store for later consist selection: put into a temp via app fields? We'll store in scenario_vehicle_files (already).
+            app.selected_scenario = Some(scen_idx);
+            app.selected_consist = Some(0);
+            app.scenario_window_open = true;
+            // populate window
+            if let Some(sw) = scenario_handle.upgrade() {
+                sw.set_scenario_name(scenario.name.clone().into());
+                sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
+                // vehicles for first consist
+                let vehicles: Vec<slint::SharedString> = scenario.consists.as_ref().and_then(|c| c.first()).map(|cc| cc.vehicles.iter().map(|v| format!("{} - {}", v.provider, v.name).into()).collect()).unwrap_or_default();
+                let missing: Vec<bool> = vehicle_files.first().cloned().unwrap_or_default();
+                let paths: Vec<slint::SharedString> = scenario.consists.as_ref().and_then(|c| c.first()).map(|cc| cc.vehicles.iter().map(|v| v.blueprint.clone().into()).collect()).unwrap_or_default();
+                sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
+                sw.set_vehicle_missing(slint::ModelRc::new(slint::VecModel::from(missing)));
+                sw.set_vehicle_paths(slint::ModelRc::new(slint::VecModel::from(paths)));
+                sw.set_selected_consist(0);
+                let _ = sw.show();
+            }
+        }
+    });
+    scenario_win.on_consist_selected(move |idx| {
+        if let Ok(mut app) = app_clone15.lock() {
+            let scen_idx = match app.selected_scenario { Some(i) => i, None => return };
+            let scenario = match app.scenarios.get(scen_idx) { Some(s) => s.clone(), None => return };
+            let consists = match scenario.consists.as_ref() { Some(c) => c, None => return };
+            let i = idx as usize;
+            if i >= consists.len() { return; }
+            let c = &consists[i];
+            let vehicles: Vec<slint::SharedString> = c.vehicles.iter().map(|v| format!("{} - {}", v.provider, v.name).into()).collect();
+            let missing: Vec<bool> = app.scenario_vehicle_files.as_ref().and_then(|vf| vf.get(i)).cloned().unwrap_or_default();
+            let paths: Vec<slint::SharedString> = c.vehicles.iter().map(|v| v.blueprint.clone().into()).collect();
+            app.selected_consist = Some(i);
+            if let Some(sw) = scenario_handle2.upgrade() {
+                sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
+                sw.set_vehicle_missing(slint::ModelRc::new(slint::VecModel::from(missing)));
+                sw.set_vehicle_paths(slint::ModelRc::new(slint::VecModel::from(paths)));
+                sw.set_selected_consist(idx);
+            }
+        }
+    });
+    scenario_win.on_open_locoswap(move || {
+        if let Ok(app) = app_clone16.lock() {
+            let path = app.locoswap_path.clone();
+            if !path.is_empty() && std::path::Path::new(&path).is_file() {
+                let _ = std::process::Command::new(&path).spawn();
+            }
+        }
+    });
+    scenario_win.on_open_vehicle_path(move |idx| {
+        if let Ok(app) = app_clone17.lock() {
+            let scen_idx = match app.selected_scenario { Some(i) => i, None => return };
+            let consist_idx = app.selected_consist.unwrap_or(0);
+            let scenario = match app.scenarios.get(scen_idx) { Some(s) => s, None => return };
+            let consists = match scenario.consists.as_ref() { Some(c) => c, None => return };
+            let consist = match consists.get(consist_idx) { Some(c) => c, None => return };
+            let vehicle = match consist.vehicles.get(idx as usize) { Some(v) => v, None => return };
+            let rw_path = app.rw_path.clone();
+            let full = std::path::PathBuf::from(rw_path.trim()).join("Assets").join(vehicle.blueprint.replace('/', "\\"));
+            let target = if full.exists() { full.clone() } else {
+                let mut cur = full.as_path();
+                while !cur.exists() { match cur.parent() { Some(p) => cur = p, None => break } }
+                cur.to_path_buf()
+            };
+            if full.is_file() {
+                let _ = std::process::Command::new("explorer.exe").arg(format!("/select,\"{}\"", full.display())).spawn();
+            } else {
+                let _ = crate::windows::open_in_file_explorer(&target);
+            }
+        }
+    });
     let ui_handle4 = ui.as_weak();
     ui.on_open_route_folder(move || {
         if let Ok(app) = app_clone4.lock() {
@@ -697,26 +868,63 @@ fn main() {
             }
         }
     });
-    inventory_win.on_next_match(move || {
-        if let Some(inv) = inv_handle6.upgrade() {
-            let count = inv.get_inventory_rows().row_count() as i32;
-            if count <= 0 {
-                return;
+    inventory_win.on_row_clicked(move |row| {
+        if let Some(inv) = inv_handle9.upgrade() {
+            if row < 0 { return; }
+            let rows = inv.get_inventory_rows();
+            if (row as usize) >= rows.row_count() { return; }
+            let first_cell = rows.row_data(row as usize).and_then(|rm| rm.row_data(0));
+            let path_text = first_cell.map(|c| c.text.to_string()).unwrap_or_default();
+            // debug log
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(r"C:\Users\kosty\AppData\Local\Temp\kilo\dblclick.log") {
+                let _ = writeln!(f, "row={} path_text={:?}", row, path_text);
             }
-            let cur = inv.get_current_row();
-            let next = if cur < 0 { 0 } else { (cur + 1) % count };
-            inv.set_current_row(next);
+            if path_text.is_empty() { return; }
+            let rw_path = if let Ok(app) = app_clone13.lock() { app.rw_path.clone() } else { String::new() };
+            if rw_path.is_empty() { return; }
+            let full = std::path::PathBuf::from(rw_path.trim()).join("Assets").join(path_text.replace('/', "\\"));
+            // Open nearest existing folder; select file if present.
+            let target = if full.exists() {
+                // open containing folder with the file selected
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(format!("/select,\"{}\"", full.display()))
+                    .spawn();
+                return;
+            } else {
+                // walk up to nearest existing parent
+                let mut cur = full.as_path();
+                while !cur.exists() {
+                    match cur.parent() { Some(p) => cur = p, None => break }
+                }
+                cur.to_path_buf()
+            };
+            let _ = open_in_file_explorer(&target);
         }
     });
-    inventory_win.on_prev_match(move || {
-        if let Some(inv) = inv_handle7.upgrade() {
-            let count = inv.get_inventory_rows().row_count() as i32;
-            if count <= 0 {
-                return;
+    inventory_win.on_open_in_editor(move || {
+        if let Some(inv) = inv_handle10.upgrade() {
+            let row = inv.get_current_row();
+            if row < 0 { return; }
+            let rows = inv.get_inventory_rows();
+            if (row as usize) >= rows.row_count() { return; }
+            let first_cell = rows.row_data(row as usize).and_then(|rm| rm.row_data(0));
+            let path_text = first_cell.map(|c| c.text.to_string()).unwrap_or_default();
+            if path_text.is_empty() { return; }
+            let rw_path = if let Ok(app) = app_clone14.lock() { app.rw_path.clone() } else { String::new() };
+            if rw_path.is_empty() { return; }
+            let full = std::path::PathBuf::from(rw_path.trim()).join("Assets").join(path_text.replace('/', "\\"));
+            if full.is_file() {
+                if let Ok(mut app) = app_clone14.lock() {
+                    app.start_asset_view(full);
+                }
             }
-            let cur = inv.get_current_row();
-            let prev = if cur <= 0 { count - 1 } else { cur - 1 };
-            inv.set_current_row(prev);
+        }
+    });
+    let settings_handle3 = settings_win.as_weak();
+    ui.on_open_settings(move || {
+        if let Some(sw) = settings_handle3.upgrade() {
+            let _ = sw.show();
         }
     });
     ui.on_show_inventory(move || {

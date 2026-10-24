@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView, Slider } from "std-widgets.slint";
 
 export struct RouteItem {
     name: string,
@@ -18,12 +18,16 @@ export component MainWindow inherits Window {
     in property <string> status: "";
     in-out property <string> search-query: "";
     in-out property <int> selected-route: -1;
+    in property <[string]> scenario-items: [];
+    in-out property <int> selected-scenario: -1;
     in property <bool> has-result: false;
 
     callback route-selected(int);
     callback start-check();
     callback open-route-folder();
     callback show-inventory();
+    callback open-settings();
+    callback scenario-selected(int);
 
     VerticalBox {
         LineEdit {
@@ -57,6 +61,21 @@ export component MainWindow inherits Window {
                 }
             }
         }
+        Text { text: "Сценарии маршрута:"; }
+        ListView {
+            for s[i] in scenario-items: Rectangle {
+                background: i == selected-scenario ? #3a3a3a : transparent;
+                TouchArea {
+                    clicked => {
+                        selected-scenario = i;
+                    }
+                    double-clicked => {
+                        scenario-selected(i);
+                    }
+                    Text { text: s; }
+                }
+            }
+        }
         HorizontalBox {
             Button {
                 text: "Проверить маршрут";
@@ -72,6 +91,10 @@ export component MainWindow inherits Window {
                 text: "Показать все объекты";
                 enabled: has-result;
                 clicked => { show-inventory(); }
+            }
+            Button {
+                text: "Настройки";
+                clicked => { open-settings(); }
             }
         }
         CheckBox {
@@ -101,8 +124,8 @@ export component AssetInventoryWindow inherits Window {
 
     callback toggle-missing-only();
     callback search-changed(string);
-    callback next-match();
-    callback prev-match();
+    callback row-clicked(int);
+    callback open-in-editor();
     callback sort-ascending(int);
     callback sort-descending(int);
 
@@ -118,15 +141,14 @@ export component AssetInventoryWindow inherits Window {
                 clicked => { toggle-missing-only(); }
             }
             Button {
-                text: "Следующее";
-                clicked => { root.next-match(); }
-            }
-            Button {
-                text: "Предыдущее";
-                clicked => { root.prev-match(); }
+                text: "Открыть в редакторе";
+                clicked => { root.open-in-editor(); }
             }
         }
         StandardTableView {
+            current-row-changed(row) => {
+                root.row-clicked(row);
+            }
             columns: [
                 { title: "Путь ассета", min-width: 200px, horizontal-stretch: 2, sort-order: SortOrder.ascending },
                 { title: "Кол-во использований", min-width: 120px, horizontal-stretch: 0 },
@@ -171,14 +193,51 @@ export component IncompleteFoldersWindow inherits Window {
 
 export component ScenarioWindow inherits Window {
     title: "Сценарий";
-    min-width: 600px;
-    min-height: 400px;
+    min-width: 900px;
+    min-height: 560px;
 
-    in property <[string]> scenarios;
+    in property <string> scenario-name: "";
+    in property <[string]> consist-names: [];
+    in property <[string]> vehicle-names: [];
+    in property <[bool]> vehicle-missing: [];
+    in property <[string]> vehicle-paths: [];
+
+    in-out property <int> selected-consist: -1;
+
+    callback consist-selected(int);
+    callback open-locoswap();
+    callback open-vehicle-path(int);
 
     VerticalBox {
-        ListView {
-            for scenario in scenarios: Text { text: scenario; }
+        Text { text: scenario-name; font-size: 16px; }
+        HorizontalBox {
+            ListView {
+                for c[i] in consist-names: Rectangle {
+                    background: i == selected-consist ? #3a3a3a : transparent;
+                    TouchArea {
+                        clicked => {
+                            selected-consist = i;
+                            consist-selected(i);
+                        }
+                        Text { text: c; }
+                    }
+                }
+            }
+            ListView {
+                for v[i] in vehicle-names: Rectangle {
+                    TouchArea {
+                        double-clicked => { open-vehicle-path(i); }
+                        Text {
+                            text: v;
+                            color: vehicle-missing[i] ? #ff6666 : #ffffff;
+                        }
+                    }
+                }
+            }
+        }
+        Button {
+            text: "Открыть в LocoSwap";
+            clicked => { open-locoswap(); }
         }
     }
 }
@@ -207,6 +266,43 @@ export component MissingAssetsWindow inherits Window {
                     clicked => { replace-missing(i); }
                 }
             }
+        }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: "Настройки";
+    min-width: 500px;
+    min-height: 300px;
+
+    in-out property <float> serz-process-limit: 8;
+    in-out property <string> locoswap-path: "";
+    in-out property <bool> route-thumbnails-enabled: true;
+
+    callback save-settings();
+    callback pick-locoswap();
+
+    VerticalBox {
+        HorizontalBox {
+            Text { text: "Потоки Serz:"; }
+            Slider {
+                value <=> serz-process-limit;
+                minimum: 1;
+                maximum: 32;
+            }
+        }
+        HorizontalBox {
+            Text { text: "Путь к LocoSwap:"; }
+            LineEdit { text <=> locoswap-path; }
+            Button { text: "Обзор..."; clicked => { pick-locoswap(); } }
+        }
+        CheckBox {
+            text: "Миниатюры маршрутов";
+            checked <=> route-thumbnails-enabled;
+        }
+        Button {
+            text: "Сохранить";
+            clicked => { save-settings(); }
         }
     }
 }

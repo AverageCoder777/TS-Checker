@@ -65,22 +65,22 @@ pub(crate) struct CheckerApp {
     pub(crate) routes: Vec<Route>,
     pub(crate) selected_route: Option<usize>,
     /// Сценарии выбранного маршрута.
-    scenarios: Vec<RouteScenario>,
+    pub(crate) scenarios: Vec<RouteScenario>,
     /// Маршрут, для которого прочитаны сценарии.
     scenarios_route: Option<String>,
     /// Выбранный сценарий в списке.
-    selected_scenario: Option<usize>,
+    pub(crate) selected_scenario: Option<usize>,
     /// Выбранный состав внутри открытого окна сценария.
-    selected_consist: Option<usize>,
+    pub(crate) selected_consist: Option<usize>,
     /// Открыто ли окно выбранного сценария.
-    scenario_window_open: bool,
+    pub(crate) scenario_window_open: bool,
     /// Кэш разрешённых путей блюпринтов техники, чтобы не обходить Assets
     /// повторно при каждом кадре отрисовки окна сценария.
     /// Результат проверки наличия файлов для составов открытого сценария,
     /// считается один раз, чтобы не пересчитывать при каждом кадре egui.
-    scenario_consist_info: Option<Vec<(String, bool)>>,
+    pub(crate) scenario_consist_info: Option<Vec<(String, bool)>>,
     /// Кэш наличия файлов для техники: [состав][вагон] = файл_на_месте.
-    scenario_vehicle_files: Option<Vec<Vec<bool>>>,
+    pub(crate) scenario_vehicle_files: Option<Vec<Vec<bool>>>,
     pub(crate) search_query: String,
     ignore_scenarios: bool,
     pub(crate) result: Option<CheckResult>,
@@ -110,9 +110,9 @@ pub(crate) struct CheckerApp {
     asset_viewer_document: Option<EditorDocument>,
     asset_viewer_load: Option<Receiver<Result<EditorDocument, String>>>,
     asset_viewer_save: Option<Receiver<Result<SavedAsset, String>>>,
-    route_thumbnails_enabled: bool,
-    serz_process_limit: usize,
-    locoswap_path: String,
+    pub(crate) route_thumbnails_enabled: bool,
+    pub(crate) serz_process_limit: usize,
+    pub(crate) locoswap_path: String,
     attempted_route_icons: HashSet<PathBuf>,
     pub(crate) asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
     inventory_action_tx: Sender<InventoryAction>,
@@ -602,7 +602,7 @@ impl CheckerApp {
         }
     }
 
-    fn start_asset_view(&mut self, path: PathBuf) {
+    pub(crate) fn start_asset_view(&mut self, path: PathBuf) {
         let serz_path = preferred_serz_path(Path::new(self.rw_path.trim()));
         let source_path = path.clone();
         let (tx, rx) = mpsc::channel();
@@ -820,7 +820,7 @@ impl CheckerApp {
     ///
     /// Сценарии читаются с диска, поэтому список обновляется только при смене
     /// маршрута: файл сценариев небольшой, но читать его каждый кадр незачем.
-    fn refresh_scenarios(&mut self) {
+    pub(crate) fn refresh_scenarios(&mut self) {
         let Some(route) = self.selected_route.and_then(|index| self.routes.get(index)) else {
             self.scenarios.clear();
             self.scenarios_route = None;
