@@ -1,9 +1,7 @@
 //! Кэш разбора файлов маршрута.
-//!
 //! Кэш лежит в папке самого маршрута и хранит результаты разбора тех файлов,
 //! которые не менялись с прошлой проверки. Благодаря этому повторная проверка
 //! маршрута разбирает только изменившиеся файлы, а остальные берёт из кэша.
-//!
 //! В маршруте один и тот же ассет встречается в файле десятки раз, поэтому
 //! хранится не каждая ссылка, а счётчик вхождений. Пути ассетов вынесены в
 //! общую таблицу: на большом маршруте это уменьшает кэш в десятки раз.
@@ -19,7 +17,6 @@ use std::time::UNIX_EPOCH;
 pub(crate) const ANALYSIS_CACHE_FILE_NAME: &str = ".ts-checker-analysis-cache.json";
 
 /// Версия формата кэша.
-///
 /// Меняется при любом изменении формата: старый кэш тогда использовать нельзя.
 const CACHE_VERSION: u32 = 4;
 
@@ -37,7 +34,6 @@ pub(crate) struct FileStamp {
 }
 
 impl FileStamp {
-    /// Снимает отпечаток файла: время изменения в миллисекундах и размер.
     pub(crate) fn of(path: &Path) -> Option<Self> {
         let metadata = fs::metadata(path).ok()?;
         let modified = metadata
@@ -65,31 +61,21 @@ impl FileStamp {
     }
 }
 
-/// Разобранный файл маршрута.
 pub(crate) struct CachedFile {
     pub(crate) stamp: FileStamp,
-    /// Сколько раз каждый ассет встречается в файле и что он из себя
-    /// представляет: объект маршрута или файл состава.
     pub(crate) uses: Vec<(String, u32, AssetKind)>,
 }
 
-/// Хранилище разобранных файлов маршрута.
 pub(crate) struct AnalysisCache {
     files: HashMap<String, CachedFile>,
 }
 
 impl AnalysisCache {
-    /// Пустой кэш: все файлы придётся разобрать заново.
     pub(crate) fn empty() -> Self {
         Self {
             files: HashMap::new(),
         }
     }
-
-    /// Читает кэш из папки маршрута.
-    ///
-    /// Любой повреждённый или устаревший кэш просто игнорируется: проверка
-    /// должна работать и без него.
     pub(crate) fn load(route_path: &Path) -> Self {
         let path = cache_path(route_path);
         let Ok(data) = fs::read(&path) else {
@@ -131,26 +117,19 @@ impl AnalysisCache {
         Self { files }
     }
 
-    /// Возвращает прежний разбор файла, если файл с тех пор не менялся.
     pub(crate) fn get(&self, name: &str, stamp: FileStamp) -> Option<&CachedFile> {
         let cached = self.files.get(name)?;
         (cached.stamp == stamp).then_some(cached)
     }
 
-    /// Запоминает разбор файла.
     pub(crate) fn put(&mut self, name: String, file: CachedFile) {
         self.files.insert(name, file);
     }
 
-    /// Убирает из кэша файлы, которых больше нет в маршруте.
     pub(crate) fn retain(&mut self, names: &HashMap<String, ()>) {
         self.files.retain(|name, _| names.contains_key(name));
     }
 
-    /// Сохраняет кэш в папку маршрута.
-    ///
-    /// Запись идёт через временный файл: прерванная проверка не оставит
-    /// после себя нечитаемый кэш.
     pub(crate) fn save(&self, route_path: &Path) -> Result<(), String> {
         let path = cache_path(route_path);
         // Общая таблица путей: один путь хранится один раз на весь кэш.
@@ -203,21 +182,17 @@ impl AnalysisCache {
     }
 }
 
-/// Путь к файлу кэша в папке маршрута.
 pub(crate) fn cache_path(route_path: &Path) -> PathBuf {
     route_path.join(ANALYSIS_CACHE_FILE_NAME)
 }
 
-/// Хранилище кэша в виде, пригодном для JSON.
 #[derive(Serialize, Deserialize)]
 struct StoredCache {
     version: u32,
-    /// Общая таблица путей ассетов.
     assets: Vec<String>,
     files: HashMap<String, StoredFile>,
 }
 
-/// Разобранный файл в виде, пригодном для JSON.
 #[derive(Serialize, Deserialize)]
 struct StoredFile {
     modified: u64,
@@ -228,7 +203,6 @@ struct StoredFile {
     content: u64,
     digest: u64,
     checksum: u64,
-    /// Тройки «индекс ассета в таблице, число вхождений, код типа ассета».
     uses: Vec<[u32; 3]>,
 }
 

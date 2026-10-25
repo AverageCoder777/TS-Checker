@@ -801,6 +801,7 @@ fn main() {
     let scenario_win = ScenarioWindow::new().unwrap();
     let scenario_handle = scenario_win.as_weak();
     let scenario_handle2 = scenario_win.as_weak();
+    let ui_handle3 = ui.as_weak();
     ui.on_scenario_selected(move |idx| {
         // load scenario data and show window
         if let Ok(mut app) = app_clone18.lock() {
@@ -809,6 +810,14 @@ fn main() {
             let scen_idx = idx as usize;
             if scen_idx >= app.scenarios.len() {
                 return;
+            }
+            crate::scenario::load_scenario_metadata(&mut app.scenarios[scen_idx]);
+            // update scenario list label after lazy metadata load
+            let scen_items: Vec<slint::SharedString> =
+                app.scenarios.iter().map(|s| s.name.clone().into()).collect();
+            if let Some(ui) = ui_handle3.upgrade() {
+                ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen_items)));
+                ui.set_selected_scenario(idx);
             }
             // lazy load consists
             let needs_load = app.scenarios[scen_idx].consists.is_none();

@@ -150,48 +150,7 @@ pub(crate) fn absolute_blueprint_blocks(haystack: &[u8]) -> Vec<(usize, usize, u
     }
     blocks
 }
-#[cfg(test)]
-pub(crate) fn absolute_blueprint_regex() -> &'static regex::Regex {
-    static REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {         regex::Regex::new(             r"(?is)<iBlueprintLibrary-cAbsoluteBlueprintID>(.*?)</iBlueprintLibrary-cAbsoluteBlueprintID>",         )         .expect("Шаблон поиска блока абсолютного блюпринта должен быть корректным")     })
-}
-#[cfg(test)]
-pub(crate) fn provider_regex() -> &'static regex::Regex {
-    static REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        regex::Regex::new(r"(?is)<Provider[^>]*>([^<]*)</Provider>")
-            .expect("Шаблон поиска Provider должен быть корректным")
-    })
-}
-#[cfg(test)]
-pub(crate) fn product_regex() -> &'static regex::Regex {
-    static REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        regex::Regex::new(r"(?is)<Product[^>]*>([^<]*)</Product>")
-            .expect("Шаблон поиска Product должен быть корректным")
-    })
-}
-#[cfg(test)]
-pub(crate) fn blueprint_id_regex() -> &'static regex::Regex {
-    static REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        regex::Regex::new(r"(?is)<BlueprintID[^>]*>([^<]*)</BlueprintID>")
-            .expect("Шаблон поиска BlueprintID должен быть корректным")
-    })
-}
-#[cfg(test)]
-pub(crate) fn bare_blueprint_regex() -> &'static regex::Regex {
-    static REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {         regex::Regex::new(             r"(?is)<Provider[^>]*>([^<]*)</Provider>[^<]*<Product[^>]*>([^<]*)</Product>[^<]*<BlueprintID[^>]*>([^<]*)</BlueprintID>",         )         .expect("Шаблон поиска голой ссылки на блюпринт должен быть корректным")     })
-}
-#[cfg(test)]
-pub(crate) fn trimmed_range(capture: &regex::Match<'_>, offset: usize) -> std::ops::Range<usize> {
-    let value = capture.as_str();
-    let leading = value.len() - value.trim_start().len();
-    let trimmed = value.trim();
-    let start = capture.start() + offset + leading;
-    start..start + trimmed.len()
-}
+
 pub(crate) fn asset_relative_path(
     provider: &str,
     product: &str,
@@ -217,32 +176,7 @@ pub(crate) fn asset_relative_path(
     }
     Some(relative_path.to_string_lossy().replace('\\', "/"))
 }
-/// Определяет, что за объект стоит по ссылкой.
-/// /// Файлы составов (поездов) в XML маршрута лежат внутри `iRailVehicleBlueprint`,
-/// объекты scenery — внутри `SceneryRenderBlueprint`, loft — внутри
-/// `RenderBlueprint`. Игра ссылается на поезда отдельно от объектов маршрута, и
-/// при проверке маршрута их учитывать не нужно.
-pub(crate) fn reference_kind(xml: &str, position: usize) -> AssetKind {
-    let prefix = &xml[..position.min(xml.len())];
-    let vehicle = prefix.rfind("<iRailVehicleBlueprint");
-    let scenery = prefix.rfind("<SceneryRenderBlueprint");
-    let loft = prefix.rfind("<RenderBlueprint");
-    let mut candidates: Vec<(usize, AssetKind)> = Vec::new();
-    if let Some(index) = vehicle {
-        candidates.push((index, AssetKind::Vehicle));
-    }
-    if let Some(index) = scenery {
-        candidates.push((index, AssetKind::Scenery));
-    }
-    if let Some(index) = loft {
-        candidates.push((index, AssetKind::Loft));
-    }
-    candidates
-        .into_iter()
-        .max_by_key(|(index, _)| *index)
-        .map(|(_, kind)| kind)
-        .unwrap_or(AssetKind::Other)
-}
+
 pub(crate) fn build_asset_reference(
     provider: &str,
     product: &str,
@@ -396,90 +330,7 @@ pub(crate) fn extract_asset_references(xml: &str) -> std::collections::HashSet<S
 }
 /// Прежняя реализация разбора на регулярных выражениях.
 /// /// Оставлена для сверки: ручной разбор обязан давать ровно тот же результат.
-#[cfg(test)]
-pub(crate) fn extract_asset_references_with_locations_regex(xml: &str) -> Vec<AssetReference> {
-    let mut references: Vec<(usize, AssetReference)> = Vec::new();
-    let mut covered: Vec<std::ops::Range<usize>> = Vec::new();
-    for block in absolute_blueprint_regex().captures_iter(xml) {
-        let Some(whole) = block.get(0) else {
-            continue;
-        };
-        let Some(inner) = block.get(1) else {
-            continue;
-        };
-        covered.push(whole.start()..whole.end());
-        let block_text = inner.as_str();
-        let Some(provider_match) = provider_regex().captures(block_text) else {
-            continue;
-        };
-        let Some(product_match) = product_regex().captures(block_text) else {
-            continue;
-        };
-        let Some(blueprint_match) = blueprint_id_regex().captures(block_text) else {
-            continue;
-        };
-        let Some(provider_capture) = provider_match.get(1) else {
-            continue;
-        };
-        let Some(product_capture) = product_match.get(1) else {
-            continue;
-        };
-        let Some(blueprint_capture) = blueprint_match.get(1) else {
-            continue;
-        };
-        let offset = inner.start();
-        let Some(reference) = build_asset_reference(
-            provider_capture.as_str(),
-            product_capture.as_str(),
-            blueprint_capture.as_str(),
-            trimmed_range(&provider_capture, offset),
-            trimmed_range(&product_capture, offset),
-            trimmed_range(&blueprint_capture, offset),
-            reference_kind(xml, whole.start()),
-        ) else {
-            continue;
-        };
-        references.push((whole.start(), reference));
-    }
-    let mut covered_index = 0usize;
-    for captures in bare_blueprint_regex().captures_iter(xml) {
-        let Some(whole) = captures.get(0) else {
-            continue;
-        };
-        while covered_index < covered.len() && covered[covered_index].end <= whole.start() {
-            covered_index += 1;
-        }
-        if covered_index < covered.len() && covered[covered_index].contains(&whole.start()) {
-            continue;
-        }
-        let Some(provider_capture) = captures.get(1) else {
-            continue;
-        };
-        let Some(product_capture) = captures.get(2) else {
-            continue;
-        };
-        let Some(blueprint_capture) = captures.get(3) else {
-            continue;
-        };
-        let Some(reference) = build_asset_reference(
-            provider_capture.as_str(),
-            product_capture.as_str(),
-            blueprint_capture.as_str(),
-            trimmed_range(&provider_capture, 0),
-            trimmed_range(&product_capture, 0),
-            trimmed_range(&blueprint_capture, 0),
-            reference_kind(xml, whole.start()),
-        ) else {
-            continue;
-        };
-        references.push((whole.start(), reference));
-    }
-    references.sort_by_key(|(position, _)| *position);
-    references
-        .into_iter()
-        .map(|(_, reference)| reference)
-        .collect()
-}
+
 pub(crate) fn route_tile_label(route_path: &Path, source_file: &RouteFile) -> String {
     let relative = source_file
         .route_name(route_path)

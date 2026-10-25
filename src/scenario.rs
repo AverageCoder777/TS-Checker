@@ -18,10 +18,6 @@ pub(crate) enum ConsistKind {
     Ai,
 }
 
-/// Псевдонимы для совместимости с возможными именами в тестах.
-pub(crate) type ConsistType = ConsistKind;
-pub(crate) type ScenarioConsistKind = ConsistKind;
-
 /// Сценарий маршрута: папка и данные из её файлов.
 #[derive(Clone, Default)]
 pub(crate) struct RouteScenario {
@@ -29,6 +25,8 @@ pub(crate) struct RouteScenario {
     pub(crate) path: PathBuf,
     /// Название сценария.
     pub(crate) name: String,
+    /// Метаданные уже прочитаны.
+    pub(crate) metadata_loaded: bool,
     /// Дата сценария.
     pub(crate) date: String,
     /// Автор сценария.
@@ -45,11 +43,6 @@ pub(crate) struct RouteScenario {
     pub(crate) state: String,
     /// Состав игрока.
     pub(crate) player_consist: String,
-    /// Признак наличия состава игрока.
-    pub(crate) player: bool,
-    pub(crate) has_player: bool,
-    pub(crate) player_flag: bool,
-    pub(crate) is_player_scenario: bool,
     /// Подвижные составы сценария: в них перечислена техника.
     /// `None` пока не открыто окно сценария (загружается лениво).
     pub(crate) consists: Option<Vec<ScenarioConsist>>,
@@ -58,22 +51,9 @@ pub(crate) struct RouteScenario {
 /// Подвижной состав сценария.
 #[derive(Clone, Default)]
 pub(crate) struct ScenarioConsist {
-    /// Название состава (рейс).
     pub(crate) name: String,
-    /// Единицы техники в составе.
     pub(crate) vehicles: Vec<ScenarioVehicle>,
-    /// Признак состава игрока.
     pub(crate) is_player: bool,
-    pub(crate) player: bool,
-    pub(crate) player_driver: bool,
-    /// Признак состава ИИ.
-    pub(crate) ai: bool,
-    /// Признак статического состава без водителя.
-    pub(crate) loose: bool,
-    /// Вид состава.
-    pub(crate) kind: ConsistKind,
-    pub(crate) consist_kind: ConsistKind,
-    pub(crate) kind_type: ConsistKind,
 }
 
 /// Находит позицию открывающего тега элемента (с учётом атрибутов).
@@ -226,38 +206,20 @@ pub(crate) struct ScenarioVehicle {
 }
 
 /// Читает сценарии маршрута: папки в Scenarios и их файлы.
+#[allow(dead_code)]
 pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<RouteScenario> {
+    use rayon::prelude::*;
     let scenarios_path = route_path.join("Scenarios");
     let Ok(entries) = fs::read_dir(&scenarios_path) else {
         return Vec::new();
     };
-    let mut scenarios = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let id = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let has_player = read_scenario_file(&path, _serz_path)
-            .map(|xml| has_player_driver(&xml))
-            .unwrap_or(false);
-        let mut scenario = RouteScenario {
-            path: path.clone(),
-            player: has_player,
-            has_player,
-            player_flag: has_player,
-            is_player_scenario: has_player,
-            ..RouteScenario::default()
-        };
+    let dirs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
+    let mut scenarios: Vec<RouteScenario> = dirs.into_par_iter().map(|path| {
+        let id = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let mut scenario = RouteScenario { path: path.clone(), name: id.clone(), metadata_loaded: false, ..RouteScenario::default() };
         if let Ok(xml) = fs::read_to_string(path.join("ScenarioProperties.xml")) {
             scenario.name = localised_text(&xml, "DisplayName");
-            if scenario.name.is_empty() {
-                scenario.name = id.clone();
-            }
+            if scenario.name.is_empty() { scenario.name = id.clone(); }
             scenario.author = element_text(&xml, "Author");
             scenario.season = match element_text(&xml, "Season").as_str() {
                 "SEASON_SPRING" => "Spring".to_owned(),
@@ -267,9 +229,7 @@ pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<
                 other => other.to_owned(),
             };
             scenario.weather = element_text(&xml, "WeatherBlueprint");
-            if scenario.weather.is_empty() {
-                scenario.weather = element_text(&xml, "Weather");
-            }
+            if scenario.weather.is_empty() { scenario.weather = element_text(&xml, "Weather"); }
             if scenario.weather.is_empty() {
                 if let Some(start) = xml.find("<WeatherBlueprint") {
                     let rest = &xml[start..];
@@ -277,11 +237,7 @@ pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<
                     let end = rest.find("</WeatherBlueprint>").unwrap_or(rest.len());
                     let block = &rest[tag_end + 1..end];
                     let bp = element_text(block, "BlueprintID");
-                    scenario.weather = if bp.is_empty() {
-                        block.trim().to_owned()
-                    } else {
-                        bp
-                    };
+                    scenario.weather = if bp.is_empty() { block.trim().to_owned() } else { bp };
                 }
             }
             scenario.duration = element_text(&xml, "DurationMins");
@@ -289,13 +245,72 @@ pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<
             scenario.state = element_text(&xml, "StateName");
             scenario.player_consist = element_text(&xml, "QuickDrivePlayerConsistName");
             scenario.date = scenario_date(&xml);
+            scenario.metadata_loaded = true;
         } else {
-            scenario.name = id.clone();
+            scenario.name = id;
+            scenario.metadata_loaded = true;
         }
-        scenarios.push(scenario);
-    }
+        scenario
+    }).collect();
     scenarios.sort_by(|left, right| left.name.cmp(&right.name));
     scenarios
+}
+
+/// Читает ScenarioProperties.xml только для одного сценария.
+pub(crate) fn load_scenario_metadata(scenario: &mut RouteScenario) {
+    if scenario.metadata_loaded {
+        return;
+    }
+    if let Ok(xml) = fs::read_to_string(scenario.path.join("ScenarioProperties.xml")) {
+        scenario.name = localised_text(&xml, "DisplayName");
+        if scenario.name.is_empty() {
+            scenario.name = scenario
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+        }
+        scenario.author = element_text(&xml, "Author");
+        scenario.season = match element_text(&xml, "Season").as_str() {
+            "SEASON_SPRING" => "Spring".to_owned(),
+            "SEASON_SUMMER" => "Summer".to_owned(),
+            "SEASON_AUTUMN" => "Autumn".to_owned(),
+            "SEASON_WINTER" => "Winter".to_owned(),
+            other => other.to_owned(),
+        };
+        scenario.duration = element_text(&xml, "DurationMins");
+        scenario.start_time = scenario_start_time(&xml);
+        scenario.state = element_text(&xml, "StateName");
+        scenario.player_consist = element_text(&xml, "QuickDrivePlayerConsistName");
+        scenario.date = scenario_date(&xml);
+        scenario.weather = element_text(&xml, "WeatherBlueprint");
+        if scenario.weather.is_empty() {
+            scenario.weather = element_text(&xml, "Weather");
+        }
+        if scenario.weather.is_empty() {
+            if let Some(start) = xml.find("<WeatherBlueprint") {
+                let rest = &xml[start..];
+                let tag_end = rest.find('>').unwrap_or(rest.len());
+                let end = rest.find("</WeatherBlueprint>").unwrap_or(rest.len());
+                let block = &rest[tag_end + 1..end];
+                let bp = element_text(block, "BlueprintID");
+                scenario.weather = if bp.is_empty() {
+                    block.trim().to_owned()
+                } else {
+                    bp
+                };
+            }
+        }
+    } else if scenario.name.is_empty() {
+        scenario.name = scenario
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+    }
+    scenario.metadata_loaded = true;
 }
 
 /// Загружает составы техники из Scenario.bin сценария (через Serz в XML).
@@ -332,21 +347,11 @@ pub(crate) fn scenario_consists(xml: &str) -> Vec<ScenarioConsist> {
         let name = consist_name(consist);
         let vehicles = scenario_vehicles(consist);
         if !vehicles.is_empty() {
-            let kind = consist_kind(consist);
-            let is_player = matches!(kind, ConsistKind::Player);
-            let ai = matches!(kind, ConsistKind::Ai);
-            let loose = matches!(kind, ConsistKind::Loose);
+            let is_player = matches!(consist_kind(consist), ConsistKind::Player);
             consists.push(ScenarioConsist {
                 name,
                 vehicles,
                 is_player,
-                player: is_player,
-                player_driver: is_player,
-                ai,
-                loose,
-                kind,
-                consist_kind: kind,
-                kind_type: kind,
             });
         }
         rest = &rest[end..];
@@ -536,41 +541,7 @@ fn scenario_date(xml: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    #[ignore]
-    fn reads_real_route_scenarios() {
-        let route = PathBuf::from(
-            r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\00000093-0000-0000-0000-000000002019",
-        );
-        let serz = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\serz.exe");
-        if !route.is_dir() || !serz.is_file() {
-            return;
-        }
-        let scenarios = read_route_scenarios(&route, &serz);
-        for scenario in &scenarios {
-            let consists = load_consists(&scenario.path, &serz);
-            eprintln!(
-                "SCENARIO имя={:?} дата={:?} автор={:?} сезон={:?} составов={}",
-                scenario.name,
-                scenario.date,
-                scenario.author,
-                scenario.season,
-                consists.len(),
-            );
-            for consist in &consists {
-                eprintln!(
-                    "  состав name={:?} единиц={}",
-                    consist.name,
-                    consist.vehicles.len()
-                );
-            }
-            break;
-        }
-        assert!(!scenarios.is_empty(), "сценарии должны находиться");
-    }
     use crate::assets::check_route;
-
 #[test]
 fn checks_real_route_x() {
     let rw_path = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks");

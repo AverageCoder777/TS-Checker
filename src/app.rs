@@ -26,34 +26,20 @@ pub(crate) struct AssetInventoryWindowState {
     pub(crate) sort: InventorySort,
 }
 
-/// Строка таблицы инвентаря: путь ассета, список использований, признак отсутствия
-/// на диске и ассет с умляутами, если его нужно починить.
-/// Данные для отрисовки таблицы инвентаря.
 type SavedAsset = (PathBuf, String, Option<PathBuf>);
 
-/// Результат проверки ассетов на умляуты: найденные ассеты и список ошибок.
 type InventoryScanOutcome = (Vec<UmlautAsset>, Vec<String>);
 
 pub(crate) struct CheckerApp {
     pub(crate) rw_path: String,
     pub(crate) routes: Vec<Route>,
     pub(crate) selected_route: Option<usize>,
-    /// Сценарии выбранного маршрута.
     pub(crate) scenarios: Vec<RouteScenario>,
-    /// Маршрут, для которого прочитаны сценарии.
     scenarios_route: Option<String>,
-    /// Выбранный сценарий в списке.
     pub(crate) selected_scenario: Option<usize>,
-    /// Выбранный состав внутри открытого окна сценария.
     pub(crate) selected_consist: Option<usize>,
-    /// Открыто ли окно выбранного сценария.
     pub(crate) scenario_window_open: bool,
-    /// Кэш разрешённых путей блюпринтов техники, чтобы не обходить Assets
-    /// повторно при каждом кадре отрисовки окна сценария.
-    /// Результат проверки наличия файлов для составов открытого сценария,
-    /// считается один раз, чтобы не пересчитывать при каждом кадре egui.
     pub(crate) scenario_consist_info: Option<Vec<(String, bool)>>,
-    /// Кэш наличия файлов для техники: [состав][вагон] = файл_на_месте.
     pub(crate) scenario_vehicle_files: Option<Vec<Vec<bool>>>,
     pub(crate) search_query: String,
     ignore_scenarios: bool,
@@ -70,8 +56,6 @@ pub(crate) struct CheckerApp {
     check: Option<Receiver<CheckMessage>>,
     asset_replacement: Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
     asset_replacement_feedback: Option<Result<String, String>>,
-    /// Ассет, для которого в главном окне открыто подтверждение транслитерации.
-    /// Замены символов, предложенные пользователем для сломанных имён.
     pub(crate) asset_viewer_open: bool,
     pub(crate) asset_viewer_document: Option<EditorDocument>,
     pub(crate) editor_sync_pending: bool,
@@ -227,8 +211,6 @@ impl CheckerApp {
         self.status = format!("Подготовка замены ассета {}...", missing.path);
         thread::spawn(move || {
             let missing_path = missing.path.clone();
-            // Сначала новый ассет переводится в английские имена: замена
-            // должна ссылаться на уже переименованный файл.
             let replacement = if transliterate {
                 match repair_umlaut_asset_chain(
                     &route.path,
@@ -430,10 +412,6 @@ impl CheckerApp {
         });
     }
 
-    /// Обновляет список сценариев выбранного маршрута.
-    ///
-    /// Сценарии читаются с диска, поэтому список обновляется только при смене
-    /// маршрута: файл сценариев небольшой, но читать его каждый кадр незачем.
     pub(crate) fn refresh_scenarios(&mut self) {
         let Some(route) = self.selected_route.and_then(|index| self.routes.get(index)) else {
             self.scenarios.clear();
