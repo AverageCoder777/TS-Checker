@@ -856,7 +856,7 @@ fn main() {
                                 &v.product,
                             )
                             .is_some();
-                            flags.push(exists);
+                            flags.push(!exists);
                             if !exists {
                                 all_ok = false;
                             }
@@ -1010,9 +1010,9 @@ fn main() {
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 if ext == "ap" {
-                    if let Some(parent) = path.parent() {
-                        let _ = crate::windows::open_in_file_explorer(parent);
-                    }
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(format!("/select,\"{}\"", path.display()))
+                        .spawn();
                 } else if ext == "bin" && path.is_file() {
                     let _ = std::process::Command::new("explorer.exe")
                         .arg(format!("/select,\"{}\"", path.display()))
