@@ -2,6 +2,7 @@
 
 use super::*;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 enum CheckMessage {
     Progress(String),
@@ -58,6 +59,10 @@ pub(crate) struct CheckerApp {
     ignore_scenarios: bool,
     pub(crate) result: Option<CheckResult>,
     pub(crate) status: String,
+    pub(crate) check_log: String,
+    pub(crate) progress_pending: Option<String>,
+    pub(crate) last_progress_log: Option<Instant>,
+    pub(crate) last_progress_text: Option<String>,
     pub(crate) incomplete_folders: Vec<IncompleteRouteFolder>,
     selected_incomplete: Option<usize>,
     pub(crate) ignored_route_ids: HashSet<String>,
@@ -131,6 +136,10 @@ impl Default for CheckerApp {
             ignore_scenarios: true,
             result: None,
             status,
+            check_log: String::new(),
+            progress_pending: None,
+            last_progress_log: None,
+            last_progress_text: None,
             route_scan: None,
             check: None,
             asset_replacement: None,
@@ -394,6 +403,10 @@ impl CheckerApp {
         self.result = None;
         self.missing_assets_popup = None;
         self.missing_assets_shown = false;
+        self.check_log.clear();
+        self.progress_pending = None;
+        self.last_progress_log = None;
+        self.last_progress_text = None;
         if let Ok(mut state) = self.asset_inventory_state.lock() {
             state.open = false;
             state.assets.clear();
@@ -442,6 +455,30 @@ impl CheckerApp {
         self.scenario_vehicle_files = None;
     }
 
+    fn flush_progress_log(&mut self, force: bool) {
+        let Some(pending) = self.progress_pending.clone() else {
+            return;
+        };
+        let due = force
+            || self
+                .last_progress_log
+                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(200));
+        if !due {
+            return;
+        }
+        if let Some(previous) = self.last_progress_text.take() {
+            let marker = format!("{previous}\n");
+            if self.check_log.ends_with(&marker) {
+                self.check_log.truncate(self.check_log.len() - marker.len());
+            }
+        }
+        self.check_log.push_str(&pending);
+        self.check_log.push('\n');
+        self.last_progress_text = Some(pending);
+        self.last_progress_log = Some(Instant::now());
+        self.progress_pending = None;
+    }
+
     pub(crate) fn is_checking(&self) -> bool {
         self.check.is_some()
     }
@@ -453,6 +490,8 @@ impl CheckerApp {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+
+        self.flush_progress_log(false);
 
         let inventory_scan_result =
             self.inventory_scan
@@ -720,7 +759,17 @@ impl CheckerApp {
         });
         if let Some(message) = check_message {
             match message {
-                Ok(CheckMessage::Progress(status)) => self.status = status,
+                Ok(CheckMessage::Progress(status)) => {
+                    if status.starts_with("Анализ файла:")
+                        || status.starts_with("Анализ файлов:")
+                    {
+                        self.progress_pending = Some(status);
+                    } else {
+                        self.flush_progress_log(true);
+                        self.check_log.push_str(&status);
+                        self.check_log.push('\n');
+                    }
+                }
                 Ok(CheckMessage::Finished(result)) => {
                     self.check = None;
                     match result {
@@ -755,6 +804,15 @@ impl CheckerApp {
                             } else {
                                 format!("Проверка завершена: {}.", summary.join(", "))
                             };
+                            self.flush_progress_log(true);
+                            for issue in &result.structure_issues {
+                                self.check_log
+                                    .push_str(&format!("Проблема структуры: {issue}\n"));
+                            }
+                            for error in &result.conversion_errors {
+                                self.check_log
+                                    .push_str(&format!("Ошибка Serz/XML: {error}\n"));
+                            }
                             self.result = Some(result);
                         }
                         Err(error) => self.status = error,

@@ -82,13 +82,23 @@ pub(crate) fn collect_route_files(
                     let Some(first) = components.next() else {
                         return false;
                     };
-                    let in_route_root = components.next().is_none();
-                    let in_allowed_directory =
-                        first.as_os_str().to_str().is_some_and(|directory| {
-                            is_allowed_route_directory(directory, ignore_scenarios)
-                        });
-                    (in_route_root || in_allowed_directory)
-                        && entry.path().extension().is_some_and(|extension| {
+                     let in_route_root = components.next().is_none();
+                     let in_allowed_directory =
+                         first.as_os_str().to_str().is_some_and(|directory| {
+                             is_allowed_route_directory(directory, ignore_scenarios)
+                         });
+                     let in_non_asset_directory = first
+                         .as_os_str()
+                         .to_str()
+                         .is_some_and(|directory| {
+                             matches!(
+                                 directory.to_ascii_lowercase().as_str(),
+                                 "terrain" | "mixmap" | "routeinfo" | "routeinformation"
+                             )
+                         });
+                     (in_route_root || in_allowed_directory)
+                         && !in_non_asset_directory
+                         && entry.path().extension().is_some_and(|extension| {
                             extension.eq_ignore_ascii_case("bin")
                                 || extension.eq_ignore_ascii_case("xml")
                         })
@@ -1174,14 +1184,17 @@ fn install_route_file(
     Ok(None)
 }
 
-pub(crate) fn check_route(
+pub(crate) fn check_route<F>(
     route_path: &Path,
     assets_path: &Path,
     serz_path: &Path,
     ignore_scenarios: bool,
     max_concurrent_serz: usize,
-    mut report_progress: impl FnMut(&str),
-) -> Result<CheckResult, String> {
+    report_progress: F,
+) -> Result<CheckResult, String>
+where
+    F: Fn(&str) + Sync,
+{
     if !serz_path.is_file() {
         return Err(format!(
             "Не найден serz.exe: {}. Выберите корневую папку RailWorks.",
@@ -1190,7 +1203,7 @@ pub(crate) fn check_route(
     }
 
     report_progress("Сканирование файлов маршрута...");
-    let route_files = collect_route_files(route_path, ignore_scenarios)?;
+    let collected_route_files = collect_route_files(route_path, ignore_scenarios)?;
 
     let mut structure_issues = Vec::new();
     if !route_path.join("RouteProperties.xml").is_file() {
@@ -1199,7 +1212,7 @@ pub(crate) fn check_route(
     if !assets_path.is_dir() {
         structure_issues.push("не найдена папка Assets".to_owned());
     }
-    if route_files.is_empty() {
+    if collected_route_files.is_empty() {
         structure_issues.push("не найдено файлов .bin или .xml для проверки".to_owned());
     }
     let unexpected_directories = unexpected_route_directories(route_path)?;
@@ -1217,10 +1230,8 @@ pub(crate) fn check_route(
         ));
     }
 
-    // Основные файлы маршрута могут быть упакованы в .ap: без чтения архива
-    // список ассетов останется пустым. Архив читается прямо из zip, а файлы
-    // рядом с ним перекрывают одноимённые записи архива.
-    let mut route_files: Vec<RouteFile> = collect_route_files(route_path, ignore_scenarios)?
+    // Основные файлы маршрута могут быть упакованы в .ap...
+    let mut route_files: Vec<RouteFile> = collected_route_files
         .into_iter()
         .map(RouteFile::Path)
         .collect();
@@ -2582,6 +2593,46 @@ fn escape_xml_text(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Запускает serz.exe с таймаутом, чтобы зависший дочерний процесс не
+/// блокировал пул потоков навсегда.
+fn serz_output(serz_path: &Path, args: &[String]) -> Result<std::process::Output, String> {
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let parent = serz_path
+        .parent()
+        .ok_or_else(|| format!("Некорректный путь к Serz: {}", serz_path.display()))?;
+    let child = Command::new(serz_path)
+        .current_dir(parent)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("не удалось запустить serz.exe: {error}"))?;
+    let child = Arc::new(Mutex::new(Some(child)));
+    let waiter_child = child.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut guard = waiter_child.lock().unwrap();
+        if let Some(child) = guard.take() {
+            let _ = tx.send(child.wait_with_output());
+        }
+    });
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(format!("не удалось дождаться serz.exe: {error}")),
+        Err(_) => {
+            if let Some(mut child) = child.lock().unwrap().take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Err("serz.exe завис и был остановлен по таймауту".to_owned())
+        }
+    }
+}
+
 pub(crate) fn convert_bin_to_xml(
     serz_path: &Path,
     bin_path: &Path,
@@ -2595,17 +2646,12 @@ pub(crate) fn convert_bin_to_xml(
             )
         })?;
     }
-    let output = Command::new(serz_path)
-        .current_dir(
-            serz_path
-                .parent()
-                .ok_or_else(|| format!("Некорректный путь к Serz: {}", serz_path.display()))?,
-        )
-        .arg(legacy_windows_path(bin_path))
-        .arg(format!("/xml:{}", legacy_windows_path(xml_path).display()))
-        .output()
-        .map_err(|error| format!("не удалось запустить serz.exe: {error}"))?;
-
+    let mut args = vec![legacy_windows_path(bin_path).display().to_string()];
+    args.push(format!(
+        "/xml:{}",
+        legacy_windows_path(xml_path).display()
+    ));
+    let output = serz_output(serz_path, &args)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     validate_serz_process(output.status.success(), &stdout, &stderr)
@@ -2673,16 +2719,12 @@ pub(crate) fn convert_xml_to_bin(
             )
         })?;
     }
-    let output = Command::new(serz_path)
-        .current_dir(
-            serz_path
-                .parent()
-                .ok_or_else(|| format!("Некорректный путь к Serz: {}", serz_path.display()))?,
-        )
-        .arg(legacy_windows_path(xml_path))
-        .arg(format!("/bin:{}", legacy_windows_path(bin_path).display()))
-        .output()
-        .map_err(|error| format!("не удалось запустить serz.exe: {error}"))?;
+    let mut args = vec![legacy_windows_path(xml_path).display().to_string()];
+    args.push(format!(
+        "/bin:{}",
+        legacy_windows_path(bin_path).display()
+    ));
+    let output = serz_output(serz_path, &args)?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

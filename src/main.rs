@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -611,6 +610,14 @@ fn main() {
                 app.search_query = q.clone();
                 if app.routes.len() == last_count && q == last_query {
                     ui.set_status(app.status.clone().into());
+                    ui.set_check_log(app.check_log.clone().into());
+                    if ui.get_follow_log() {
+                        let content_height = ui.get_log_content_height();
+                        let visible_height = ui.get_log_visible_height();
+                        if content_height > visible_height {
+                            ui.set_log_scroll_y(content_height - visible_height);
+                        }
+                    }
                     ui.set_has_result(app.result.is_some());
                     return;
                 }
@@ -646,6 +653,14 @@ fn main() {
                     .collect();
                 ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
                 ui.set_status(app.status.clone().into());
+                ui.set_check_log(app.check_log.clone().into());
+                if ui.get_follow_log() {
+                    let content_height = ui.get_log_content_height();
+                    let visible_height = ui.get_log_visible_height();
+                    if content_height > visible_height {
+                        ui.set_log_scroll_y(content_height - visible_height);
+                    }
+                }
                 ui.set_has_result(app.result.is_some());
             }
         },
@@ -1222,13 +1237,13 @@ mod tests {
                     .into_owned()
             })
             .collect();
-        // Шесть папок маршрута и RouteProperties.xml в корне маршрута.
-        assert_eq!(included.len(), 7);
+        // Три папки маршрута и RouteProperties.xml в корне маршрута.
+        assert_eq!(included.len(), 4);
         assert!(!included_names.iter().any(|name| name == "ThirdParty"));
         assert!(included.contains(&route.join("RouteProperties.xml")));
 
         let without_scenarios = super::assets::collect_route_files(&route, true).unwrap();
-        assert_eq!(without_scenarios.len(), 6);
+        assert_eq!(without_scenarios.len(), 3);
         assert_eq!(
             super::assets::unexpected_route_directories(&route).unwrap(),
             ["ThirdParty"]

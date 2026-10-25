@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 thread_local! {
-    static BLUEPRINT_CACHE: RefCell<HashMap<(String, String, String), Option<PathBuf>>> =
+    static BLUEPRINT_CACHE: RefCell<HashMap<(String, String, String, String, String), Option<PathBuf>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -19,6 +19,8 @@ pub(crate) fn resolve_blueprint_file_cached_free(
     product: &str,
 ) -> Option<PathBuf> {
     let key = (
+        rw_path.display().to_string(),
+        route_path.display().to_string(),
         blueprint.to_owned(),
         provider.to_owned(),
         product.to_owned(),
@@ -77,6 +79,18 @@ pub(crate) fn resolve_blueprint_file(
     }
 
     let roots: Vec<PathBuf> = vec![assets_path.clone(), route_path.to_path_buf()];
+    candidates.sort_by_key(|candidate| match candidate
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("bin") => 0usize,
+        Some("geopcdx") => 1,
+        Some("tgpcdx") => 2,
+        Some("xml") => 3,
+        _ => 4,
+    });
     for root in &roots {
         for candidate in &candidates {
             let path = root.join(candidate);

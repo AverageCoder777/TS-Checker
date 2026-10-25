@@ -14,6 +14,17 @@ export component MainWindow inherits Window {
     in-out property <bool> ignore-list-open: false;
     in property <[string]> ignored-routes: [];
     in property <[string]> incomplete-folders: [];
+    in property <string> check-log: "";
+    in-out property <bool> follow-log: true;
+    in-out property <length> log-scroll-y: 0px;
+    out property <length> log-content-height: log_view.content-height;
+    out property <length> log-visible-height: log_view.visible-height;
+
+    changed follow-log => {
+        if !follow-log {
+            log-scroll-y = log_view.content-y;
+        }
+    }
     in property <float> check_progress: 0.0;
     in property <string> status: "";
     in-out property <string> search-query: "";
@@ -46,13 +57,13 @@ export component MainWindow inherits Window {
                         spacing: 6px;
                         alignment: start;
                         padding: 2px;
-                        Image {
-                            source: item.icon-source;
-                            width: 32px;
-                            height: 32px;
-                            preferred-width: 32px;
-                            preferred-height: 32px;
-                        }
+                         Image {
+                             source: item.icon-source;
+                             width: 128px;
+                             height: 64px;
+                             preferred-width: 128px;
+                             preferred-height: 64px;
+                         }
                         Text {
                             text: item.name;
                             vertical-alignment: center;
@@ -101,8 +112,15 @@ export component MainWindow inherits Window {
             text: "Игнор-лист включен";
             checked <=> ignore-list-open;
         }
-        ListView {
-            for folder in incomplete-folders: Text { text: folder; }
+        log_view := TextEdit {
+            read-only: true;
+            text: check-log;
+            height: 120px;
+            content-y: follow-log ? (log_view.content-height - log_view.visible-height) : log-scroll-y;
+        }
+        CheckBox {
+            text: "Follow log";
+            checked <=> follow-log;
         }
         Text { text: status; }
     }

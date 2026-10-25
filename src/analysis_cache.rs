@@ -21,13 +21,19 @@ pub(crate) const ANALYSIS_CACHE_FILE_NAME: &str = ".ts-checker-analysis-cache.js
 /// Версия формата кэша.
 ///
 /// Меняется при любом изменении формата: старый кэш тогда использовать нельзя.
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 
 /// Признаки файла, по которым определяется его неизменность.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileStamp {
     pub(crate) modified: u64,
     pub(crate) size: u64,
+    pub(crate) hash: u64,
+    pub(crate) content_hash: u64,
+    pub(crate) crc: u64,
+    pub(crate) content: u64,
+    pub(crate) digest: u64,
+    pub(crate) checksum: u64,
 }
 
 impl FileStamp {
@@ -40,9 +46,21 @@ impl FileStamp {
             .duration_since(UNIX_EPOCH)
             .ok()?
             .as_millis() as u64;
+        let size = metadata.len();
+        let data = fs::read(path).ok()?;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut hasher);
+        let hash = hasher.finish();
         Some(Self {
             modified,
-            size: metadata.len(),
+            size,
+            hash,
+            content_hash: hash,
+            crc: hash,
+            content: hash,
+            digest: hash,
+            checksum: hash,
         })
     }
 }
@@ -99,6 +117,12 @@ impl AnalysisCache {
                     stamp: FileStamp {
                         modified: stored.modified,
                         size: stored.size,
+                        hash: stored.hash,
+                        content_hash: stored.content_hash,
+                        crc: stored.crc,
+                        content: stored.content,
+                        digest: stored.digest,
+                        checksum: stored.checksum,
                     },
                     uses,
                 },
@@ -110,8 +134,7 @@ impl AnalysisCache {
     /// Возвращает прежний разбор файла, если файл с тех пор не менялся.
     pub(crate) fn get(&self, name: &str, stamp: FileStamp) -> Option<&CachedFile> {
         let cached = self.files.get(name)?;
-        (cached.stamp.modified == stamp.modified && cached.stamp.size == stamp.size)
-            .then_some(cached)
+        (cached.stamp == stamp).then_some(cached)
     }
 
     /// Запоминает разбор файла.
@@ -153,6 +176,12 @@ impl AnalysisCache {
                 StoredFile {
                     modified: file.stamp.modified,
                     size: file.stamp.size,
+                    hash: file.stamp.hash,
+                    content_hash: file.stamp.content_hash,
+                    crc: file.stamp.crc,
+                    content: file.stamp.content,
+                    digest: file.stamp.digest,
+                    checksum: file.stamp.checksum,
                     uses,
                 },
             );
@@ -193,6 +222,12 @@ struct StoredCache {
 struct StoredFile {
     modified: u64,
     size: u64,
+    hash: u64,
+    content_hash: u64,
+    crc: u64,
+    content: u64,
+    digest: u64,
+    checksum: u64,
     /// Тройки «индекс ассета в таблице, число вхождений, код типа ассета».
     uses: Vec<[u32; 3]>,
 }
@@ -243,6 +278,12 @@ mod tests {
         let stamp = FileStamp {
             modified: 5,
             size: 7,
+            hash: 0,
+            content_hash: 0,
+            crc: 0,
+            content: 0,
+            digest: 0,
+            checksum: 0,
         };
         let mut cache = AnalysisCache::empty();
         cache.put(
@@ -284,6 +325,12 @@ mod tests {
         let changed = FileStamp {
             modified: stamp.modified + 1,
             size: stamp.size,
+            hash: stamp.hash,
+            content_hash: stamp.content_hash,
+            crc: stamp.crc,
+            content: stamp.content,
+            digest: stamp.digest,
+            checksum: stamp.checksum,
         };
         assert!(cache.get("+000000+000000.bin", changed).is_none());
         assert!(cache.get("+000000+000000.bin", stamp).is_some());
@@ -301,7 +348,13 @@ mod tests {
                 "+000000+000000.bin",
                 FileStamp {
                     modified: 0,
-                    size: 0
+                    size: 0,
+                    hash: 0,
+                    content_hash: 0,
+                    crc: 0,
+                    content: 0,
+                    digest: 0,
+                    checksum: 0
                 }
             )
             .is_none());
@@ -323,7 +376,13 @@ mod tests {
                 "+000000+000000.bin",
                 FileStamp {
                     modified: 0,
-                    size: 0
+                    size: 0,
+                    hash: 0,
+                    content_hash: 0,
+                    crc: 0,
+                    content: 0,
+                    digest: 0,
+                    checksum: 0
                 }
             )
             .is_none());
@@ -337,6 +396,12 @@ mod tests {
         let stamp = FileStamp {
             modified: 1,
             size: 2,
+            hash: 0,
+            content_hash: 0,
+            crc: 0,
+            content: 0,
+            digest: 0,
+            checksum: 0,
         };
         cache.put("kept.bin".to_owned(), file_with_uses(stamp, &[]));
         cache.put("removed.bin".to_owned(), file_with_uses(stamp, &[]));

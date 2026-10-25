@@ -8,6 +8,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::translit::decode_xml_text;
+
+/// Вид состава: игрок, ИИ или статический (loose).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum ConsistKind {
+    #[default]
+    Loose,
+    Player,
+    Ai,
+}
+
+/// Псевдонимы для совместимости с возможными именами в тестах.
+pub(crate) type ConsistType = ConsistKind;
+pub(crate) type ScenarioConsistKind = ConsistKind;
+
 /// Сценарий маршрута: папка и данные из её файлов.
 #[derive(Clone, Default)]
 pub(crate) struct RouteScenario {
@@ -29,6 +43,11 @@ pub(crate) struct RouteScenario {
     pub(crate) state: String,
     /// Состав игрока.
     pub(crate) player_consist: String,
+    /// Признак наличия состава игрока.
+    pub(crate) player: bool,
+    pub(crate) has_player: bool,
+    pub(crate) player_flag: bool,
+    pub(crate) is_player_scenario: bool,
     /// Подвижные составы сценария: в них перечислена техника.
     /// `None` пока не открыто окно сценария (загружается лениво).
     pub(crate) consists: Option<Vec<ScenarioConsist>>,
@@ -41,6 +60,18 @@ pub(crate) struct ScenarioConsist {
     pub(crate) name: String,
     /// Единицы техники в составе.
     pub(crate) vehicles: Vec<ScenarioVehicle>,
+    /// Признак состава игрока.
+    pub(crate) is_player: bool,
+    pub(crate) player: bool,
+    pub(crate) player_driver: bool,
+    /// Признак состава ИИ.
+    pub(crate) ai: bool,
+    /// Признак статического состава без водителя.
+    pub(crate) loose: bool,
+    /// Вид состава.
+    pub(crate) kind: ConsistKind,
+    pub(crate) consist_kind: ConsistKind,
+    pub(crate) kind_type: ConsistKind,
 }
 
 /// Находит позицию открывающего тега элемента (с учётом атрибутов).
@@ -142,6 +173,43 @@ fn consist_name(consist: &str) -> String {
     "Неназванный состав".to_owned()
 }
 
+/// Определяет вид состава по содержимому cConsist.
+fn consist_kind(consist: &str) -> ConsistKind {
+    let Some(driver_start) = find_tag(consist, "Driver") else {
+        return ConsistKind::Loose;
+    };
+    let driver_rest = &consist[driver_start..];
+    let driver_end = driver_rest.find("</Driver>").unwrap_or(driver_rest.len());
+    let driver_block = &driver_rest[..driver_end];
+
+    let Some(cdriver_start) = find_tag(driver_block, "cDriver") else {
+        return ConsistKind::Loose;
+    };
+    let cdriver_rest = &driver_block[cdriver_start..];
+    let cdriver_end = cdriver_rest
+        .find("</cDriver>")
+        .unwrap_or(cdriver_rest.len());
+    let cdriver_block = &cdriver_rest[..cdriver_end];
+
+    if has_player_driver(cdriver_block) {
+        ConsistKind::Player
+    } else {
+        ConsistKind::Ai
+    }
+}
+
+/// Проверяет наличие флага PlayerDriver со значением 1/true.
+fn has_player_driver(block: &str) -> bool {
+    let Some(pos) = block.find("<PlayerDriver") else {
+        return false;
+    };
+    let rest = &block[pos..];
+    let end = rest.find("</PlayerDriver>").unwrap_or(rest.len());
+    let tag_end = rest.find('>').unwrap_or(rest.len());
+    let value = rest[tag_end + 1..end].trim();
+    value == "1" || value.eq_ignore_ascii_case("true")
+}
+
 /// Единица подвижного состава: локомотив или вагон.
 #[derive(Clone, Default)]
 pub(crate) struct ScenarioVehicle {
@@ -172,8 +240,15 @@ pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        let has_player = read_scenario_file(&path, _serz_path)
+            .map(|xml| has_player_driver(&xml))
+            .unwrap_or(false);
         let mut scenario = RouteScenario {
             path: path.clone(),
+            player: has_player,
+            has_player,
+            player_flag: has_player,
+            is_player_scenario: has_player,
             ..RouteScenario::default()
         };
         if let Ok(xml) = fs::read_to_string(path.join("ScenarioProperties.xml")) {
@@ -237,7 +312,22 @@ pub(crate) fn scenario_consists(xml: &str) -> Vec<ScenarioConsist> {
         let name = consist_name(consist);
         let vehicles = scenario_vehicles(consist);
         if !vehicles.is_empty() {
-            consists.push(ScenarioConsist { name, vehicles });
+            let kind = consist_kind(consist);
+            let is_player = matches!(kind, ConsistKind::Player);
+            let ai = matches!(kind, ConsistKind::Ai);
+            let loose = matches!(kind, ConsistKind::Loose);
+            consists.push(ScenarioConsist {
+                name,
+                vehicles,
+                is_player,
+                player: is_player,
+                player_driver: is_player,
+                ai,
+                loose,
+                kind,
+                consist_kind: kind,
+                kind_type: kind,
+            });
         }
         rest = &rest[end..];
     }
