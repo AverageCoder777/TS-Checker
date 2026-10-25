@@ -503,15 +503,7 @@ pub(crate) fn asset_kind(path: &str) -> AssetKind {
         AssetKind::Other
     }
 }
-/// Как называть тип ассета в интерфейсе.
-pub(crate) fn asset_kind_name(kind: AssetKind) -> &'static str {
-    match kind {
-        AssetKind::Loft => "loft-объект",
-        AssetKind::Scenery => "scenery-объект",
-        AssetKind::Vehicle => "файл состава",
-        AssetKind::Other => "объект другого типа",
-    }
-}
+
 /// Проверяет, что тип нового ассета совпадает с типом отсутствующего.
 /// /// Loft-объект лежит в папке Networks, scenery-объект — в папке Scenery, так
 /// что заменить один другим нельзя: у них разная структура ссылок.

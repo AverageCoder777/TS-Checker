@@ -67,25 +67,7 @@ pub(crate) fn asset_replacement_log_file() -> Option<PathBuf> {
     })
 }
 
-/// Открывает стандартное окно выбора файла Windows и возвращает выбранный путь.
-pub(crate) fn locoswap_pick_file() -> Option<String> {
-    let ps = "Add-Type -AssemblyName System.Windows.Forms;$f=New-Object System.Windows.Forms.OpenFileDialog;$f.Filter='LocoSwap.exe|LocoSwap.exe|Все файлы|*.*';$f.Title='Выберите LocoSwap.exe';if($f.ShowDialog()-eq'OK'){$f.FileName}";
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", ps])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
+
 
 pub(crate) fn append_asset_replacement_log(
     path: &Path,
@@ -261,27 +243,7 @@ pub(crate) fn load_ignored_route_ids() -> Result<HashSet<String>, String> {
     }
 }
 
-pub(crate) fn save_ignored_route_ids(ignored_route_ids: &HashSet<String>) -> Result<(), String> {
-    let path = ignored_route_ids_file()
-        .ok_or_else(|| "Windows APPDATA не определена; игнор-лист не сохранён.".to_owned())?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Некорректный путь к файлу игнор-листа.".to_owned())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
-    let mut ids: Vec<_> = ignored_route_ids.iter().collect();
-    ids.sort();
-    let contents = ids
-        .into_iter()
-        .map(|id| format!("{id}\n"))
-        .collect::<String>();
-    fs::write(&path, contents).map_err(|error| {
-        format!(
-            "Не удалось сохранить игнор-лист {}: {error}",
-            path.display()
-        )
-    })
-}
+
 
 pub(crate) fn load_last_game_path() -> String {
     last_game_path_file()
@@ -291,19 +253,9 @@ pub(crate) fn load_last_game_path() -> String {
         .unwrap_or_else(|| r"C:\Program Files (x86)\Steam\steamapps\common\RailWorks".to_owned())
 }
 
-pub(crate) fn is_valid_game_path(path: &Path) -> bool {
-    path.is_dir() && path.join("Content").join("Routes").is_dir() && path.join("Assets").is_dir()
-}
 
-pub(crate) fn save_last_game_path(game_path: &str) -> Result<(), String> {
-    let path = last_game_path_file().ok_or_else(|| "Windows APPDATA не определена.".to_owned())?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Некорректный путь к файлу настроек.".to_owned())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
-    fs::write(path, game_path).map_err(|error| format!("Не удалось сохранить путь к игре: {error}"))
-}
+
+
 
 #[cfg(test)]
 mod tests {

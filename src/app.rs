@@ -2,7 +2,6 @@
 
 use super::*;
 use std::collections::HashSet;
-use std::path::Path;
 
 enum CheckMessage {
     Progress(String),
@@ -11,10 +10,6 @@ enum CheckMessage {
 
 pub(crate) enum InventoryAction {
     ScanUmlauts,
-    Repair {
-        asset: UmlautAsset,
-        fixes: CharacterFixes,
-    },
 }
 
 #[derive(Default)]
@@ -27,28 +22,7 @@ pub(crate) struct AssetInventoryWindowState {
     error: Option<String>,
     pub(crate) assets: Vec<ReferencedAsset>,
     umlaut_assets: Vec<UmlautAsset>,
-    /// Ассет, для которого открыто окно подтверждения транслитерации.
-    pending_repair: Option<UmlautAsset>,
-    /// Замены символов, предложенные пользователем.
-    character_fixes: CharacterFixes,
     pub(crate) sort: InventorySort,
-}
-
-pub(crate) fn decode_route_icon(path: &Path) -> image::ImageResult<image::DynamicImage> {
-    let reader = image::ImageReader::open(path).map_err(image::ImageError::IoError)?;
-    let reader = reader.with_guessed_format().map_err(image::ImageError::IoError)?;
-    reader.decode()
-}
-
-pub(crate) fn route_panel_widths(
-    available_width: f32,
-    panel_gap: f32,
-    route_content_width: f32,
-) -> (f32, f32) {
-    let usable_width = (available_width - panel_gap).max(0.0);
-    let routes_width = route_content_width.min(usable_width * 2.0 / 3.0);
-    let check_width = (usable_width - routes_width).max(0.0);
-    (routes_width, check_width)
 }
 
 /// Строка таблицы инвентаря: путь ассета, список использований, признак отсутствия
@@ -244,62 +218,6 @@ impl CheckerApp {
         });
     }
 
-    fn start_umlaut_repair(&mut self, asset: UmlautAsset, fixes: CharacterFixes) {
-        let Some(route) = self.selected_route.and_then(|index| self.routes.get(index)).cloned()
-        else {
-            return;
-        };
-        let rw_path = PathBuf::from(self.rw_path.trim());
-        let assets_path = rw_path.join("Assets");
-        let serz_path = preferred_serz_path(&rw_path);
-        let (tx, rx) = mpsc::channel();
-        self.umlaut_repair = Some(rx);
-        self.asset_replacement_feedback = None;
-        self.status = format!("Проверка цепочки ассета {}...", asset.path);
-        thread::spawn(move || {
-            let path = asset.path.clone();
-            let result = repair_umlaut_asset_chain(
-                &route.path,
-                &assets_path,
-                &serz_path,
-                &asset.path,
-                &asset.uses,
-                &fixes,
-            )
-            .map(|mut report| {
-                let mut uses: Vec<_> = asset.uses.iter().map(|usage| AssetReplacementLogUse {
-                        tile: usage.tile.clone(),
-                        source_file: usage.source_file.display(),
-                    }).collect();
-                uses.sort_by(|left, right| {
-                    left.tile.cmp(&right.tile).then_with(|| left.source_file.cmp(&right.source_file))
-                });
-                let mut entry = AssetReplacementLogEntry {
-                    timestamp_unix_seconds: 0,
-                    operation: "Транслитерация цепочки ассетов".to_owned(),
-                    route_id: Some(route.id.clone()),
-                    route_name: Some(route.name.clone()),
-                    route_path: Some(route.path.clone()),
-                    original_files: report.files.iter().map(|path| path.display().to_string()).collect(),
-                    missing_asset: Some(path.clone()),
-                    replacement_asset: Some(report.new_asset_path.clone()),
-                    replaced_files: report.changed_files,
-                    replaced_instances: report.changed_references,
-                    uses,
-                    backups: report.backups.clone(),
-                };
-                match asset_replacement_log_file().ok_or_else(|| {"Windows APPDATA не определена; журнал замен не сохранён.".to_owned()})
-                    .and_then(|log_path| {append_asset_replacement_log(&log_path, &mut entry).map(|()| log_path)}) 
-                {
-                    Ok(log_path) => report.log_file = Some(log_path),
-                    Err(error) => report.log_error = Some(error),
-                }
-                report
-            });
-            let _ = tx.send((path, result));
-        });
-    }
-
     pub(crate) fn start_asset_replacement(
         &mut self,
         missing: MissingAsset,
@@ -460,38 +378,8 @@ impl CheckerApp {
         });
     }
 
-    fn open_asset_view_dialog(&mut self) {
-        if self
-            .asset_viewer_document
-            .as_ref()
-            .is_some_and(EditorDocument::is_dirty)
-        {
-            self.asset_viewer_open = true;
-            self.status =
-                "Сначала сохраните изменения текущего файла, прежде чем открывать другой."
-                    .to_owned();
-            return;
-        }
-        let selected = rfd::FileDialog::new()
-            .set_title("Открыть BIN или GeoPcDx")
-            .add_filter("BIN / GeoPcDx", &["bin", "geopcdx"])
-            .pick_file();
-        let Some(path) = selected else {
-            return;
-        };
-        self.start_asset_view(path);
-    }
-
     pub(crate) fn start_route_scan(&mut self) {
         self.begin_route_scan(false, true);
-    }
-
-    fn start_full_route_scan(&mut self) {
-        self.begin_route_scan(false, false);
-    }
-
-    fn start_full_route_scan_preserving_incomplete(&mut self) {
-        self.begin_route_scan(true, false);
     }
 
     fn begin_route_scan(&mut self, preserve_incomplete: bool, allow_cache: bool) {
@@ -554,37 +442,7 @@ impl CheckerApp {
         });
     }
 
-    fn start_delete(&mut self, folders: Vec<PathBuf>) {
-        self.pending_delete = None;
-        self.delete_paths = Some(folders.clone());
-        self.delete_feedback = None;
-        let routes_path = PathBuf::from(self.rw_path.trim())
-            .join("Content")
-            .join("Routes");
-        let (tx, rx) = mpsc::channel();
-        self.delete_rx = Some(rx);
-        self.status = format!("Перемещение {} папок в Корзину Windows...", folders.len());
-        thread::spawn(move || {
-            let result = move_folders_to_recycle_bin(&routes_path, &folders).and_then(|count| {
-                invalidate_route_scan_cache()
-                    .map(|()| count)
-                    .map_err(|error| {
-                        format!("Папка перемещена, но не удалось сбросить кэш маршрутов: {error}")
-                    })
-            });
-            let _ = tx.send(result);
-        });
-    }
-
-    /// Заголовок окна выбранного сценария.
-    fn scenario_title(&self) -> String {
-        self.selected_scenario
-            .and_then(|index| self.scenarios.get(index))
-            .map(|scenario| scenario.name.clone())
-            .unwrap_or_else(|| "Сценарий".to_owned())
-    }
-
-    /// Обновляет список сценариев выбранного маршрута.
+/// Обновляет список сценариев выбранного маршрута.
     ///
     /// Сценарии читаются с диска, поэтому список обновляется только при смене
     /// маршрута: файл сценариев небольшой, но читать его каждый кадр незачем.
@@ -609,47 +467,6 @@ impl CheckerApp {
         self.scenario_vehicle_files = None;
     }
 
-    /// Все ли файлы техники выбранного состава разрешаются в реальные файлы на диске.
-    fn consist_files_exist(
-        &self,
-        consist: &ScenarioConsist,
-        route_path: Option<&Path>,
-        rw_path: &Path,
-    ) -> bool {
-        let Some(route_path) = route_path else {
-            return false;
-        };
-        consist
-            .vehicles
-            .iter()
-            .all(|vehicle| {
-                vehicle.blueprint.is_empty()
-                    || self
-                        .resolve_blueprint_file_cached(
-                            rw_path,
-                            route_path,
-                            &vehicle.blueprint,
-                            &vehicle.provider,
-                            &vehicle.product,
-                        )
-                        .is_some()
-            })
-    }
-
-    /// Разрешает путь блюпринта с кэшированием результата.
-    fn resolve_blueprint_file_cached(
-        &self,
-        rw_path: &Path,
-        route_path: &Path,
-        blueprint: &str,
-        provider: &str,
-        product: &str,
-    ) -> Option<PathBuf> {
-        crate::blueprint::resolve_blueprint_file_cached_free(
-            rw_path, route_path, blueprint, provider, product,
-        )
-    }
-
     pub(crate) fn is_checking(&self) -> bool {
         self.check.is_some()
     }
@@ -658,10 +475,6 @@ impl CheckerApp {
         loop {
             match self.inventory_action_rx.try_recv() {
                 Ok(InventoryAction::ScanUmlauts) => self.start_inventory_scan(),
-                Ok(InventoryAction::Repair { asset, fixes }) => {
-                    self.character_fixes = fixes.clone();
-                    self.start_umlaut_repair(asset, fixes);
-                }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
@@ -880,120 +693,6 @@ impl CheckerApp {
                 Err(error) => {
                     self.status = error.clone();
                     self.asset_replacement_feedback = Some(Err(error));
-                }
-            }
-        }
-
-        let umlaut_repair_result = self
-            .umlaut_repair
-            .as_ref()
-            .and_then(|rx| match rx.try_recv() {
-                Ok(result) => Some(result),
-                Err(TryRecvError::Disconnected) => Some((
-                    String::new(),
-                    Err("Не удалось получить результат транслитерации ассетов.".to_owned()),
-                )),
-                Err(TryRecvError::Empty) => None,
-            });
-        if let Some((asset_path, result)) = umlaut_repair_result {
-            self.umlaut_repair = None;
-            match result {
-                Ok(report) => {
-                    let log_message = report.log_file.as_ref().map_or_else(
-                        || {
-                            report.log_error.as_ref().map_or_else(
-                                || "Журнал замен недоступен.".to_owned(),
-                                |error| format!("ЖУРНАЛ НЕ ЗАПИСАН: {error}"),
-                            )
-                        },
-                        |path| format!("Журнал: {}", path.display()),
-                    );
-                    let remaining = self.result.as_mut().map(|check_result| {
-                        check_result
-                            .umlaut_assets
-                            .retain(|asset| asset.path != asset_path);
-                        check_result
-                            .missing_assets
-                            .retain(|asset| asset.path != asset_path);
-                        if let Some(inventory_asset) = check_result
-                            .asset_inventory
-                            .iter_mut()
-                            .find(|asset| asset.path == asset_path)
-                        {
-                            inventory_asset.path = report.new_asset_path.clone();
-                            inventory_asset.missing = false;
-                        }
-                        (
-                            check_result.missing_assets.len(),
-                            check_result.umlaut_assets.len(),
-                        )
-                    });
-                    if let Ok(mut state) = self.asset_inventory_state.lock() {
-                        state.umlaut_assets.retain(|asset| asset.path != asset_path);
-                        if let Some(inventory_asset) = state
-                            .assets
-                            .iter_mut()
-                            .find(|asset| asset.path == asset_path)
-                        {
-                            inventory_asset.path = report.new_asset_path.clone();
-                            inventory_asset.missing = false;
-                        }
-                    }
-                    self.asset_replacement_feedback = Some(Ok(format!(
-                        "Транслитерировано файлов: {}; обновлено ссылок: {}. {log_message}",
-                        report.changed_files, report.changed_references
-                    )));
-                    if remaining == Some((0, 0)) {
-                        self.status = "Все найденные проблемы обработаны. Выполняется итоговая проверка маршрута...".to_owned();
-                        self.start_check();
-                    } else if let Some((missing, umlauts)) = remaining {
-                        self.status = format!(
-                            "Транслитерация завершена. Осталось отсутствующих ассетов: {missing}; ассетов с умляутами: {umlauts}."
-                        );
-                    }
-                }
-                Err(error) => {
-                    self.status = error.clone();
-                    self.asset_replacement_feedback = Some(Err(error));
-                }
-            }
-        }
-
-        let delete_result = self.delete_rx.as_ref().and_then(|rx| match rx.try_recv() {
-            Ok(result) => Some(result),
-            Err(TryRecvError::Disconnected) => Some(Err(
-                "Не удалось получить результат удаления папок.".to_owned(),
-            )),
-            Err(TryRecvError::Empty) => None,
-        });
-        if let Some(result) = delete_result {
-            self.delete_rx = None;
-            match result {
-                Ok(count) => {
-                    self.delete_feedback = Some(Ok(count));
-                    let selected_path = self
-                        .selected_incomplete
-                        .and_then(|index| self.incomplete_folders.get(index))
-                        .map(|folder| folder.path.clone());
-                    if let Some(deleted_paths) = self.delete_paths.take() {
-                        self.incomplete_folders
-                            .retain(|folder| !deleted_paths.contains(&folder.path));
-                    }
-                    self.selected_incomplete = selected_path
-                        .and_then(|path| {
-                            self.incomplete_folders
-                                .iter()
-                                .position(|folder| folder.path == path)
-                        })
-                        .or_else(|| (!self.incomplete_folders.is_empty()).then_some(0));
-                    self.status = format!("Перемещено в Корзину Windows: {count} папок.");
-                    self.start_full_route_scan_preserving_incomplete();
-                }
-                Err(error) => {
-                    self.delete_feedback = Some(Err(error.clone()));
-                    self.delete_paths = None;
-                    self.status = error;
-                    self.start_full_route_scan_preserving_incomplete();
                 }
             }
         }

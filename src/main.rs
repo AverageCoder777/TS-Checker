@@ -12,7 +12,6 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tempfile::tempdir;
-use walkdir::WalkDir;
 use zip::ZipArchive;
 
 /// Сколько процессов Serz запускать по умолчанию.
@@ -80,7 +79,6 @@ struct ReferencedAsset {
 #[derive(Clone)]
 struct UmlautAsset {
     path: String,
-    uses: Vec<AssetUse>,
 }
 
 #[derive(Clone)]
@@ -260,8 +258,6 @@ struct AssetReplacementReport {
 struct UmlautRepairReport {
     changed_files: usize,
     changed_references: usize,
-    backups: Vec<PathBuf>,
-    files: Vec<PathBuf>,
     new_asset_path: String,
     log_file: Option<PathBuf>,
     log_error: Option<String>,
@@ -483,7 +479,6 @@ fn main() {
     let app_clone9 = app.clone();
     let app_clone10 = app.clone();
     let app_clone11 = app.clone();
-    let app_clone12 = app.clone();
     let app_clone13 = app.clone();
     let app_clone14 = app.clone();
     let app_clone15 = app.clone();
@@ -492,7 +487,6 @@ fn main() {
     let app_clone18 = app.clone();
     let app_clone19 = app.clone();
     let app_clone20 = app.clone();
-    let app_clone21 = app.clone();
     let mut last_count: usize = 0;
     let mut last_query = String::new();
     let app_clone7 = app.clone();
@@ -531,7 +525,6 @@ fn main() {
             }
         }
     });
-    let mut missing_window_shown = false;
     let editor_win = AssetEditorWindow::new().unwrap();
     let editor_handle = editor_win.as_weak();
     let editor_handle2 = editor_win.as_weak();
@@ -644,7 +637,6 @@ fn main() {
             }
         }
     });
-    let ui_handle3 = ui.as_weak();
     ui.on_start_check(move || {
         if let Ok(mut app) = app_clone3.lock() {
             app.start_check();
@@ -656,9 +648,6 @@ fn main() {
     let inv_handle3 = inventory_win.as_weak();
     let inv_handle4 = inventory_win.as_weak();
     let inv_handle5 = inventory_win.as_weak();
-    let inv_handle6 = inventory_win.as_weak();
-    let inv_handle7 = inventory_win.as_weak();
-    let inv_handle8 = inventory_win.as_weak();
     let inv_handle9 = inventory_win.as_weak();
     let inv_handle10 = inventory_win.as_weak();
     let settings_win = SettingsWindow::new().unwrap();
@@ -700,7 +689,6 @@ fn main() {
     let scenario_win = ScenarioWindow::new().unwrap();
     let scenario_handle = scenario_win.as_weak();
     let scenario_handle2 = scenario_win.as_weak();
-    let scenario_handle3 = scenario_win.as_weak();
     ui.on_scenario_selected(move |idx| {
         // load scenario data and show window
         if let Ok(mut app) = app_clone18.lock() {
@@ -743,7 +731,6 @@ fn main() {
                 app.scenario_consist_info = Some(info);
                 app.scenario_vehicle_files = Some(vf);
             }
-            let consist_info = app.scenario_consist_info.clone().unwrap_or_default();
             let vehicle_files = app.scenario_vehicle_files.clone().unwrap_or_default();
             // store for later consist selection: put into a temp via app fields? We'll store in scenario_vehicle_files (already).
             app.selected_scenario = Some(scen_idx);
@@ -815,7 +802,6 @@ fn main() {
             }
         }
     });
-    let ui_handle4 = ui.as_weak();
     ui.on_open_route_folder(move || {
         if let Ok(app) = app_clone4.lock() {
             if let Some(idx) = app.selected_route {
@@ -841,7 +827,7 @@ fn main() {
     inventory_win.on_sort_ascending(move |column| {
         if let Some(inv) = inv_handle3.upgrade() {
             let show_missing = inv.get_show_missing_only();
-            if let Ok(mut app) = app_clone8.lock() {
+            if let Ok(app) = app_clone8.lock() {
                 if let Ok(mut state) = app.asset_inventory_state.lock() {
                     match column {
                         0 => {
@@ -865,7 +851,7 @@ fn main() {
     inventory_win.on_sort_descending(move |column| {
         if let Some(inv) = inv_handle4.upgrade() {
             let show_missing = inv.get_show_missing_only();
-            if let Ok(mut app) = app_clone9.lock() {
+            if let Ok(app) = app_clone9.lock() {
                 if let Ok(mut state) = app.asset_inventory_state.lock() {
                     match column {
                         0 => {
@@ -889,7 +875,7 @@ fn main() {
     inventory_win.on_search_changed(move |text| {
         if let Some(inv) = inv_handle5.upgrade() {
             let show_missing = inv.get_show_missing_only();
-            if let Ok(mut app) = app_clone10.lock() {
+            if let Ok(app) = app_clone10.lock() {
                 if let Ok(mut state) = app.asset_inventory_state.lock() {
                     state.search = text.to_string();
                 }
@@ -985,7 +971,7 @@ fn main() {
 mod tests {
     use super::{
         check_route, decode_xml_text, extract_asset_references, extract_scenario_clues, fallback_serz_path,
-        inspect_route_folder, is_skipped_route_scan_directory, is_valid_game_path,
+        inspect_route_folder, is_skipped_route_scan_directory,
         parse_asset_launch_args, parse_route_name, preferred_serz_path, scan_routes,
         scan_routes_with_ignored, validate_serz_process, ScenarioClueCollection,
     };
@@ -997,18 +983,6 @@ mod tests {
     #[cfg(windows)]
     use std::path::Path;
     use std::path::PathBuf;
-
-    #[test]
-    fn validates_game_path_for_startup_scan() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(!is_valid_game_path(temp.path()));
-
-        fs::create_dir_all(temp.path().join("Content/Routes")).unwrap();
-        assert!(!is_valid_game_path(temp.path()));
-
-        fs::create_dir_all(temp.path().join("Assets")).unwrap();
-        assert!(is_valid_game_path(temp.path()));
-    }
 
     #[test]
     fn parses_asset_launch_arguments_without_starting_for_other_extensions() {
@@ -1517,35 +1491,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&setting_path).unwrap(), "1");
         assert!(super::write_serz_process_limit(&setting_path, 0).is_err());
         assert_eq!(super::read_serz_process_limit(&setting_path).unwrap(), 1);
-    }
-
-    #[test]
-    fn refuses_to_recycle_a_folder_outside_routes_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let routes_root = temp.path().join("Content/Routes");
-        let outside = temp.path().join("valuable-data");
-        fs::create_dir_all(&routes_root).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-
-        let error = super::move_folders_to_recycle_bin(
-            &routes_root,
-            std::slice::from_ref(&outside),
-        )
-        .unwrap_err();
-
-        assert!(error.contains("вне папки"));
-        assert!(outside.is_dir());
-    }
-
-    #[test]
-    fn invalidates_route_scan_cache_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let cache_path = temp.path().join("route_cache.json");
-        fs::write(&cache_path, b"stale").unwrap();
-
-        super::invalidate_route_scan_cache_at(&cache_path).unwrap();
-
-        assert!(!cache_path.exists());
     }
 
     #[test]

@@ -34,23 +34,7 @@ pub(crate) fn route_scan_cache_file() -> Option<PathBuf> {
     })
 }
 
-pub(crate) fn invalidate_route_scan_cache() -> Result<(), String> {
-    let Some(cache_path) = route_scan_cache_file() else {
-        return Ok(());
-    };
-    invalidate_route_scan_cache_at(&cache_path)
-}
 
-pub(crate) fn invalidate_route_scan_cache_at(cache_path: &Path) -> Result<(), String> {
-    match fs::remove_file(cache_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "Не удалось удалить файл кэша {}: {error}",
-            cache_path.display()
-        )),
-    }
-}
 
 pub(crate) fn read_route_folder_ids(routes_path: &Path) -> Result<Vec<String>, String> {
     let entries = fs::read_dir(routes_path)

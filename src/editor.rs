@@ -1,17 +1,6 @@
 //! XML editor for RailWorks binary assets.
 
 use super::*;
-use std::ops::Range;
-use std::sync::Arc;
-
-#[derive(Clone, Default)]
-pub(crate) struct XmlSyntax {}
-
-impl XmlSyntax {
-    pub(crate) fn for_text(_text: &str) -> Self {
-        Self::default()
-    }
-}
 
 pub(crate) fn validate_xml_document(xml: &str) -> Result<(), String> {
     for event in xml::reader::EventReader::new(xml.as_bytes()) {
@@ -24,22 +13,9 @@ pub(crate) fn validate_xml_document(xml: &str) -> Result<(), String> {
 pub(crate) struct EditorDocument {
     pub(crate) source_path: PathBuf,
     pub(crate) source: String,
-    pub(crate) xml: String,
     pub(crate) saved_xml: String,
-    pub(crate) find_query: String,
-    pub(crate) replace_text: String,
-    pub(crate) case_sensitive: bool,
-    pub(crate) match_index: usize,
-    pub(crate) match_selected: bool,
-    pub(crate) pending_selection: Option<(usize, usize)>,
-    pub(crate) search_error: Option<String>,
+    pub(crate) xml: String,
     pub(crate) xml_validation: Option<Result<(), String>>,
-    syntax: Arc<XmlSyntax>,
-    match_ranges: Vec<Range<usize>>,
-    match_query: String,
-    match_case_sensitive: bool,
-    match_revision: u64,
-    edit_revision: u64,
 }
 
 impl EditorDocument {
@@ -47,128 +23,10 @@ impl EditorDocument {
         self.xml != self.saved_xml
     }
 
-    pub(crate) fn refresh_matches(&mut self) -> Result<(), String> {
-        if self.match_revision == self.edit_revision
-            && self.match_query == self.find_query
-            && self.match_case_sensitive == self.case_sensitive
-        {
-            return self
-                .search_error
-                .as_ref()
-                .map_or(Ok(()), |error| Err(error.clone()));
-        }
-        match find_matches(&self.xml, &self.find_query, self.case_sensitive) {
-            Ok(matches) => {
-                self.match_ranges = matches;
-                self.search_error = None;
-            }
-            Err(error) => {
-                self.match_ranges.clear();
-                self.search_error = Some(error.clone());
-            }
-        }
-        self.match_query.clone_from(&self.find_query);
-        self.match_case_sensitive = self.case_sensitive;
-        self.match_revision = self.edit_revision;
-        self.match_index = 0;
-        self.match_selected = false;
-        self.search_error
-            .as_ref()
-            .map_or(Ok(()), |error| Err(error.clone()))
-    }
-
-    pub(crate) fn move_match(&mut self, forward: bool) {
-        if self.refresh_matches().is_err() {
-            return;
-        }
-        if self.match_ranges.is_empty() {
-            return;
-        }
-        self.match_index = if !self.match_selected && forward {
-            0
-        } else if !self.match_selected {
-            self.match_ranges.len() - 1
-        } else if forward {
-            (self.match_index + 1) % self.match_ranges.len()
-        } else if self.match_index == 0 {
-            self.match_ranges.len() - 1
-        } else {
-            self.match_index - 1
-        };
-        self.match_selected = true;
-        let range = &self.match_ranges[self.match_index];
-        self.pending_selection = Some((
-            self.xml[..range.start].chars().count(),
-            self.xml[..range.end].chars().count(),
-        ));
-    }
-
-    pub(crate) fn replace_current(&mut self) -> bool {
-        if self.refresh_matches().is_err() {
-            return false;
-        }
-        if !self.match_selected {
-            self.match_index = 0;
-        }
-        let Some(range) = self.match_ranges.get(self.match_index).cloned() else {
-            return false;
-        };
-        self.xml.replace_range(range.clone(), &self.replace_text);
-        self.note_text_edited();
-        if self.refresh_matches().is_err() {
-            return false;
-        }
-        let selection_start = self.xml[..range.start].chars().count();
-        self.pending_selection = Some((
-            selection_start,
-            selection_start + self.replace_text.chars().count(),
-        ));
-        self.match_selected = true;
-        true
-    }
-
-    pub(crate) fn replace_all(&mut self) -> usize {
-        if self.refresh_matches().is_err() {
-            return 0;
-        }
-        let ranges = self.match_ranges.clone();
-        for range in ranges.iter().rev() {
-            self.xml.replace_range(range.clone(), &self.replace_text);
-        }
-        if !ranges.is_empty() {
-            self.note_text_edited();
-            if self.refresh_matches().is_err() {
-                return 0;
-            }
-            self.match_index = 0;
-            self.match_selected = false;
-            self.pending_selection = None;
-        }
-        ranges.len()
-    }
-
-    pub(crate) fn match_count(&self) -> usize {
-        self.match_ranges.len()
-    }
-
-    pub(crate) fn note_text_edited(&mut self) {
-        self.edit_revision = self.edit_revision.wrapping_add(1);
-        self.xml_validation = None;
-        self.syntax = Arc::new(XmlSyntax::for_text(&self.xml));
-    }
-
     pub(crate) fn validate_xml(&mut self) -> bool {
         let result = validate_xml_document(&self.xml);
         self.xml_validation = Some(result.clone());
         result.is_ok()
-    }
-
-    pub(crate) fn matching_tag_ranges(&self, _cursor_char: usize) -> Option<(Range<usize>, Range<usize>)> {
-        None
-    }
-
-    pub(crate) fn syntax(&self) -> &XmlSyntax {
-        &self.syntax
     }
 }
 
@@ -176,27 +34,6 @@ pub(crate) fn is_viewable_asset_name(name: &str) -> bool {
     Path::new(name).extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("geopcdx")
     })
-}
-
-fn find_matches(
-    text: &str,
-    query: &str,
-    case_sensitive: bool,
-) -> Result<Vec<Range<usize>>, String> {
-    if query.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut builder = regex::RegexBuilder::new(&regex::escape(query));
-    builder.case_insensitive(!case_sensitive);
-    builder
-        .build()
-        .map(|regex| {
-            regex
-                .find_iter(text)
-                .map(|matched| matched.range())
-                .collect()
-        })
-        .map_err(|error| format!("Не удалось выполнить поиск: {error}"))
 }
 
 pub(crate) fn load_asset_as_xml(
@@ -224,26 +61,12 @@ pub(crate) fn load_asset_as_xml(
     conversion?;
     let xml = fs::read_to_string(&xml_path)
         .map_err(|error| format!("Не удалось прочитать XML {}: {error}", xml_path.display()))?;
-    let syntax = XmlSyntax::for_text(&xml);
     Ok(EditorDocument {
         source_path: source_path.to_path_buf(),
         source: source_path.display().to_string(),
         saved_xml: xml.clone(),
         xml,
-        find_query: String::new(),
-        replace_text: String::new(),
-        case_sensitive: false,
-        match_index: 0,
-        match_selected: false,
-        pending_selection: None,
-        search_error: None,
         xml_validation: None,
-        syntax: Arc::new(syntax),
-        match_ranges: Vec::new(),
-        match_query: String::new(),
-        match_case_sensitive: false,
-        match_revision: 0,
-        edit_revision: 0,
     })
 }
 
@@ -340,8 +163,8 @@ pub(crate) fn next_backup_path(source_path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_matches, install_converted_asset, is_viewable_asset_name, next_backup_path,
-        validate_xml_document, EditorDocument, XmlSyntax,
+        install_converted_asset, is_viewable_asset_name, next_backup_path,
+        validate_xml_document, EditorDocument,
     };
     use std::path::Path;
     use std::sync::Arc;
@@ -358,13 +181,6 @@ mod tests {
         assert!(!is_viewable_asset_name("sample.ap"));
         assert!(!is_viewable_asset_name("sample.xml"));
         assert!(!is_viewable_asset_name("sample"));
-    }
-
-    #[test]
-    fn finds_matches_with_case_option() {
-        assert_eq!(find_matches("Tree tree", "tree", false).unwrap().len(), 2);
-        assert_eq!(find_matches("Tree tree", "tree", true).unwrap().len(), 1);
-        assert!(find_matches("anything", "", false).unwrap().is_empty());
     }
 
     #[test]
@@ -401,36 +217,6 @@ mod tests {
 
         assert!(install_converted_asset(&source, &missing_converted).is_err());
         assert_eq!(std::fs::read(source).unwrap(), b"original");
-    }
-
-    #[test]
-    fn replaces_current_match_and_all_remaining_matches() {
-        let mut document = EditorDocument {
-            source_path: Path::new("source.bin").to_path_buf(),
-            source: "source.bin".to_owned(),
-            xml: "cat CAT cat".to_owned(),
-            saved_xml: "cat CAT cat".to_owned(),
-            find_query: "cat".to_owned(),
-            replace_text: "dog".to_owned(),
-            case_sensitive: false,
-            match_index: 0,
-            match_selected: false,
-            pending_selection: None,
-            search_error: None,
-            xml_validation: None,
-            syntax: Arc::new(XmlSyntax::for_text("cat CAT cat")),
-            match_ranges: Vec::new(),
-            match_query: String::new(),
-            match_case_sensitive: false,
-            match_revision: 0,
-            edit_revision: 0,
-        };
-        assert!(document.replace_current());
-        assert_eq!(document.xml, "dog CAT cat");
-        assert_eq!(document.replace_all(), 2);
-        assert_eq!(document.xml, "dog dog dog");
-        assert!(document.matching_tag_ranges(2).is_none());
-        assert_eq!(document.xml_validation, None);
     }
 
     #[test]

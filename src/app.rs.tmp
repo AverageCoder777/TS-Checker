@@ -7,7 +7,6 @@ use std::path::Path;
 enum CheckMessage {
     Progress(String),
     Finished(Result<CheckResult, String>),
-}
 
 pub(crate) enum InventoryAction {
     ScanUmlauts,
@@ -15,7 +14,6 @@ pub(crate) enum InventoryAction {
         asset: UmlautAsset,
         fixes: CharacterFixes,
     },
-}
 
 #[derive(Default)]
 pub(crate) struct AssetInventoryWindowState {
@@ -32,18 +30,17 @@ pub(crate) struct AssetInventoryWindowState {
     /// Замены символов, предложенные пользователем.
     character_fixes: CharacterFixes,
     pub(crate) sort: InventorySort,
-}
 
-pub(crate) fn decode_route_icon(path: &Path) -> image::ImageResult<image::DynamicImage> {
-    let reader = image::ImageReader::open(path).map_err(image::ImageError::IoError)?;
-    let reader = reader.with_guessed_format().map_err(image::ImageError::IoError)?;
-    reader.decode()
-}
 
+pub(crate) fn route_panel_widths(
     available_width: f32,
+    panel_gap: f32,
     route_content_width: f32,
 ) -> (f32, f32) {
-}
+    let usable_width = (available_width - panel_gap).max(0.0);
+    let routes_width = route_content_width.min(usable_width * 2.0 / 3.0);
+    let check_width = (usable_width - routes_width).max(0.0);
+    (routes_width, check_width)
 
 /// Строка таблицы инвентаря: путь ассета, список использований, признак отсутствия
 /// на диске и ассет с умляутами, если его нужно починить.
@@ -114,7 +111,6 @@ pub(crate) struct CheckerApp {
     inventory_scan: Option<Receiver<Result<InventoryScanOutcome, String>>>,
     pub(crate) missing_assets_popup: Option<Vec<String>>,
     pub(crate) missing_assets_shown: bool,
-}
 
 impl Default for CheckerApp {
     fn default() -> Self {
@@ -196,7 +192,6 @@ impl Default for CheckerApp {
             missing_assets_shown: false,
         }
     }
-}
 
 impl CheckerApp {
     pub(crate) fn open_asset_inventory(&mut self) {
@@ -1083,4 +1078,3 @@ let check_message = self.check.as_ref().and_then(|rx| match rx.try_recv() {
             }
         }
     }
-}

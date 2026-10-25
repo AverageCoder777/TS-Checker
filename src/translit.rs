@@ -260,57 +260,9 @@ pub(crate) fn transliterate_text(value: &str, fixes: &CharacterFixes) -> String 
     result
 }
 
-/// Латинские буквы, на которые похожи кириллические и греческие.
-///
-/// Такие буквы в именах файлов выглядят как обычные, но игра их не грузит.
-const LOOKALIKE_CHARACTERS: [(char, char); 16] = [
-    ('а', 'a'),
-    ('е', 'e'),
-    ('о', 'o'),
-    ('р', 'p'),
-    ('с', 'c'),
-    ('у', 'y'),
-    ('х', 'x'),
-    ('А', 'A'),
-    ('В', 'B'),
-    ('Е', 'E'),
-    ('К', 'K'),
-    ('М', 'M'),
-    ('Н', 'H'),
-    ('О', 'O'),
-    ('Р', 'P'),
-    ('С', 'C'),
-];
 
-/// Замена символа по умолчанию: для испорченных это «ss», для остальных —
-/// перевод по правилам или похожая латинская буква.
-pub(crate) fn default_replacement(character: char) -> String {
-    if BROKEN_CHARACTERS.contains(&character) {
-        return "ss".to_owned();
-    }
-    if let Some((_, lookalike)) = LOOKALIKE_CHARACTERS
-        .iter()
-        .find(|(from, _)| *from == character)
-    {
-        return lookalike.to_string();
-    }
-    transliterate_text(&character.to_string(), &CharacterFixes::new())
-}
 
-/// Как описать символ в интерфейсе.
-pub(crate) fn describe_character(character: char) -> &'static str {
-    if BROKEN_CHARACTERS.contains(&character) {
-        return "испорченный символ";
-    }
-    let code = character as u32;
-    if (0x0400..=0x04FF).contains(&code) {
-        return "кириллическая буква";
-    }
-    if (0x0370..=0x03FF).contains(&code) {
-        return "греческая буква";
-    }
-    "нестандартный символ"
-}
+
 
 /// Сколько испорченных символов в ссылке ещё разбираются.
 pub(crate) const MAX_BROKEN_CHARACTERS: usize = 3;

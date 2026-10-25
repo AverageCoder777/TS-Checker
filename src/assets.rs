@@ -821,20 +821,6 @@ fn resolve_reference_path(
     None
 }
 
-/// Определяет тип ассета по его содержимому.
-///
-/// По имени папки тип определить не всегда можно: ассеты одного вида лежат в
-/// разных папках, например scenery-объекты в продукте `ice`.
-pub(crate) fn asset_kind_from_xml(xml: &str) -> AssetKind {
-    if xml.contains("SceneryRenderBlueprint") || xml.contains("SceneryObject") {
-        return AssetKind::Scenery;
-    }
-    if xml.contains("AbsoluteBlueprintID") || xml.contains("BlueprintSetID") {
-        return AssetKind::Loft;
-    }
-    AssetKind::Other
-}
-
 /// Результат проверки цепочки ассета на сломанные символы.
 pub(crate) struct UmlautChainEvidence {
     /// Обнаружения: что и где нашлось.
@@ -932,7 +918,6 @@ fn asset_chain_umlaut_evidence(
 
 pub(crate) fn inspect_umlaut_asset(
     relative_asset: &str,
-    uses: &[AssetUse],
     assets_path: &Path,
     serz_path: &Path,
 ) -> (Option<UmlautAsset>, Option<String>) {
@@ -986,7 +971,6 @@ pub(crate) fn inspect_umlaut_asset(
         && (!evidence.is_empty() || !unsupported.is_empty()))
     .then(|| UmlautAsset {
         path: relative_asset.to_owned(),
-        uses: uses.to_vec(),
     });
     (asset, scan_error)
 }
@@ -1009,7 +993,7 @@ pub(crate) fn scan_umlaut_assets(
     let scan: Vec<_> = pool.install(|| {
         inventory
             .par_iter()
-            .map(|asset| inspect_umlaut_asset(&asset.path, &asset.uses, assets_path, serz_path))
+            .map(|asset| inspect_umlaut_asset(&asset.path, assets_path, serz_path))
             .collect()
     });
     let mut umlaut_assets = Vec::new();
@@ -2579,14 +2563,6 @@ pub(crate) fn repair_umlaut_asset_chain(
     Ok(UmlautRepairReport {
         changed_files: committed.len(),
         changed_references,
-        files: committed
-            .iter()
-            .flat_map(|(source, target, _)| [source.clone(), target.clone()])
-            .collect(),
-        backups: committed
-            .into_iter()
-            .filter_map(|(_, _, backup)| backup)
-            .collect(),
         new_asset_path: new_relative_asset,
         log_file: None,
         log_error: None,
@@ -3075,24 +3051,6 @@ mod tests {
         assert_eq!(super::default_replacement('\u{0441}'), "c");
         assert_eq!(super::default_replacement('\u{FFDF}'), "ss");
         assert_eq!(super::describe_character('\u{0441}'), "кириллическая буква");
-    }
-
-    /// Тип ассета определяется по содержимому, а не по имени папки.
-    #[test]
-    fn detects_asset_kind_by_content() {
-        assert_eq!(
-            super::asset_kind_from_xml(
-                "<SceneryRenderBlueprint><BlueprintSetID>x</BlueprintSetID></SceneryRenderBlueprint>"
-            ),
-            AssetKind::Scenery
-        );
-        assert_eq!(
-            super::asset_kind_from_xml(
-                "<RenderBlueprint><BlueprintSetID>x</BlueprintSetID></RenderBlueprint>"
-            ),
-            AssetKind::Loft
-        );
-        assert_eq!(super::asset_kind_from_xml("<Vehicle/>"), AssetKind::Other);
     }
 
     /// Ассет с кириллической буквой вместо латинской находится по сходству имени.

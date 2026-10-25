@@ -11,8 +11,6 @@ use crate::translit::decode_xml_text;
 /// Сценарий маршрута: папка и данные из её файлов.
 #[derive(Clone, Default)]
 pub(crate) struct RouteScenario {
-    /// Идентификатор папки сценария.
-    pub(crate) id: String,
     /// Папка сценария.
     pub(crate) path: PathBuf,
     /// Название сценария.
@@ -174,7 +172,6 @@ pub(crate) fn read_route_scenarios(
             .to_string_lossy()
             .into_owned();
         let mut scenario = RouteScenario {
-            id: id.clone(),
             path: path.clone(),
             ..RouteScenario::default()
         };
@@ -385,8 +382,7 @@ mod tests {
             for scenario in &scenarios {
                 let consists = load_consists(&scenario.path, &serz);
                 eprintln!(
-                    "SCENARIO {:?} имя={:?} дата={:?} автор={:?} сезон={:?} составов={}",
-                    scenario.id,
+                    "SCENARIO имя={:?} дата={:?} автор={:?} сезон={:?} составов={}",
                     scenario.name,
                     scenario.date,
                     scenario.author,
