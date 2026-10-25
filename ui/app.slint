@@ -277,11 +277,15 @@ export component MissingAssetsWindow inherits Window {
 
 export component SettingsWindow inherits Window {
     title: "Настройки";
-    min-width: 500px;
-    min-height: 200px;
+    min-width: 400px;
+    min-height: 130px;
 
     in-out property <float> serz-process-limit: 8;
     in-out property <string> locoswap-path: "";
+    max-height: 130px;
+    max-width: 400px;
+    preferred-height: 130px;
+    preferred-width: 400px;
     in-out property <bool> route-thumbnails-enabled: true;
 
     callback save-settings();
@@ -289,27 +293,53 @@ export component SettingsWindow inherits Window {
 
     VerticalBox {
         HorizontalBox {
-            Text { horizontal-alignment: TextHorizontalAlignment.center;
+            alignment: LayoutAlignment.start;
+            cross-axis-alignment: CrossAxisAlignment.center;
+            padding: 0px;
+            Text { horizontal-alignment: TextHorizontalAlignment.start;
+                min-width: 0px;
                 overflow: TextOverflow.elide;
                 text: "Используется потоков процессора:";
                 vertical-alignment: TextVerticalAlignment.center; }
             Slider {
                 value <=> serz-process-limit;
+                min-width: 170px;
                 minimum: 1;
+                orientation: Orientation.horizontal;
+                accessible-role: AccessibleRole.slider;
                 maximum: 16;
             }
         }
         HorizontalBox {
             alignment: LayoutAlignment.stretch;
-            Text { text: "Путь к LocoSwap:"; }
-            LineEdit { text <=> locoswap-path; }
-            Button { text: "Обзор..."; clicked => { pick-locoswap(); } }
+            cross-axis-alignment: CrossAxisAlignment.center;
+            min-height: 20px;
+            padding: 0px;
+            spacing: 8px;
+            Text { horizontal-alignment: TextHorizontalAlignment.start;
+                line-height-factor: 0;
+                min-height: 20px;
+                overflow: TextOverflow.elide;
+                text: "Путь к LocoSwap:";
+                vertical-alignment: TextVerticalAlignment.center;
+                wrap: TextWrap.word-wrap; }
+            LineEdit {
+                font-family: "";
+                font-italic: false;
+                font-size: 0px;
+                horizontal-alignment: TextHorizontalAlignment.left;
+                min-height: 20px; text <=> locoswap-path; }
+            Button { icon-size: 15px;
+                min-height: 20px;
+                text: "Обзор..."; clicked => { pick-locoswap(); } }
         }
         CheckBox {
+            min-height: 20px;
             text: "Миниатюры маршрутов";
             checked <=> route-thumbnails-enabled;
         }
         Button {
+            min-height: 20px;
             text: "Сохранить";
             clicked => { save-settings(); }
         }
