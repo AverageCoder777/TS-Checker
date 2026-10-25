@@ -4,222 +4,13 @@ use super::*;
 use std::ops::Range;
 use std::sync::Arc;
 
-#[derive(Clone, Copy)]
-enum XmlTokenKind {
-    Delimiter,
-    Name,
-    Attribute,
-    Comment,
-}
-
-fn find_declaration_end(bytes: &[u8], start: usize) -> usize {
-    let mut quote = None;
-    let mut subset_depth = 0_u32;
-    let mut index = start;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(active_quote) = quote {
-            if byte == active_quote {
-                quote = None;
-            }
-        } else {
-            match byte {
-                b'\'' | b'"' => quote = Some(byte),
-                b'[' => subset_depth += 1,
-                b']' => subset_depth = subset_depth.saturating_sub(1),
-                b'>' if subset_depth == 0 => return index + 1,
-                _ => {}
-            }
-        }
-        index += 1;
-    }
-    bytes.len()
-}
-
-#[derive(Clone)]
-struct XmlToken {
-    range: Range<usize>,
-    kind: XmlTokenKind,
-}
-
 #[derive(Clone, Default)]
-pub(crate) struct XmlSyntax {
-    tokens: Vec<XmlToken>,
-    matching_tags: Vec<(Range<usize>, Range<usize>)>,
-}
+pub(crate) struct XmlSyntax {}
 
 impl XmlSyntax {
-    fn for_text(text: &str) -> Self {
-        let bytes = text.as_bytes();
-        let mut syntax = Self::default();
-        let mut stack: Vec<(String, Range<usize>)> = Vec::new();
-        let mut index = 0;
-
-        while index < bytes.len() {
-            if bytes[index] != b'<' {
-                index += 1;
-                continue;
-            }
-            if bytes[index..].starts_with(b"<!--") {
-                let end = find_sequence(bytes, index + 4, b"-->").unwrap_or(bytes.len());
-                let range_end = (end + 3).min(bytes.len());
-                syntax.tokens.push(XmlToken {
-                    range: index..range_end,
-                    kind: XmlTokenKind::Comment,
-                });
-                index = range_end;
-                continue;
-            }
-            if bytes[index..].starts_with(b"<![CDATA[") {
-                let end = find_sequence(bytes, index + 9, b"]]>").unwrap_or(bytes.len());
-                let range_end = (end + 3).min(bytes.len());
-                syntax.tokens.push(XmlToken {
-                    range: index..range_end,
-                    kind: XmlTokenKind::Comment,
-                });
-                index = range_end;
-                continue;
-            }
-            if bytes[index..].starts_with(b"<?") {
-                let end = find_sequence(bytes, index + 2, b"?>").unwrap_or(bytes.len());
-                let range_end = (end + 2).min(bytes.len());
-                syntax.tokens.push(XmlToken {
-                    range: index..range_end,
-                    kind: XmlTokenKind::Comment,
-                });
-                index = range_end;
-                continue;
-            }
-            if bytes[index..].starts_with(b"<!") {
-                let end = find_declaration_end(bytes, index + 2);
-                syntax.tokens.push(XmlToken {
-                    range: index..end,
-                    kind: XmlTokenKind::Comment,
-                });
-                index = end;
-                continue;
-            }
-
-            let closing = bytes.get(index + 1) == Some(&b'/');
-            let name_start = index + if closing { 2 } else { 1 };
-            let mut name_end = name_start;
-            while name_end < bytes.len()
-                && !bytes[name_end].is_ascii_whitespace()
-                && !matches!(bytes[name_end], b'/' | b'>')
-            {
-                name_end += 1;
-            }
-            if name_end == name_start {
-                index += 1;
-                continue;
-            }
-            let tag_end = find_markup_end(bytes, name_end);
-            syntax.tokens.push(XmlToken {
-                range: index..name_start,
-                kind: XmlTokenKind::Delimiter,
-            });
-            syntax.tokens.push(XmlToken {
-                range: name_start..name_end,
-                kind: XmlTokenKind::Name,
-            });
-            let mut rest = name_end;
-            while rest < tag_end {
-                let quote = bytes[rest..tag_end]
-                    .iter()
-                    .position(|byte| matches!(byte, b'\'' | b'"'))
-                    .map(|offset| rest + offset);
-                let Some(quote_start) = quote else {
-                    syntax.tokens.push(XmlToken {
-                        range: rest..tag_end,
-                        kind: XmlTokenKind::Delimiter,
-                    });
-                    break;
-                };
-                if rest < quote_start {
-                    syntax.tokens.push(XmlToken {
-                        range: rest..quote_start,
-                        kind: XmlTokenKind::Delimiter,
-                    });
-                }
-                let quote_byte = bytes[quote_start];
-                let quote_end = bytes[quote_start + 1..tag_end]
-                    .iter()
-                    .position(|byte| *byte == quote_byte)
-                    .map(|offset| quote_start + 2 + offset)
-                    .unwrap_or(tag_end);
-                syntax.tokens.push(XmlToken {
-                    range: quote_start..quote_end,
-                    kind: XmlTokenKind::Attribute,
-                });
-                rest = quote_end;
-            }
-            let self_closing = bytes[..tag_end.saturating_sub(1)]
-                .iter()
-                .rposition(|byte| !byte.is_ascii_whitespace())
-                .is_some_and(|last| bytes[last] == b'/');
-            let tag_name = text[name_start..name_end].to_owned();
-            let is_closing = closing;
-            if is_closing {
-                if stack.last().is_some_and(|(name, _)| name == &tag_name) {
-                    if let Some((_, opening_range)) = stack.pop() {
-                        syntax
-                            .matching_tags
-                            .push((opening_range, name_start..name_end));
-                    }
-                }
-            } else if !self_closing {
-                stack.push((tag_name, name_start..name_end));
-            }
-            index = tag_end.max(index + 1);
-        }
-        syntax.matching_tags.sort_by_key(|(open, _)| open.start);
-        syntax
+    pub(crate) fn for_text(_text: &str) -> Self {
+        Self::default()
     }
-
-    fn pair_at(&self, text: &str, cursor_char: usize) -> Option<(Range<usize>, Range<usize>)> {
-        let cursor_byte = text
-            .char_indices()
-            .nth(cursor_char)
-            .map_or(text.len(), |(byte, _)| byte);
-        self.matching_tags
-            .iter()
-            .find(|(open, close)| {
-                range_contains_cursor(open, cursor_byte)
-                    || range_contains_cursor(close, cursor_byte)
-            })
-            .cloned()
-    }
-}
-
-fn range_contains_cursor(range: &Range<usize>, cursor: usize) -> bool {
-    range.start <= cursor && cursor <= range.end
-}
-
-fn find_sequence(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
-    bytes
-        .get(start..)?
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|offset| start + offset)
-}
-
-fn find_markup_end(bytes: &[u8], start: usize) -> usize {
-    let mut quote = None;
-    let mut index = start;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(active_quote) = quote {
-            if byte == active_quote {
-                quote = None;
-            }
-        } else if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-        } else if byte == b'>' {
-            return index + 1;
-        }
-        index += 1;
-    }
-    bytes.len()
 }
 
 pub(crate) fn validate_xml_document(xml: &str) -> Result<(), String> {
@@ -372,11 +163,8 @@ impl EditorDocument {
         result.is_ok()
     }
 
-    pub(crate) fn matching_tag_ranges(
-        &self,
-        cursor_char: usize,
-    ) -> Option<(Range<usize>, Range<usize>)> {
-        self.syntax.pair_at(&self.xml, cursor_char)
+    pub(crate) fn matching_tag_ranges(&self, _cursor_char: usize) -> Option<(Range<usize>, Range<usize>)> {
+        None
     }
 
     pub(crate) fn syntax(&self) -> &XmlSyntax {
@@ -641,7 +429,7 @@ mod tests {
         assert_eq!(document.xml, "dog CAT cat");
         assert_eq!(document.replace_all(), 2);
         assert_eq!(document.xml, "dog dog dog");
-        assert!(document.syntax.pair_at(&document.xml, 2).is_none());
+        assert!(document.matching_tag_ranges(2).is_none());
         assert_eq!(document.xml_validation, None);
     }
 
@@ -654,13 +442,5 @@ mod tests {
         assert!(error.contains("Некорректный XML"));
     }
 
-    #[test]
-    fn matches_nested_xml_tag_names_and_ignores_markup_in_comments_and_attributes() {
-        let xml = r#"<root note="<fake>"><node><!-- <ignored> --></node></root>"#;
-        let syntax = XmlSyntax::for_text(xml);
-        let node_name = xml.find("node").unwrap();
-        let (opening, closing) = syntax.pair_at(xml, node_name + 1).unwrap();
-        assert_eq!(&xml[opening], "node");
-        assert_eq!(&xml[closing], "node");
-    }
+    
 }

@@ -1,4 +1,4 @@
-//! Windows shell integrations such as Explorer and the Recycle Bin.
+﻿//! Windows shell integrations such as Explorer and the Recycle Bin.
 
 use super::*;
 

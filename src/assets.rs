@@ -2,6 +2,7 @@
 
 use super::*;
 use std::collections::{HashMap, HashSet};
+use walkdir::WalkDir;
 
 pub(crate) fn is_skipped_route_scan_directory(name: &str, ignore_scenarios: bool) -> bool {
     ignore_scenarios && name.eq_ignore_ascii_case("Scenarios")
@@ -214,7 +215,6 @@ pub(crate) fn fallback_serz_path(serz_path: &Path) -> Option<PathBuf> {
 }
 
 struct FileAnalysis {
-    converted_bin: bool,
     /// Разбор взят из кэша: файл не менялся с прошлой проверки.
     from_cache: bool,
     file: RouteFile,
@@ -841,11 +841,7 @@ pub(crate) struct UmlautChainEvidence {
     pub(crate) evidence: Vec<String>,
     /// Символы, которые игра не умеет загружать.
     pub(crate) unsupported: std::collections::BTreeSet<char>,
-    /// Тип ассета по его содержимому.
-    pub(crate) kind: AssetKind,
-    /// Есть ли в ассете символы, которые нужно переводить.
-    pub(crate) has_umlauts: bool,
-}
+    }
 
 fn asset_chain_umlaut_evidence(
     assets_path: &Path,
@@ -873,8 +869,6 @@ fn asset_chain_umlaut_evidence(
     let mut visited = HashSet::new();
     let mut evidence = Vec::new();
     let mut unsupported = std::collections::BTreeSet::new();
-    let mut kind = AssetKind::Other;
-    let mut has_umlauts_found = false;
 
     while let Some(asset_path) = queue.pop() {
         let canonical = match asset_path.canonicalize() {
@@ -898,11 +892,7 @@ fn asset_chain_umlaut_evidence(
             continue;
         }
         let xml = read_serz_xml(serz_path, &canonical)?;
-        if kind == AssetKind::Other {
-            kind = asset_kind_from_xml(&xml);
-        }
         if has_umlauts_in_xml(&xml) {
-            has_umlauts_found = true;
             evidence.push(format!("Внутри файла: {}", canonical.display()));
         }
         for (reference, _) in referenced_geometry_paths(&xml) {
@@ -937,8 +927,6 @@ fn asset_chain_umlaut_evidence(
     Ok(UmlautChainEvidence {
         evidence,
         unsupported,
-        kind,
-        has_umlauts: has_umlauts_found,
     })
 }
 
@@ -1051,7 +1039,7 @@ fn analyze_route_file(
         Ok(path) => path,
         Err(error) => {
             return FileAnalysis {
-                converted_bin: false,
+
                 from_cache: false,
                 file: route_file.clone(),
                 uses: Vec::new(),
@@ -1068,7 +1056,7 @@ fn analyze_route_file(
         // конвертируются: на больших маршрутах это основная часть работы.
         if !may_contain_asset_reference(&file_path) {
             return FileAnalysis {
-                converted_bin: false,
+
                 from_cache: false,
                 file: route_file.clone(),
                 uses: Vec::new(),
@@ -1091,7 +1079,7 @@ fn analyze_route_file(
         );
         if let Err(error) = conversion_result {
             return FileAnalysis {
-                converted_bin: false,
+
                 from_cache: false,
                 file: route_file.clone(),
                 uses: Vec::new(),
@@ -1102,7 +1090,7 @@ fn analyze_route_file(
             Ok(data) => data,
             Err(error) => {
                 return FileAnalysis {
-                    converted_bin: true,
+
                         from_cache: false,
                     file: route_file.clone(),
                     uses: Vec::new(),
@@ -1119,7 +1107,7 @@ fn analyze_route_file(
             Ok(data) => data,
             Err(error) => {
                 return FileAnalysis {
-                    converted_bin: false,
+
                         from_cache: false,
                     file: route_file.clone(),
                     uses: Vec::new(),
@@ -1140,7 +1128,7 @@ fn analyze_route_file(
     let references = extract_asset_references_with_locations(&xml_text);
 
     FileAnalysis {
-        converted_bin: is_binary,
+
 
         from_cache: false,
         file: route_file.clone(),
@@ -1332,7 +1320,7 @@ pub(crate) fn check_route(
                     if let (Some(name), Some(stamp)) = (&name, stamp) {
                         if let Some(cached) = cache.get(name, stamp) {
                             return FileAnalysis {
-                                converted_bin: false,
+
                                 from_cache: true,
                                 file: route_file.clone(),
                                 uses: cached.uses.clone(),

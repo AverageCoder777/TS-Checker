@@ -1,4 +1,4 @@
-//! Persistent user settings, game path, and ignored-route list.
+﻿//! Persistent user settings, game path, and ignored-route list.
 
 use super::*;
 use std::collections::HashSet;
