@@ -35,6 +35,8 @@ pub(crate) struct RouteScenario {
     pub(crate) author: String,
     /// Сезон.
     pub(crate) season: String,
+    /// Погода (блюпринт/имя).
+    pub(crate) weather: String,
     /// Длительность в минутах.
     pub(crate) duration: String,
     /// Время начала суток.
@@ -264,6 +266,24 @@ pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<
                 "SEASON_WINTER" => "Winter".to_owned(),
                 other => other.to_owned(),
             };
+            scenario.weather = element_text(&xml, "WeatherBlueprint");
+            if scenario.weather.is_empty() {
+                scenario.weather = element_text(&xml, "Weather");
+            }
+            if scenario.weather.is_empty() {
+                if let Some(start) = xml.find("<WeatherBlueprint") {
+                    let rest = &xml[start..];
+                    let tag_end = rest.find('>').unwrap_or(rest.len());
+                    let end = rest.find("</WeatherBlueprint>").unwrap_or(rest.len());
+                    let block = &rest[tag_end + 1..end];
+                    let bp = element_text(block, "BlueprintID");
+                    scenario.weather = if bp.is_empty() {
+                        block.trim().to_owned()
+                    } else {
+                        bp
+                    };
+                }
+            }
             scenario.duration = element_text(&xml, "DurationMins");
             scenario.start_time = scenario_start_time(&xml);
             scenario.state = element_text(&xml, "StateName");
@@ -444,7 +464,66 @@ fn scenario_start_time(xml: &str) -> String {
     format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
 }
 
-/// Дата сценария из года, месяца и дня.
+/// Преобразует блюпринт погоды в читаемое имя.
+pub(crate) fn weather_display_name(
+    rw_path: &Path,
+    route_path: &Path,
+    serz_path: &Path,
+    blueprint: &str,
+) -> String {
+    let blueprint = blueprint.trim();
+    if blueprint.is_empty() {
+        return String::new();
+    }
+    let resolved = crate::blueprint::resolve_blueprint_file_cached_free(rw_path, route_path, blueprint, "", "");
+    if let Some(path) = resolved {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let xml = if ext == "bin" {
+            crate::assets::read_serz_xml(serz_path, &path).ok()
+        } else {
+            fs::read_to_string(&path).ok()
+        };
+        if let Some(xml) = xml {
+            let mut name = element_text(&xml, "LocalisedDisplayName");
+            if name.is_empty() {
+                name = element_text(&xml, "Name");
+            }
+            // Если блюпринт обёрнут в cWeatherBlueprint, ищем внутри блока.
+            if name.is_empty() {
+                if let Some(start) = xml.find("<cWeatherBlueprint") {
+                    let rest = &xml[start..];
+                    let tag_end = rest.find('>').unwrap_or(rest.len());
+                    let end = rest.find("</cWeatherBlueprint>").unwrap_or(rest.len());
+                    let block = &rest[tag_end + 1..end];
+                    name = element_text(block, "LocalisedDisplayName");
+                    if name.is_empty() {
+                        name = element_text(block, "Name");
+                    }
+                    if name.is_empty() {
+                        name = block.trim().to_owned();
+                    }
+                }
+            }
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        if ext == "ap" {
+            // Пытаемся прочитать архив как zip и найти xml с именем.
+            // Минимально: возвращаем имя файла архива без расширения.
+        }
+    }
+    let normalized = blueprint.replace('/', "\\");
+    let path = Path::new(&normalized);
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| blueprint.to_owned())
+}
 fn scenario_date(xml: &str) -> String {
     let day: u32 = element_text(xml, "StartDD").parse().unwrap_or(0);
     let month: u32 = element_text(xml, "StartMM").parse().unwrap_or(0);

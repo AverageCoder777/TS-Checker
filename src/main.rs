@@ -830,7 +830,17 @@ fn main() {
             let consist_names: Vec<slint::SharedString> = scenario
                 .consists
                 .as_ref()
-                .map(|c| c.iter().map(|x| x.name.clone().into()).collect())
+                .map(|c| {
+                    c.iter()
+                        .map(|x| {
+                            if x.is_player {
+                                format!("[Игрок] {}", x.name).into()
+                            } else {
+                                x.name.clone().into()
+                            }
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             // check vehicle files for all consists (cache once)
             if app.scenario_consist_info.is_none()
@@ -876,6 +886,24 @@ fn main() {
             // populate window
             if let Some(sw) = scenario_handle.upgrade() {
                 sw.set_scenario_name(scenario.name.clone().into());
+                sw.set_scenario_title(format!("Сценарий: {}", if scenario.name.trim().is_empty() { "Без названия" } else { scenario.name.as_str() }).into());
+                let fallback = |value: &str| -> String {
+                    if value.trim().is_empty() {
+                        "Не указано".to_owned()
+                    } else {
+                        value.to_owned()
+                    }
+                };
+                let weather_name = crate::scenario::weather_display_name(
+                    std::path::Path::new(rw_path.trim()),
+                    std::path::Path::new(&route_path),
+                    &crate::assets::preferred_serz_path(std::path::Path::new(rw_path.trim())),
+                    &scenario.weather,
+                );
+                sw.set_scenario_author(fallback(&scenario.author).into());
+                sw.set_scenario_season(fallback(&scenario.season).into());
+                sw.set_scenario_start_time(fallback(&scenario.start_time).into());
+                sw.set_scenario_weather(fallback(&weather_name).into());
                 let consist_missing: Vec<bool> = app
                     .scenario_consist_info
                     .as_ref()

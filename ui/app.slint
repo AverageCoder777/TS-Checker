@@ -38,6 +38,8 @@ export component MainWindow inherits Window {
             text <=> search-query;
         }
         ListView {
+            min-height: 150px;
+            preferred-height: 150px;
             for item[i] in route-items: Rectangle {
                 background: i == selected-route ? #3a3a3a : transparent;
                 TouchArea {
@@ -202,11 +204,16 @@ export component IncompleteFoldersWindow inherits Window {
 }
 
 export component ScenarioWindow inherits Window {
-    title: "Сценарий";
+    title: scenario-title;
     min-width: 900px;
     min-height: 560px;
 
+    in property <string> scenario-title: "";
     in property <string> scenario-name: "";
+    in property <string> scenario-author: "";
+    in property <string> scenario-season: "";
+    in property <string> scenario-start-time: "";
+    in property <string> scenario-weather: "";
     in property <[string]> consist-names: [];
     in property <[bool]> consist-missing: [];
     in property <[string]> vehicle-names: [];
@@ -220,39 +227,68 @@ export component ScenarioWindow inherits Window {
     callback open-vehicle-path(int);
 
     VerticalBox {
-        Text { text: scenario-name; font-size: 16px; }
+        VerticalBox {
+            HorizontalBox {
+                alignment: LayoutAlignment.start;
+                preferred-width: 10px;
+                width: 0px;
+                Text { text: "Начало:"; font-size: 14px; }
+                Text { text: scenario-start-time; font-size: 14px; }
+            }
+            HorizontalBox {
+                alignment: LayoutAlignment.start;
+                Text { text: "Автор:"; font-size: 14px; }
+                Text { text: scenario-author; font-size: 14px; }
+            }
+            HorizontalBox {
+                alignment: LayoutAlignment.start;
+                Text { text: "Погода:"; font-size: 14px; }
+                Text { text: scenario-weather; font-size: 14px; }
+            }
+            HorizontalBox {
+                alignment: LayoutAlignment.start;
+                Text { text: "Сезон:"; font-size: 14px; }
+                Text { text: scenario-season; font-size: 14px; }
+            }
+        }
         HorizontalBox {
-            ListView {
-                for c[i] in consist-names: Rectangle {
-                    background: i == selected-consist ? #3a3a3a : transparent;
-                    TouchArea {
-                        clicked => {
-                            selected-consist = i;
-                            consist-selected(i);
-                        }
-                        HorizontalLayout {
-                            alignment: start;
-                            padding: 2px;
-                            Text {
-                                text: c;
-                                vertical-alignment: center;
-                                color: consist-missing[i] ? #ff6666 : #4caf50;
+            VerticalBox {
+                Text { text: "Составы"; font-size: 13px; color: #888888; }
+                ListView {
+                    for c[i] in consist-names: Rectangle {
+                        background: i == selected-consist ? #3a3a3a : transparent;
+                        TouchArea {
+                            clicked => {
+                                selected-consist = i;
+                                consist-selected(i);
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                padding: 2px;
+                                Text {
+                                    text: c;
+                                    vertical-alignment: center;
+                                    color: consist-missing[i] ? #ff6666 : #4caf50;
+                                }
                             }
                         }
                     }
                 }
             }
-            ListView {
-                for v[i] in vehicle-names: Rectangle {
-                    TouchArea {
-                        double-clicked => { open-vehicle-path(i); }
-                        HorizontalLayout {
-                            alignment: start;
-                            padding: 2px;
-                            Text {
-                                text: v;
-                                vertical-alignment: center;
-                                color: vehicle-missing[i] ? #ff6666 : #4caf50;
+            VerticalBox {
+                Text { text: "Подвижные единицы"; font-size: 13px; color: #888888; }
+                ListView {
+                    for v[i] in vehicle-names: Rectangle {
+                        TouchArea {
+                            double-clicked => { open-vehicle-path(i); }
+                            HorizontalLayout {
+                                alignment: start;
+                                padding: 2px;
+                                Text {
+                                    text: v;
+                                    vertical-alignment: center;
+                                    color: vehicle-missing[i] ? #ff6666 : #4caf50;
+                                }
                             }
                         }
                     }
@@ -265,7 +301,6 @@ export component ScenarioWindow inherits Window {
         }
     }
 }
-
 export component MissingAssetsWindow inherits Window {
     title: "Недостающие ассеты";
     min-width: 700px;
