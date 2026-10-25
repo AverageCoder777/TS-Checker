@@ -34,8 +34,6 @@ pub(crate) fn route_scan_cache_file() -> Option<PathBuf> {
     })
 }
 
-
-
 pub(crate) fn read_route_folder_ids(routes_path: &Path) -> Result<Vec<String>, String> {
     let entries = fs::read_dir(routes_path)
         .map_err(|error| format!("Не удалось прочитать {}: {error}", routes_path.display()))?;

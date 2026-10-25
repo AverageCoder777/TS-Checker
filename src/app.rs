@@ -87,7 +87,8 @@ impl Default for CheckerApp {
     fn default() -> Self {
         let rw_path = load_last_game_path();
         let (ignored_route_ids, mut status) = match load_ignored_route_ids() {
-            Ok(ids) => (ids,
+            Ok(ids) => (
+                ids,
                 "Укажите путь к RailWorks и просканируйте маршруты.".to_owned(),
             ),
             Err(error) => (HashSet::new(), error),
@@ -187,7 +188,8 @@ impl CheckerApp {
         self.inventory_scan = Some(rx);
         self.status = "Проверка ассетов маршрута на умляуты...".to_owned();
         thread::spawn(move || {
-            let result =scan_umlaut_assets(&inventory, &assets_path, &serz_path, max_concurrent_serz);
+            let result =
+                scan_umlaut_assets(&inventory, &assets_path, &serz_path, max_concurrent_serz);
             let _ = tx.send(result);
         });
     }
@@ -200,8 +202,13 @@ impl CheckerApp {
         replacement_relative: String,
         fixes: CharacterFixes,
     ) {
-        let Some(route) = self.selected_route.and_then(|index| self.routes.get(index)).cloned()
-        else {return;};
+        let Some(route) = self
+            .selected_route
+            .and_then(|index| self.routes.get(index))
+            .cloned()
+        else {
+            return;
+        };
         let rw_path = PathBuf::from(self.rw_path.trim());
         let assets_path = rw_path.join("Assets");
         let serz_path = preferred_serz_path(&rw_path);
@@ -290,9 +297,7 @@ impl CheckerApp {
     }
 
     pub(crate) fn asset_only(path: PathBuf) -> Self {
-        let mut app = Self {
-            ..Self::default()
-        };
+        let mut app = Self { ..Self::default() };
         app.start_asset_view(path);
         app
     }
@@ -412,7 +417,7 @@ impl CheckerApp {
         });
     }
 
-/// Обновляет список сценариев выбранного маршрута.
+    /// Обновляет список сценариев выбранного маршрута.
     ///
     /// Сценарии читаются с диска, поэтому список обновляется только при смене
     /// маршрута: файл сценариев небольшой, но читать его каждый кадр незачем.
@@ -634,8 +639,11 @@ impl CheckerApp {
                         )
                     });
                     if let Some(check_result) = self.result.as_ref() {
-                        let paths: Vec<String> =
-                            check_result.missing_assets.iter().map(|a| a.path.clone()).collect();
+                        let paths: Vec<String> = check_result
+                            .missing_assets
+                            .iter()
+                            .map(|a| a.path.clone())
+                            .collect();
                         if paths.is_empty() {
                             self.missing_assets_popup = None;
                             self.missing_assets_shown = false;
@@ -703,7 +711,7 @@ impl CheckerApp {
             }
         }
 
-let check_message = self.check.as_ref().and_then(|rx| match rx.try_recv() {
+        let check_message = self.check.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(message) => Some(Ok(message)),
             Err(TryRecvError::Disconnected) => Some(Err(
                 "Не удалось получить результат проверки маршрута.".to_owned(),
@@ -723,7 +731,8 @@ let check_message = self.check.as_ref().and_then(|rx| match rx.try_recv() {
                                     "отсутствует ассетов: {}",
                                     result.missing_assets.len()
                                 ));
-                                let paths: Vec<String> = result.missing_assets
+                                let paths: Vec<String> = result
+                                    .missing_assets
                                     .iter()
                                     .map(|a| a.path.clone())
                                     .collect();

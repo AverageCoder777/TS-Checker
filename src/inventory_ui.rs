@@ -27,11 +27,12 @@ pub(crate) struct InventorySort {
 /// Считаются один раз для шапки и для строк, чтобы подписи и данные стояли
 /// в одних и тех же местах.
 
-
-
 /// Измеряет ширину текста в стиле мелкого шрифта.
 
-pub(crate) fn asset_directory(assets_path: &std::path::Path, asset_path: &str) -> std::path::PathBuf {
+pub(crate) fn asset_directory(
+    assets_path: &std::path::Path,
+    asset_path: &str,
+) -> std::path::PathBuf {
     let normalized = asset_path.replace('/', "\\");
     let relative = std::path::Path::new(&normalized);
     match relative.parent() {
@@ -51,4 +52,3 @@ pub(crate) fn existing_directory_upwards(path: &std::path::Path) -> Option<std::
     }
     None
 }
-

@@ -6,7 +6,6 @@
 
 use std::path::Path;
 
-
 use crate::translit::*;
 use crate::{AssetKind, RouteFile};
 pub(crate) struct AssetReference {
@@ -347,7 +346,6 @@ pub(crate) fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetRef
         .map(|(_, reference)| reference)
         .collect()
 }
-// Запасной вариант для файлов без обёртки `iBlueprintLibrary-cAbsoluteBlueprintID`.     let mut covered_index = 0usize;     let mut cursor = 0usize;     while let Some(position) = find_ignore_ascii_case(haystack, b"<Provider", cursor) {         let Some((provider_range, product_range, blueprint_range, end)) =             match_bare_blueprint(haystack, position)         else {             cursor = position + 1;             continue;         };         cursor = end;         while covered_index < covered.len() && covered[covered_index].end <= position {             covered_index += 1;         }         if covered_index < covered.len() && covered[covered_index].contains(&position) {             continue;         }         let Some(reference) = build_asset_reference(             &xml[provider_range.clone()],             &xml[product_range.clone()],             &xml[blueprint_range.clone()],             provider_range,             product_range,             blueprint_range,             reference_kind(xml, position),         ) else {             continue;         };         references.push((position, reference));     }      references.sort_by_key(|(position, _)| *position);     references         .into_iter()         .map(|(_, reference)| reference)         .collect() }
 /// Позиции значений «голой» ссылки: провайдер, продукт, блюпринт и конец.
 type BlueprintRanges = (
     std::ops::Range<usize>,

@@ -75,7 +75,9 @@ fn consist_name(consist: &str) -> String {
         None => return "Неназванный состав".to_owned(),
     };
     let cdriver_rest = &driver_block[cdriver_start..];
-    let cdriver_end = cdriver_rest.find("</cDriver>").unwrap_or(cdriver_rest.len());
+    let cdriver_end = cdriver_rest
+        .find("</cDriver>")
+        .unwrap_or(cdriver_rest.len());
     let cdriver_block = &cdriver_rest[..cdriver_end];
 
     let sn_start = match find_tag(cdriver_block, "ServiceName") {
@@ -128,7 +130,9 @@ fn consist_name(consist: &str) -> String {
             .find('<')
             .map(|i| value_start + i)
             .unwrap_or(loc_block.len());
-        let value = decode_xml_text(&loc_block[value_start..value_end]).trim().to_owned();
+        let value = decode_xml_text(&loc_block[value_start..value_end])
+            .trim()
+            .to_owned();
         if !value.is_empty() {
             return value;
         }
@@ -152,10 +156,7 @@ pub(crate) struct ScenarioVehicle {
 }
 
 /// Читает сценарии маршрута: папки в Scenarios и их файлы.
-pub(crate) fn read_route_scenarios(
-    route_path: &Path,
-    _serz_path: &Path,
-) -> Vec<RouteScenario> {
+pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<RouteScenario> {
     let scenarios_path = route_path.join("Scenarios");
     let Ok(entries) = fs::read_dir(&scenarios_path) else {
         return Vec::new();
@@ -203,10 +204,7 @@ pub(crate) fn read_route_scenarios(
 }
 
 /// Загружает составы техники из Scenario.bin сценария (через Serz в XML).
-pub(crate) fn load_consists(
-    scenario_path: &Path,
-    serz_path: &Path,
-) -> Vec<ScenarioConsist> {
+pub(crate) fn load_consists(scenario_path: &Path, serz_path: &Path) -> Vec<ScenarioConsist> {
     let Some(xml) = read_scenario_file(scenario_path, serz_path) else {
         return Vec::new();
     };
@@ -332,7 +330,9 @@ fn localised_text(xml: &str, block: &str) -> String {
                 return english;
             }
             // English пуст — берём первый непустой из остальных языков.
-            for lang in ["German", "French", "Italian", "Spanish", "Dutch", "Polish", "Russian"] {
+            for lang in [
+                "German", "French", "Italian", "Spanish", "Dutch", "Polish", "Russian",
+            ] {
                 let val = element_text(block_xml, lang);
                 if !val.is_empty() {
                     return val;
@@ -379,21 +379,25 @@ mod tests {
             return;
         }
         let scenarios = read_route_scenarios(&route, &serz);
-            for scenario in &scenarios {
-                let consists = load_consists(&scenario.path, &serz);
+        for scenario in &scenarios {
+            let consists = load_consists(&scenario.path, &serz);
+            eprintln!(
+                "SCENARIO имя={:?} дата={:?} автор={:?} сезон={:?} составов={}",
+                scenario.name,
+                scenario.date,
+                scenario.author,
+                scenario.season,
+                consists.len(),
+            );
+            for consist in &consists {
                 eprintln!(
-                    "SCENARIO имя={:?} дата={:?} автор={:?} сезон={:?} составов={}",
-                    scenario.name,
-                    scenario.date,
-                    scenario.author,
-                    scenario.season,
-                    consists.len(),
+                    "  состав name={:?} единиц={}",
+                    consist.name,
+                    consist.vehicles.len()
                 );
-                for consist in &consists {
-                    eprintln!("  состав name={:?} единиц={}", consist.name, consist.vehicles.len());
-                }
-                break;
             }
+            break;
+        }
         assert!(!scenarios.is_empty(), "сценарии должны находиться");
     }
 }

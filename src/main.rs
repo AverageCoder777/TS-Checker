@@ -165,8 +165,9 @@ impl RouteFile {
         }
         let target = temp_dir.join(relative);
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("Не удалось создать папку {}: {error}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                format!("Не удалось создать папку {}: {error}", parent.display())
+            })?;
         }
         let mut output = fs::File::create(&target)
             .map_err(|error| format!("Не удалось создать файл {}: {error}", target.display()))?;
@@ -343,17 +344,23 @@ fn parse_asset_launch_args(
 fn load_route_icon_image(icon_path: &std::path::Path) -> slint::Image {
     match image::open(icon_path) {
         Ok(img) => {
-            let rgba = img.resize_exact(32, 32, image::imageops::FilterType::Triangle).to_rgba8();
+            let rgba = img
+                .resize_exact(32, 32, image::imageops::FilterType::Triangle)
+                .to_rgba8();
             let (w, h) = rgba.dimensions();
             let raw = rgba.into_raw();
-            let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
+            let buffer =
+                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
             slint::Image::from_rgba8(buffer)
         }
         Err(_) => slint::Image::default(),
     }
 }
 
-fn build_inventory_rows(state: &app::AssetInventoryWindowState, show_missing: bool) -> Vec<slint::ModelRc<slint::StandardListViewItem>> {
+fn build_inventory_rows(
+    state: &app::AssetInventoryWindowState,
+    show_missing: bool,
+) -> Vec<slint::ModelRc<slint::StandardListViewItem>> {
     let mut assets: Vec<&ReferencedAsset> = state.assets.iter().collect();
     match state.sort.column {
         inventory_ui::InventorySortColumn::Path => {
@@ -387,7 +394,8 @@ fn build_inventory_rows(state: &app::AssetInventoryWindowState, show_missing: bo
                 continue;
             }
         }
-        let mut by_tile: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut by_tile: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for u in a.uses.iter() {
             *by_tile.entry(u.tile.clone()).or_insert(0) += 1;
         }
@@ -439,23 +447,27 @@ fn main() {
             }
         });
         let timer = slint::Timer::default();
-        timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
-            if let Ok(mut app) = app_clone2.lock() {
-                app.receive_background_results();
-                if app.asset_viewer_open && app.editor_sync_pending {
-                    if let Some(doc) = app.asset_viewer_document.as_ref() {
-                        let xml = doc.xml.clone().replace('\t', "    ");
-                        let status = app.status.clone();
-                        app.editor_sync_pending = false;
-                        if let Some(ew) = editor_handle2.upgrade() {
-                            ew.set_editor_text(xml.into());
-                            ew.set_status(status.into());
-                            let _ = ew.show();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(50),
+            move || {
+                if let Ok(mut app) = app_clone2.lock() {
+                    app.receive_background_results();
+                    if app.asset_viewer_open && app.editor_sync_pending {
+                        if let Some(doc) = app.asset_viewer_document.as_ref() {
+                            let xml = doc.xml.clone().replace('\t', "    ");
+                            let status = app.status.clone();
+                            app.editor_sync_pending = false;
+                            if let Some(ew) = editor_handle2.upgrade() {
+                                ew.set_editor_text(xml.into());
+                                ew.set_status(status.into());
+                                let _ = ew.show();
+                            }
                         }
                     }
                 }
-            }
-        });
+            },
+        );
         editor_win.run().unwrap();
         return;
     }
@@ -506,8 +518,9 @@ fn main() {
         };
         if let Some(missing) = missing {
             let assets_path = PathBuf::from(rw_path.trim()).join("Assets");
-            let start_dir = existing_directory_upwards(&asset_directory(&assets_path, &missing.path))
-                .unwrap_or_else(|| assets_path.clone());
+            let start_dir =
+                existing_directory_upwards(&asset_directory(&assets_path, &missing.path))
+                    .unwrap_or_else(|| assets_path.clone());
             let selected = rfd::FileDialog::new()
                 .set_title("Выберите BIN нового объекта")
                 .add_filter("RailWorks BIN", &["bin"])
@@ -515,8 +528,22 @@ fn main() {
                 .pick_file();
             if let Some(replacement) = selected {
                 if let Ok(mut app) = app_clone7.lock() {
-                    let replacement_relative = replacement.strip_prefix(&assets_path).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| replacement.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
-                    app.start_asset_replacement(missing, replacement, false, replacement_relative, std::collections::BTreeMap::new());
+                    let replacement_relative = replacement
+                        .strip_prefix(&assets_path)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| {
+                            replacement
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        });
+                    app.start_asset_replacement(
+                        missing,
+                        replacement,
+                        false,
+                        replacement_relative,
+                        std::collections::BTreeMap::new(),
+                    );
                 }
             }
         }
@@ -539,75 +566,91 @@ fn main() {
     // (handled in timer below)
 
     let timer = slint::Timer::default();
-    timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
-        let ui = match ui_handle.upgrade() {
-            Some(ui) => ui,
-            None => return,
-        };
-        if let Ok(mut app) = app_clone.lock() {
-            app.receive_background_results();
-            // Show missing-assets popup after route check finishes
-            if !app.is_checking() && app.result.is_some() && app.missing_assets_popup.is_some() && !app.missing_assets_shown {
-                let paths: Vec<slint::SharedString> = app
-                    .missing_assets_popup
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .map(|p| p.as_str().into())
-                    .collect();
-                if let Some(mw) = missing_handle.upgrade() {
-                    mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(paths)));
-                    let _ = mw.show();
-                    app.missing_assets_shown = true;
-                }
-            }
-            // Sync asset editor text when document loaded
-            if app.asset_viewer_open && app.editor_sync_pending {
-                if let Some(doc) = app.asset_viewer_document.as_ref() {
-                    let xml = doc.xml.clone().replace('\t', "    ");
-                    let status = app.status.clone();
-                    app.editor_sync_pending = false;
-                    if let Some(ew) = editor_handle2.upgrade() {
-                        ew.set_editor_text(xml.into());
-                        ew.set_status(status.into());
-                        let _ = ew.show();
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(50),
+        move || {
+            let ui = match ui_handle.upgrade() {
+                Some(ui) => ui,
+                None => return,
+            };
+            if let Ok(mut app) = app_clone.lock() {
+                app.receive_background_results();
+                // Show missing-assets popup after route check finishes
+                if !app.is_checking()
+                    && app.result.is_some()
+                    && app.missing_assets_popup.is_some()
+                    && !app.missing_assets_shown
+                {
+                    let paths: Vec<slint::SharedString> = app
+                        .missing_assets_popup
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.as_str().into())
+                        .collect();
+                    if let Some(mw) = missing_handle.upgrade() {
+                        mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(paths)));
+                        let _ = mw.show();
+                        app.missing_assets_shown = true;
                     }
                 }
-            }
-            let q = ui.get_search_query().to_string();
-            app.search_query = q.clone();
-            if app.routes.len() == last_count && q == last_query {
+                // Sync asset editor text when document loaded
+                if app.asset_viewer_open && app.editor_sync_pending {
+                    if let Some(doc) = app.asset_viewer_document.as_ref() {
+                        let xml = doc.xml.clone().replace('\t', "    ");
+                        let status = app.status.clone();
+                        app.editor_sync_pending = false;
+                        if let Some(ew) = editor_handle2.upgrade() {
+                            ew.set_editor_text(xml.into());
+                            ew.set_status(status.into());
+                            let _ = ew.show();
+                        }
+                    }
+                }
+                let q = ui.get_search_query().to_string();
+                app.search_query = q.clone();
+                if app.routes.len() == last_count && q == last_query {
+                    ui.set_status(app.status.clone().into());
+                    ui.set_has_result(app.result.is_some());
+                    return;
+                }
+                last_count = app.routes.len();
+                last_query = q.clone();
+                let query = q.to_lowercase();
+                let items: Vec<RouteItem> = app
+                    .routes
+                    .iter()
+                    .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
+                    .map(|r| {
+                        let icon = match r.icon_path.clone() {
+                            Some(p) => load_route_icon_image(&p),
+                            None => slint::Image::default(),
+                        };
+                        RouteItem {
+                            name: r.name.clone().into(),
+                            icon_source: icon,
+                        }
+                    })
+                    .collect();
+                ui.set_route_items(slint::ModelRc::new(slint::VecModel::from(items)));
+                let ignored: Vec<slint::SharedString> = app
+                    .ignored_route_ids
+                    .iter()
+                    .map(|s| s.clone().into())
+                    .collect();
+                ui.set_ignored_routes(slint::ModelRc::new(slint::VecModel::from(ignored)));
+                let incomplete: Vec<slint::SharedString> = app
+                    .incomplete_folders
+                    .iter()
+                    .map(|f| f.id.clone().into())
+                    .collect();
+                ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
                 ui.set_status(app.status.clone().into());
                 ui.set_has_result(app.result.is_some());
-                return;
             }
-            last_count = app.routes.len();
-            last_query = q.clone();
-            let query = q.to_lowercase();
-            let items: Vec<RouteItem> = app
-                .routes
-                .iter()
-                .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
-                .map(|r| {
-                    let icon = match r.icon_path.clone() {
-                        Some(p) => load_route_icon_image(&p),
-                        None => slint::Image::default(),
-                    };
-                    RouteItem {
-                        name: r.name.clone().into(),
-                        icon_source: icon,
-                    }
-                })
-                .collect();
-            ui.set_route_items(slint::ModelRc::new(slint::VecModel::from(items)));
-            let ignored: Vec<slint::SharedString> = app.ignored_route_ids.iter().map(|s| s.clone().into()).collect();
-            ui.set_ignored_routes(slint::ModelRc::new(slint::VecModel::from(ignored)));
-            let incomplete: Vec<slint::SharedString> = app.incomplete_folders.iter().map(|f| f.id.clone().into()).collect();
-            ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
-            ui.set_status(app.status.clone().into());
-            ui.set_has_result(app.result.is_some());
-        }
-    });
+        },
+    );
     let ui_handle2 = ui.as_weak();
     ui.on_route_selected(move |idx| {
         if let Some(ui) = ui_handle2.upgrade() {
@@ -621,12 +664,24 @@ fn main() {
                 .filter(|r| q.is_empty() || r.name.to_lowercase().contains(&q))
                 .collect();
             if idx >= 0 && ((idx as usize) < filtered.len()) {
-                app.selected_route = Some(app.routes.iter().position(|r| r.name == filtered[idx as usize].name && r.path == filtered[idx as usize].path).unwrap_or(idx as usize));
+                app.selected_route = Some(
+                    app.routes
+                        .iter()
+                        .position(|r| {
+                            r.name == filtered[idx as usize].name
+                                && r.path == filtered[idx as usize].path
+                        })
+                        .unwrap_or(idx as usize),
+                );
             } else {
                 app.selected_route = None;
             }
             app.refresh_scenarios();
-            let scen: Vec<slint::SharedString> = app.scenarios.iter().map(|s| s.name.clone().into()).collect();
+            let scen: Vec<slint::SharedString> = app
+                .scenarios
+                .iter()
+                .map(|s| s.name.clone().into())
+                .collect();
             if let Some(ui) = ui_handle2.upgrade() {
                 ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen)));
                 ui.set_selected_scenario(-1);
@@ -660,7 +715,9 @@ fn main() {
             let mut dialog = rfd::FileDialog::new().set_title("Выберите LocoSwap.exe");
             if !current.is_empty() {
                 let p = std::path::PathBuf::from(&current);
-                if let Some(parent) = p.parent() { dialog = dialog.set_directory(parent); }
+                if let Some(parent) = p.parent() {
+                    dialog = dialog.set_directory(parent);
+                }
             }
             if let Some(path) = dialog.pick_file() {
                 sw.set_locoswap_path(path.to_string_lossy().to_string().into());
@@ -691,22 +748,40 @@ fn main() {
             // ensure scenarios loaded for selected route
             app.refresh_scenarios();
             let scen_idx = idx as usize;
-            if scen_idx >= app.scenarios.len() { return; }
+            if scen_idx >= app.scenarios.len() {
+                return;
+            }
             // lazy load consists
             let needs_load = app.scenarios[scen_idx].consists.is_none();
             if needs_load {
                 let scenario_path = app.scenarios[scen_idx].path.clone();
-                let serz_path = crate::assets::preferred_serz_path(std::path::Path::new(app.rw_path.trim()));
+                let serz_path =
+                    crate::assets::preferred_serz_path(std::path::Path::new(app.rw_path.trim()));
                 let consists = crate::scenario::load_consists(&scenario_path, &serz_path);
                 app.scenarios[scen_idx].consists = Some(consists);
             }
             let scenario = app.scenarios[scen_idx].clone();
             let rw_path = app.rw_path.clone();
-            let route_path = app.selected_route.and_then(|i| app.routes.get(i)).map(|r| r.path.clone()).unwrap_or_default();
+            let route_path = app
+                .selected_route
+                .and_then(|i| app.routes.get(i))
+                .map(|r| r.path.clone())
+                .unwrap_or_default();
             // build consist names
-            let consist_names: Vec<slint::SharedString> = scenario.consists.as_ref().map(|c| c.iter().map(|x| x.name.clone().into()).collect()).unwrap_or_default();
+            let consist_names: Vec<slint::SharedString> = scenario
+                .consists
+                .as_ref()
+                .map(|c| c.iter().map(|x| x.name.clone().into()).collect())
+                .unwrap_or_default();
             // check vehicle files for all consists (cache once)
-            if app.scenario_consist_info.is_none() || app.scenario_consist_info.as_ref().map(|v| v.len()).unwrap_or(0) != consist_names.len() {
+            if app.scenario_consist_info.is_none()
+                || app
+                    .scenario_consist_info
+                    .as_ref()
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+                    != consist_names.len()
+            {
                 let mut info = Vec::new();
                 let mut vf: Vec<Vec<bool>> = Vec::new();
                 if let Some(consists) = scenario.consists.as_ref() {
@@ -715,10 +790,17 @@ fn main() {
                         let mut flags = Vec::new();
                         for v in &c.vehicles {
                             let exists = crate::blueprint::resolve_blueprint_file_cached_free(
-                                std::path::Path::new(&rw_path), &route_path, &v.blueprint, &v.provider, &v.product,
-                            ).is_some();
+                                std::path::Path::new(&rw_path),
+                                &route_path,
+                                &v.blueprint,
+                                &v.provider,
+                                &v.product,
+                            )
+                            .is_some();
                             flags.push(exists);
-                            if !exists { all_ok = false; }
+                            if !exists {
+                                all_ok = false;
+                            }
                         }
                         info.push((c.name.clone(), all_ok));
                         vf.push(flags);
@@ -737,9 +819,29 @@ fn main() {
                 sw.set_scenario_name(scenario.name.clone().into());
                 sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
                 // vehicles for first consist
-                let vehicles: Vec<slint::SharedString> = scenario.consists.as_ref().and_then(|c| c.first()).map(|cc| cc.vehicles.iter().map(|v| format!("{} - {}", v.provider, v.name).into()).collect()).unwrap_or_default();
+                let vehicles: Vec<slint::SharedString> = scenario
+                    .consists
+                    .as_ref()
+                    .and_then(|c| c.first())
+                    .map(|cc| {
+                        cc.vehicles
+                            .iter()
+                            .map(|v| format!("{} - {}", v.provider, v.name).into())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let missing: Vec<bool> = vehicle_files.first().cloned().unwrap_or_default();
-                let paths: Vec<slint::SharedString> = scenario.consists.as_ref().and_then(|c| c.first()).map(|cc| cc.vehicles.iter().map(|v| v.blueprint.clone().into()).collect()).unwrap_or_default();
+                let paths: Vec<slint::SharedString> = scenario
+                    .consists
+                    .as_ref()
+                    .and_then(|c| c.first())
+                    .map(|cc| {
+                        cc.vehicles
+                            .iter()
+                            .map(|v| v.blueprint.clone().into())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
                 sw.set_vehicle_missing(slint::ModelRc::new(slint::VecModel::from(missing)));
                 sw.set_vehicle_paths(slint::ModelRc::new(slint::VecModel::from(paths)));
@@ -750,15 +852,39 @@ fn main() {
     });
     scenario_win.on_consist_selected(move |idx| {
         if let Ok(mut app) = app_clone15.lock() {
-            let scen_idx = match app.selected_scenario { Some(i) => i, None => return };
-            let scenario = match app.scenarios.get(scen_idx) { Some(s) => s.clone(), None => return };
-            let consists = match scenario.consists.as_ref() { Some(c) => c, None => return };
+            let scen_idx = match app.selected_scenario {
+                Some(i) => i,
+                None => return,
+            };
+            let scenario = match app.scenarios.get(scen_idx) {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            let consists = match scenario.consists.as_ref() {
+                Some(c) => c,
+                None => return,
+            };
             let i = idx as usize;
-            if i >= consists.len() { return; }
+            if i >= consists.len() {
+                return;
+            }
             let c = &consists[i];
-            let vehicles: Vec<slint::SharedString> = c.vehicles.iter().map(|v| format!("{} - {}", v.provider, v.name).into()).collect();
-            let missing: Vec<bool> = app.scenario_vehicle_files.as_ref().and_then(|vf| vf.get(i)).cloned().unwrap_or_default();
-            let paths: Vec<slint::SharedString> = c.vehicles.iter().map(|v| v.blueprint.clone().into()).collect();
+            let vehicles: Vec<slint::SharedString> = c
+                .vehicles
+                .iter()
+                .map(|v| format!("{} - {}", v.provider, v.name).into())
+                .collect();
+            let missing: Vec<bool> = app
+                .scenario_vehicle_files
+                .as_ref()
+                .and_then(|vf| vf.get(i))
+                .cloned()
+                .unwrap_or_default();
+            let paths: Vec<slint::SharedString> = c
+                .vehicles
+                .iter()
+                .map(|v| v.blueprint.clone().into())
+                .collect();
             app.selected_consist = Some(i);
             if let Some(sw) = scenario_handle2.upgrade() {
                 sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
@@ -778,21 +904,47 @@ fn main() {
     });
     scenario_win.on_open_vehicle_path(move |idx| {
         if let Ok(app) = app_clone17.lock() {
-            let scen_idx = match app.selected_scenario { Some(i) => i, None => return };
+            let scen_idx = match app.selected_scenario {
+                Some(i) => i,
+                None => return,
+            };
             let consist_idx = app.selected_consist.unwrap_or(0);
-            let scenario = match app.scenarios.get(scen_idx) { Some(s) => s, None => return };
-            let consists = match scenario.consists.as_ref() { Some(c) => c, None => return };
-            let consist = match consists.get(consist_idx) { Some(c) => c, None => return };
-            let vehicle = match consist.vehicles.get(idx as usize) { Some(v) => v, None => return };
+            let scenario = match app.scenarios.get(scen_idx) {
+                Some(s) => s,
+                None => return,
+            };
+            let consists = match scenario.consists.as_ref() {
+                Some(c) => c,
+                None => return,
+            };
+            let consist = match consists.get(consist_idx) {
+                Some(c) => c,
+                None => return,
+            };
+            let vehicle = match consist.vehicles.get(idx as usize) {
+                Some(v) => v,
+                None => return,
+            };
             let rw_path = app.rw_path.clone();
-            let full = std::path::PathBuf::from(rw_path.trim()).join("Assets").join(vehicle.blueprint.replace('/', "\\"));
-            let target = if full.exists() { full.clone() } else {
+            let full = std::path::PathBuf::from(rw_path.trim())
+                .join("Assets")
+                .join(vehicle.blueprint.replace('/', "\\"));
+            let target = if full.exists() {
+                full.clone()
+            } else {
                 let mut cur = full.as_path();
-                while !cur.exists() { match cur.parent() { Some(p) => cur = p, None => break } }
+                while !cur.exists() {
+                    match cur.parent() {
+                        Some(p) => cur = p,
+                        None => break,
+                    }
+                }
                 cur.to_path_buf()
             };
             if full.is_file() {
-                let _ = std::process::Command::new("explorer.exe").arg(format!("/select,\"{}\"", full.display())).spawn();
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(format!("/select,\"{}\"", full.display()))
+                    .spawn();
             } else {
                 let _ = crate::windows::open_in_file_explorer(&target);
             }
@@ -884,20 +1036,38 @@ fn main() {
     });
     inventory_win.on_row_clicked(move |row| {
         if let Some(inv) = inv_handle9.upgrade() {
-            if row < 0 { return; }
+            if row < 0 {
+                return;
+            }
             let rows = inv.get_inventory_rows();
-            if (row as usize) >= rows.row_count() { return; }
+            if (row as usize) >= rows.row_count() {
+                return;
+            }
             let first_cell = rows.row_data(row as usize).and_then(|rm| rm.row_data(0));
             let path_text = first_cell.map(|c| c.text.to_string()).unwrap_or_default();
             // debug log
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(r"C:\Users\kosty\AppData\Local\Temp\kilo\dblclick.log") {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(r"C:\Users\kosty\AppData\Local\Temp\kilo\dblclick.log")
+            {
                 let _ = writeln!(f, "row={} path_text={:?}", row, path_text);
             }
-            if path_text.is_empty() { return; }
-            let rw_path = if let Ok(app) = app_clone13.lock() { app.rw_path.clone() } else { String::new() };
-            if rw_path.is_empty() { return; }
-            let full = std::path::PathBuf::from(rw_path.trim()).join("Assets").join(path_text.replace('/', "\\"));
+            if path_text.is_empty() {
+                return;
+            }
+            let rw_path = if let Ok(app) = app_clone13.lock() {
+                app.rw_path.clone()
+            } else {
+                String::new()
+            };
+            if rw_path.is_empty() {
+                return;
+            }
+            let full = std::path::PathBuf::from(rw_path.trim())
+                .join("Assets")
+                .join(path_text.replace('/', "\\"));
             // Open nearest existing folder; select file if present.
             let target = if full.exists() {
                 // open containing folder with the file selected
@@ -909,7 +1079,10 @@ fn main() {
                 // walk up to nearest existing parent
                 let mut cur = full.as_path();
                 while !cur.exists() {
-                    match cur.parent() { Some(p) => cur = p, None => break }
+                    match cur.parent() {
+                        Some(p) => cur = p,
+                        None => break,
+                    }
                 }
                 cur.to_path_buf()
             };
@@ -919,15 +1092,29 @@ fn main() {
     inventory_win.on_open_in_editor(move || {
         if let Some(inv) = inv_handle10.upgrade() {
             let row = inv.get_current_row();
-            if row < 0 { return; }
+            if row < 0 {
+                return;
+            }
             let rows = inv.get_inventory_rows();
-            if (row as usize) >= rows.row_count() { return; }
+            if (row as usize) >= rows.row_count() {
+                return;
+            }
             let first_cell = rows.row_data(row as usize).and_then(|rm| rm.row_data(0));
             let path_text = first_cell.map(|c| c.text.to_string()).unwrap_or_default();
-            if path_text.is_empty() { return; }
-            let rw_path = if let Ok(app) = app_clone14.lock() { app.rw_path.clone() } else { String::new() };
-            if rw_path.is_empty() { return; }
-            let full = std::path::PathBuf::from(rw_path.trim()).join("Assets").join(path_text.replace('/', "\\"));
+            if path_text.is_empty() {
+                return;
+            }
+            let rw_path = if let Ok(app) = app_clone14.lock() {
+                app.rw_path.clone()
+            } else {
+                String::new()
+            };
+            if rw_path.is_empty() {
+                return;
+            }
+            let full = std::path::PathBuf::from(rw_path.trim())
+                .join("Assets")
+                .join(path_text.replace('/', "\\"));
             if full.is_file() {
                 if let Ok(mut app) = app_clone14.lock() {
                     app.start_asset_view(full);
@@ -937,7 +1124,9 @@ fn main() {
     });
     inventory_win.on_scan_umlauts(move || {
         if let Ok(app) = app_clone19.lock() {
-            let _ = app.inventory_action_tx.send(crate::app::InventoryAction::ScanUmlauts);
+            let _ = app
+                .inventory_action_tx
+                .send(crate::app::InventoryAction::ScanUmlauts);
         }
     });
     let settings_handle3 = settings_win.as_weak();
@@ -966,13 +1155,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_route, decode_xml_text, extract_asset_references, extract_scenario_clues, fallback_serz_path,
-        inspect_route_folder, is_skipped_route_scan_directory,
+        check_route, decode_xml_text, extract_asset_references, extract_scenario_clues,
+        fallback_serz_path, inspect_route_folder, is_skipped_route_scan_directory,
         parse_asset_launch_args, parse_route_name, preferred_serz_path, scan_routes,
         scan_routes_with_ignored, validate_serz_process, ScenarioClueCollection,
     };
     use crate::app::CheckerApp;
-        use image::GenericImageView;
+    use image::GenericImageView;
     use std::ffi::OsString;
     use std::fs;
     use std::io::Write;
@@ -1365,10 +1554,7 @@ mod tests {
             1024 * 1024 * 1024,
             1024 * 1024
         ));
-        assert!(super::is_suspicious_archive_member(
-            1024 * 1024 * 1024,
-            0
-        ));
+        assert!(super::is_suspicious_archive_member(1024 * 1024 * 1024, 0));
     }
 
     #[test]
@@ -1541,17 +1727,30 @@ mod tests {
     }
     #[test]
     fn repro_route_check_hang() {
-        let route = std::path::PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7");
+        let route = std::path::PathBuf::from(
+            r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7",
+        );
         let rw = std::path::PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks");
         let assets = rw.join("Assets");
         let mut serz = rw.join("serz64.exe");
-        if !serz.is_file() { serz = rw.join("serz.exe"); }
+        if !serz.is_file() {
+            serz = rw.join("serz.exe");
+        }
         println!("using serz: {} exists={}", serz.display(), serz.is_file());
         let start = std::time::Instant::now();
         let res = check_route(&route, &assets, &serz, true, 8, |msg| {
             println!("[{:.1}s] {}", start.elapsed().as_secs_f32(), msg);
         });
-        println!("RESULT after {:.1}s: {:?}", start.elapsed().as_secs_f32(), res.map(|r| (r.asset_inventory.len(), r.missing_assets.len(), r.conversion_errors.len(), r.structure_issues.len())));
+        println!(
+            "RESULT after {:.1}s: {:?}",
+            start.elapsed().as_secs_f32(),
+            res.map(|r| (
+                r.asset_inventory.len(),
+                r.missing_assets.len(),
+                r.conversion_errors.len(),
+                r.structure_issues.len()
+            ))
+        );
     }
     #[test]
     fn repro_ui_check_flow() {
@@ -1561,13 +1760,21 @@ mod tests {
         let start = std::time::Instant::now();
         loop {
             app.receive_background_results();
-            if !app.routes.is_empty() { break; }
-            if start.elapsed().as_secs() > 60 { panic!("route scan timeout"); }
+            if !app.routes.is_empty() {
+                break;
+            }
+            if start.elapsed().as_secs() > 60 {
+                panic!("route scan timeout");
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         println!("routes: {}", app.routes.len());
         // select the target route
-        if let Some(idx) = app.routes.iter().position(|r| r.id == "8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7") {
+        if let Some(idx) = app
+            .routes
+            .iter()
+            .position(|r| r.id == "8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7")
+        {
             app.selected_route = Some(idx);
         }
         assert!(app.selected_route.is_some(), "no selected route");
@@ -1575,8 +1782,12 @@ mod tests {
         let start = std::time::Instant::now();
         loop {
             app.receive_background_results();
-            if !app.is_checking() { break; }
-            if start.elapsed().as_secs() > 120 { panic!("check timeout after {:?}", start.elapsed()); }
+            if !app.is_checking() {
+                break;
+            }
+            if start.elapsed().as_secs() > 120 {
+                panic!("check timeout after {:?}", start.elapsed());
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         println!("check done status={}", app.status);

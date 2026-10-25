@@ -114,7 +114,8 @@ pub(crate) const BROKEN_CHARACTERS: [char; 2] = ['\u{FFFD}', '\u{FFDF}'];
 pub(crate) const UMLAUT_CHARACTERS: [&str; 8] = ["ä", "Ä", "ö", "Ö", "ü", "Ü", "ß", "ẞ"];
 
 /// Транслитерации умляутов, которыми могли оказаться переименованы файлы.
-pub(crate) const TRANSLITERATED_CHARACTERS: [&str; 8] = ["ae", "Ae", "oe", "Oe", "ue", "Ue", "ss", "SS"];
+pub(crate) const TRANSLITERATED_CHARACTERS: [&str; 8] =
+    ["ae", "Ae", "oe", "Oe", "ue", "Ue", "ss", "SS"];
 
 /// Перевод букв с диакритикой на английский.
 ///
@@ -260,10 +261,6 @@ pub(crate) fn transliterate_text(value: &str, fixes: &CharacterFixes) -> String 
     result
 }
 
-
-
-
-
 /// Сколько испорченных символов в ссылке ещё разбираются.
 pub(crate) const MAX_BROKEN_CHARACTERS: usize = 3;
 
@@ -285,9 +282,9 @@ pub(crate) fn transliterate_umlauts(value: &str) -> String {
 /// Это немецкие умляуты, французские буквы и прочие буквы с диакритикой, а
 /// также испорченные символы: игра такие имена не читает.
 pub(crate) fn has_umlauts(value: &str) -> bool {
-    value
-        .chars()
-        .any(|character| has_transliteration_rule(character) || BROKEN_CHARACTERS.contains(&character))
+    value.chars().any(|character| {
+        has_transliteration_rule(character) || BROKEN_CHARACTERS.contains(&character)
+    })
 }
 
 /// Есть ли в строке испорченный символ.
@@ -312,7 +309,10 @@ pub(crate) fn replace_broken_characters(name: &str, replacement: &str) -> String
 /// `Brücke Fußgänger`, `Brücke Fussganger` и другие комбинации. Число вариантов
 /// растёт как степень количества подстановок, поэтому ссылка с большим числом
 /// испорченных символов не разбирается вовсе.
-pub(crate) fn replace_broken_characters_combinations(name: &str, replacements: &[&str]) -> Vec<String> {
+pub(crate) fn replace_broken_characters_combinations(
+    name: &str,
+    replacements: &[&str],
+) -> Vec<String> {
     let mut variants = vec![String::new()];
     for character in name.chars() {
         let mut next = Vec::new();
@@ -329,4 +329,3 @@ pub(crate) fn replace_broken_characters_combinations(name: &str, replacements: &
     }
     variants
 }
-

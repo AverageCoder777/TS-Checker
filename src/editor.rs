@@ -163,8 +163,8 @@ pub(crate) fn next_backup_path(source_path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_converted_asset, is_viewable_asset_name, next_backup_path,
-        validate_xml_document, EditorDocument,
+        install_converted_asset, is_viewable_asset_name, next_backup_path, validate_xml_document,
+        EditorDocument,
     };
     use std::path::Path;
     use std::sync::Arc;
@@ -227,6 +227,4 @@ mod tests {
         let error = validate_xml_document("<root><node></root>").unwrap_err();
         assert!(error.contains("Некорректный XML"));
     }
-
-    
 }

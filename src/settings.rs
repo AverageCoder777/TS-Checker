@@ -1,4 +1,4 @@
-﻿//! Persistent user settings, game path, and ignored-route list.
+//! Persistent user settings, game path, and ignored-route list.
 
 use super::*;
 use std::collections::HashSet;
@@ -66,8 +66,6 @@ pub(crate) fn asset_replacement_log_file() -> Option<PathBuf> {
             .join("replacement_log.jsonl")
     })
 }
-
-
 
 pub(crate) fn append_asset_replacement_log(
     path: &Path,
@@ -243,8 +241,6 @@ pub(crate) fn load_ignored_route_ids() -> Result<HashSet<String>, String> {
     }
 }
 
-
-
 pub(crate) fn load_last_game_path() -> String {
     last_game_path_file()
         .and_then(|path| fs::read_to_string(path).ok())
@@ -252,10 +248,6 @@ pub(crate) fn load_last_game_path() -> String {
         .filter(|path| !path.is_empty())
         .unwrap_or_else(|| r"C:\Program Files (x86)\Steam\steamapps\common\RailWorks".to_owned())
 }
-
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -273,14 +265,22 @@ mod tests {
             route_id: Some("route-id".to_owned()),
             route_name: Some("Route".to_owned()),
             route_path: Some(temp.path().join("route")),
-            original_files: vec![temp.path().join("route/Scenery/tile.bin").display().to_string()],
+            original_files: vec![temp
+                .path()
+                .join("route/Scenery/tile.bin")
+                .display()
+                .to_string()],
             missing_asset: Some("A/B/Scenery/old.bin".to_owned()),
             replacement_asset: Some("A/B/Scenery/new.bin".to_owned()),
             replaced_files: 1,
             replaced_instances: 2,
             uses: vec![crate::AssetReplacementLogUse {
                 tile: "тайл X=+000001 Z=-000002".to_owned(),
-                source_file: temp.path().join("route/Scenery/tile.bin").display().to_string(),
+                source_file: temp
+                    .path()
+                    .join("route/Scenery/tile.bin")
+                    .display()
+                    .to_string(),
             }],
             backups: vec![temp.path().join("route/Scenery/tile.bin.bak1")],
         };
