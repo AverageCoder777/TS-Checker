@@ -208,6 +208,7 @@ export component ScenarioWindow inherits Window {
 
     in property <string> scenario-name: "";
     in property <[string]> consist-names: [];
+    in property <[bool]> consist-missing: [];
     in property <[string]> vehicle-names: [];
     in property <[bool]> vehicle-missing: [];
     in property <[string]> vehicle-paths: [];
@@ -229,7 +230,15 @@ export component ScenarioWindow inherits Window {
                             selected-consist = i;
                             consist-selected(i);
                         }
-                        Text { text: c; }
+                        HorizontalLayout {
+                            alignment: start;
+                            padding: 2px;
+                            Text {
+                                text: c;
+                                vertical-alignment: center;
+                                color: consist-missing[i] ? #ff6666 : #4caf50;
+                            }
+                        }
                     }
                 }
             }
@@ -237,9 +246,14 @@ export component ScenarioWindow inherits Window {
                 for v[i] in vehicle-names: Rectangle {
                     TouchArea {
                         double-clicked => { open-vehicle-path(i); }
-                        Text {
-                            text: v;
-                            color: vehicle-missing[i] ? #ff6666 : #ffffff;
+                        HorizontalLayout {
+                            alignment: start;
+                            padding: 2px;
+                            Text {
+                                text: v;
+                                vertical-alignment: center;
+                                color: vehicle-missing[i] ? #ff6666 : #4caf50;
+                            }
                         }
                     }
                 }

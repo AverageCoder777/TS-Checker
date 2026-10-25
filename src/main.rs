@@ -876,7 +876,13 @@ fn main() {
             // populate window
             if let Some(sw) = scenario_handle.upgrade() {
                 sw.set_scenario_name(scenario.name.clone().into());
+                let consist_missing: Vec<bool> = app
+                    .scenario_consist_info
+                    .as_ref()
+                    .map(|info| info.iter().map(|(_, ok)| !*ok).collect())
+                    .unwrap_or_default();
                 sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
+                sw.set_consist_missing(slint::ModelRc::new(slint::VecModel::from(consist_missing)));
                 // vehicles for first consist
                 let vehicles: Vec<slint::SharedString> = scenario
                     .consists
@@ -985,27 +991,67 @@ fn main() {
                 None => return,
             };
             let rw_path = app.rw_path.clone();
-            let full = std::path::PathBuf::from(rw_path.trim())
-                .join("Assets")
-                .join(vehicle.blueprint.replace('/', "\\"));
-            let target = if full.exists() {
-                full.clone()
-            } else {
-                let mut cur = full.as_path();
-                while !cur.exists() {
-                    match cur.parent() {
-                        Some(p) => cur = p,
-                        None => break,
+            let route_path = app
+                .selected_route
+                .and_then(|i| app.routes.get(i))
+                .map(|r| r.path.clone())
+                .unwrap_or_default();
+            let resolved = crate::blueprint::resolve_blueprint_file_cached_free(
+                std::path::Path::new(rw_path.trim()),
+                std::path::Path::new(&route_path),
+                &vehicle.blueprint,
+                &vehicle.provider,
+                &vehicle.product,
+            );
+            if let Some(path) = resolved {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ext == "ap" {
+                    if let Some(parent) = path.parent() {
+                        let _ = crate::windows::open_in_file_explorer(parent);
                     }
+                } else if ext == "bin" && path.is_file() {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(format!("/select,\"{}\"", path.display()))
+                        .spawn();
+                } else if path.is_file() {
+                    let _ = crate::windows::open_in_file_explorer(path.parent().unwrap_or(path.as_path()));
+                } else {
+                    let mut cur = path.as_path();
+                    while !cur.exists() {
+                        match cur.parent() {
+                            Some(p) => cur = p,
+                            None => break,
+                        }
+                    }
+                    let _ = crate::windows::open_in_file_explorer(cur);
                 }
-                cur.to_path_buf()
-            };
-            if full.is_file() {
-                let _ = std::process::Command::new("explorer.exe")
-                    .arg(format!("/select,\"{}\"", full.display()))
-                    .spawn();
             } else {
-                let _ = crate::windows::open_in_file_explorer(&target);
+                let full = std::path::PathBuf::from(rw_path.trim())
+                    .join("Assets")
+                    .join(vehicle.blueprint.replace('/', "\\"));
+                let target = if full.exists() {
+                    full.clone()
+                } else {
+                    let mut cur = full.as_path();
+                    while !cur.exists() {
+                        match cur.parent() {
+                            Some(p) => cur = p,
+                            None => break,
+                        }
+                    }
+                    cur.to_path_buf()
+                };
+                if full.is_file() {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(format!("/select,\"{}\"", full.display()))
+                        .spawn();
+                } else {
+                    let _ = crate::windows::open_in_file_explorer(&target);
+                }
             }
         }
     });
