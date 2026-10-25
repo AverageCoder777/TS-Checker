@@ -1251,9 +1251,30 @@ where
         route_files.push(member);
     }
 
+    // Тяжёлый глобальный файл сети путей проверяем отдельно и в самом конце:
+    // его конвертация занимает минуты и не должна задерживать остальные файлы
+    // и отчёты о ходе проверки.
+    let is_tracks_bin = |route_file: &RouteFile| {
+        route_file
+            .route_name(route_path)
+            .map(|name| name.eq_ignore_ascii_case("Networks/Tracks.bin"))
+            .unwrap_or(false)
+    };
+    route_files.sort_by(|a, b| is_tracks_bin(a).cmp(&is_tracks_bin(b)));
+    let normal_files: Vec<RouteFile> = route_files
+        .iter()
+        .filter(|file| !is_tracks_bin(file))
+        .cloned()
+        .collect();
+    let heavy_files: Vec<RouteFile> = route_files
+        .iter()
+        .filter(|file| is_tracks_bin(file))
+        .cloned()
+        .collect();
+
     let temp_dir = tempdir()
         .map_err(|error| format!("Не удалось создать временную папку для Serz: {error}"))?;
-    let binary_count = route_files
+    let normal_binary_count = normal_files
         .iter()
         .filter(|path| {
             path.extension()
@@ -1264,7 +1285,7 @@ where
         .map(usize::from)
         .unwrap_or(2)
         .min(max_concurrent_serz.max(1))
-        .min(binary_count.max(1));
+        .min(normal_binary_count.max(1));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_count)
         .build()
@@ -1274,13 +1295,13 @@ where
     // Кэш разбора лежит в папке маршрута: неизменившиеся файлы берутся из
     // него, а заново разбираются только те, что изменились или появились.
     let mut cache = crate::analysis_cache::AnalysisCache::load(route_path);
-    for (chunk_index, chunk) in route_files.chunks(32).enumerate() {
+    for (chunk_index, chunk) in normal_files.chunks(32).enumerate() {
         let start_index = chunk_index * 32;
         report_progress(&format!(
             "Анализ файлов: {} из {}; параллельных Serz-процессов: {}...",
             start_index + 1,
-            route_files.len(),
-            worker_count.min(binary_count.max(1))
+            normal_files.len(),
+            worker_count.min(normal_binary_count.max(1))
         ));
         let chunk_analyses: Vec<FileAnalysis> = pool.install(|| {
             chunk
@@ -1304,6 +1325,40 @@ where
                 .collect()
         });
         analyses.extend(chunk_analyses);
+    }
+    // Networks/Tracks.bin проверяется последним и без пула: это очень большой
+    // файл, его конвертация идёт одним процессом Serz.
+    if !heavy_files.is_empty() {
+        report_progress("Анализ Networks/Tracks.bin...");
+        for (offset, route_file) in heavy_files.iter().enumerate() {
+            let name = route_file.route_name(route_path);
+            let stamp = route_file.stamp();
+            let analysis = if let (Some(name), Some(stamp)) = (&name, stamp) {
+                if let Some(cached) = cache.get(name, stamp) {
+                    FileAnalysis {
+                        from_cache: true,
+                        file: route_file.clone(),
+                        uses: cached.uses.clone(),
+                        error: None,
+                    }
+                } else {
+                    analyze_route_file(
+                        route_file,
+                        normal_files.len() + offset,
+                        temp_dir.path(),
+                        serz_path,
+                    )
+                }
+            } else {
+                analyze_route_file(
+                    route_file,
+                    normal_files.len() + offset,
+                    temp_dir.path(),
+                    serz_path,
+                )
+            };
+            analyses.push(analysis);
+        }
     }
     let mut asset_uses: HashMap<String, Vec<AssetUse>> = HashMap::new();
     // Написание пути, как оно встретилось в маршруте: ключ в asset_uses приведён
@@ -1344,7 +1399,13 @@ where
             }
         }
         if let Some(error) = analysis.error {
-            conversion_errors.push(error);
+            conversion_errors.push(format!(
+                "{} — {error}",
+                analysis
+                    .file
+                    .route_name(route_path)
+                    .unwrap_or_else(|| analysis.file.display().to_string())
+            ));
         }
     }
     conversion_errors.sort();
@@ -1364,70 +1425,97 @@ where
         "Уникальных ссылок: {}. Проверка файлов и архивов .ap...",
         asset_uses.len(),
     ));
+    let ap_start = std::time::Instant::now();
     let mut ap_cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
-    for relative_asset in asset_uses.keys() {
-        let parts: Vec<&str> = relative_asset.split('/').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let product_dir = assets_path.join(parts[0]).join(parts[1]);
-        if ap_cache.contains_key(&product_dir) {
-            continue;
-        }
 
-        let mut files = HashSet::new();
-        match fs::read_dir(&product_dir) {
-            Ok(entries) => {
-                for entry in entries {
-                    let archive_path = entry
-                        .map_err(|error| {
-                            format!("Ошибка при чтении {}: {error}", product_dir.display())
-                        })?
-                        .path();
-                    if !archive_path
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("ap"))
-                    {
-                        continue;
-                    }
-                    let archive_file = fs::File::open(&archive_path).map_err(|error| {
-                        format!("Не удалось открыть {}: {error}", archive_path.display())
-                    })?;
-                    let mut archive = match ZipArchive::new(archive_file) {
-                        Ok(archive) => archive,
-                        Err(error) => {
-                            structure_issues.push(format!(
-                                "Не удалось прочитать архив ассетов {}: {error}",
-                                archive_path.display()
-                            ));
-                            continue;
-                        }
-                    };
-                    for index in 0..archive.len() {
-                        match archive.by_index(index) {
-                            Ok(file) => {
-                                // Имя записи может не быть в UTF-8: такую запись
-                                // пропускаем.
-                                if let Ok(name) = file.name() {
+    // Уникальные папки продуктов, для которых нужно проверить .ap-архивы.
+    // Читаем архивы параллельно: открытие большого .ap занимает секунды, и
+    // последовательное чтение нескольких архивов задерживает всю проверку.
+    let mut product_dirs: Vec<PathBuf> = asset_uses
+        .keys()
+        .filter_map(|relative_asset| {
+            let parts: Vec<&str> = relative_asset.split('/').collect();
+            if parts.len() < 3 {
+                return None;
+            }
+            // Если ассет уже есть на диске по точному пути, архив для него
+            // проверять не нужно.
+            let exact = assets_path.join(relative_asset.replace('/', "\\"));
+            if exact.is_file() {
+                return None;
+            }
+            Some(assets_path.join(parts[0]).join(parts[1]))
+        })
+        .collect();
+    product_dirs.sort();
+    product_dirs.dedup();
+
+    let archive_results: Result<Vec<(PathBuf, HashSet<String>, Vec<String>)>, String> =
+        pool.install(|| {
+            product_dirs
+                .par_iter()
+                .map(|product_dir| {
+                    let mut files = HashSet::new();
+                    let mut errors = Vec::new();
+                    match fs::read_dir(product_dir) {
+                        Ok(entries) => {
+                            for entry in entries {
+                                let archive_path = match entry {
+                                    Ok(entry) => entry.path(),
+                                    Err(error) => {
+                                        errors.push(format!(
+                                            "Ошибка при чтении {}: {error}",
+                                            product_dir.display()
+                                        ));
+                                        continue;
+                                    }
+                                };
+                                if !archive_path
+                                    .extension()
+                                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ap"))
+                                {
+                                    continue;
+                                }
+                                let archive_file = match fs::File::open(&archive_path) {
+                                    Ok(file) => file,
+                                    Err(error) => {
+                                        errors.push(format!(
+                                            "Не удалось открыть {}: {error}",
+                                            archive_path.display()
+                                        ));
+                                        continue;
+                                    }
+                                };
+                                let mut archive = match ZipArchive::new(archive_file) {
+                                    Ok(archive) => archive,
+                                    Err(error) => {
+                                        errors.push(format!(
+                                            "Не удалось прочитать архив ассетов {}: {error}",
+                                            archive_path.display()
+                                        ));
+                                        continue;
+                                    }
+                                };
+                                for name in archive.file_names().flatten() {
                                     files.insert(name.replace('\\', "/").to_lowercase());
                                 }
                             }
-                            Err(error) => structure_issues.push(format!(
-                                "Не удалось прочитать запись {index} в архиве ассетов {}: {error}",
-                                archive_path.display()
-                            )),
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "Не удалось прочитать {}: {error}",
+                                product_dir.display()
+                            ));
                         }
                     }
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "Не удалось прочитать {}: {error}",
-                    product_dir.display()
-                ));
-            }
-        }
+                    Ok((product_dir.clone(), files, errors))
+                })
+                .collect()
+        });
+    let archive_results = archive_results?;
+    for (product_dir, files, errors) in archive_results {
+        structure_issues.extend(errors);
         ap_cache.insert(product_dir, files);
     }
 

@@ -495,6 +495,8 @@ fn main() {
     let app_clone20 = app.clone();
     let mut last_count: usize = 0;
     let mut last_query = String::new();
+    let mut last_status = String::new();
+    let mut last_check_log = String::new();
     let app_clone7 = app.clone();
     let missing_win = MissingAssetsWindow::new().unwrap();
     let missing_handle = missing_win.as_weak();
@@ -564,11 +566,12 @@ fn main() {
     // (handled in timer below)
 
     let timer = slint::Timer::default();
+    let ui_handle_timer = ui_handle.clone();
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(50),
         move || {
-            let ui = match ui_handle.upgrade() {
+            let ui = match ui_handle_timer.upgrade() {
                 Some(ui) => ui,
                 None => return,
             };
@@ -609,14 +612,13 @@ fn main() {
                 let q = ui.get_search_query().to_string();
                 app.search_query = q.clone();
                 if app.routes.len() == last_count && q == last_query {
-                    ui.set_status(app.status.clone().into());
-                    ui.set_check_log(app.check_log.clone().into());
-                    if ui.get_follow_log() {
-                        let content_height = ui.get_log_content_height();
-                        let visible_height = ui.get_log_visible_height();
-                        if content_height > visible_height {
-                            ui.set_log_scroll_y(content_height - visible_height);
-                        }
+                    if app.status != last_status {
+                        last_status = app.status.clone();
+                        ui.set_status(last_status.clone().into());
+                    }
+                    if app.check_log != last_check_log {
+                        last_check_log = app.check_log.clone();
+                        ui.set_check_log(last_check_log.clone().into());
                     }
                     ui.set_has_result(app.result.is_some());
                     return;
@@ -652,14 +654,13 @@ fn main() {
                     .map(|f| f.id.clone().into())
                     .collect();
                 ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
-                ui.set_status(app.status.clone().into());
-                ui.set_check_log(app.check_log.clone().into());
-                if ui.get_follow_log() {
-                    let content_height = ui.get_log_content_height();
-                    let visible_height = ui.get_log_visible_height();
-                    if content_height > visible_height {
-                        ui.set_log_scroll_y(content_height - visible_height);
-                    }
+                if app.status != last_status {
+                    last_status = app.status.clone();
+                    ui.set_status(last_status.clone().into());
+                }
+                if app.check_log != last_check_log {
+                    last_check_log = app.check_log.clone();
+                    ui.set_check_log(last_check_log.clone().into());
                 }
                 ui.set_has_result(app.result.is_some());
             }
@@ -707,6 +708,15 @@ fn main() {
             app.start_check();
         }
     });
+    let app_clone_reset = app.clone();
+    let ui_handle_reset = ui_handle.clone();
+    ui.on_reset_log(move || {
+        if let Some(ui) = ui_handle_reset.upgrade() {
+            if let Ok(app) = app_clone_reset.lock() {
+                ui.set_check_log(app.check_log.clone().into());
+            }
+        }
+    });
     let inventory_win = AssetInventoryWindow::new().unwrap();
     let inv_handle = inventory_win.as_weak();
     let inv_handle2 = inventory_win.as_weak();
@@ -720,6 +730,7 @@ fn main() {
     let settings_handle2 = settings_win.as_weak();
     if let Ok(app) = app_clone11.lock() {
         settings_win.set_serz_process_limit(app.serz_process_limit as f32);
+        settings_win.set_serz_process_limit_max(settings::maximum_serz_processes() as i32);
         settings_win.set_locoswap_path(app.locoswap_path.clone().into());
         settings_win.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
     }
@@ -1726,7 +1737,7 @@ mod tests {
     #[test]
     fn repro_route_check_hang() {
         let route = std::path::PathBuf::from(
-            r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7",
+            r"X:\SteamLibrary\steamapps\common\RailWorks\Content\Routes\00000034-f000-0000-0000-000000002014",
         );
         let rw = std::path::PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks");
         let assets = rw.join("Assets");
@@ -1771,7 +1782,7 @@ mod tests {
         if let Some(idx) = app
             .routes
             .iter()
-            .position(|r| r.id == "8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7")
+            .position(|r| r.id == "00000034-f000-0000-0000-000000002014")
         {
             app.selected_route = Some(idx);
         }

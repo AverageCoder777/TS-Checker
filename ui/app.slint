@@ -15,16 +15,7 @@ export component MainWindow inherits Window {
     in property <[string]> ignored-routes: [];
     in property <[string]> incomplete-folders: [];
     in property <string> check-log: "";
-    in-out property <bool> follow-log: true;
-    in-out property <length> log-scroll-y: 0px;
-    out property <length> log-content-height: log_view.content-height;
-    out property <length> log-visible-height: log_view.visible-height;
 
-    changed follow-log => {
-        if !follow-log {
-            log-scroll-y = log_view.content-y;
-        }
-    }
     in property <float> check_progress: 0.0;
     in property <string> status: "";
     in-out property <string> search-query: "";
@@ -35,6 +26,7 @@ export component MainWindow inherits Window {
 
     callback route-selected(int);
     callback start-check();
+    callback reset-log();
     callback open-route-folder();
     callback show-inventory();
     callback open-settings();
@@ -83,7 +75,11 @@ export component MainWindow inherits Window {
                     double-clicked => {
                         scenario-selected(i);
                     }
-                    Text { text: s; }
+                    HorizontalLayout {
+                        alignment: start;
+                        padding: 2px;
+                        Text { text: s; vertical-alignment: center; }
+                    }
                 }
             }
         }
@@ -113,14 +109,9 @@ export component MainWindow inherits Window {
             checked <=> ignore-list-open;
         }
         log_view := TextEdit {
-            read-only: true;
             text: check-log;
+            edited => { reset-log(); }
             height: 120px;
-            content-y: follow-log ? (log_view.content-height - log_view.visible-height) : log-scroll-y;
-        }
-        CheckBox {
-            text: "Follow log";
-            checked <=> follow-log;
         }
         Text { text: status; }
     }
@@ -295,6 +286,7 @@ export component SettingsWindow inherits Window {
     min-height: 130px;
 
     in-out property <float> serz-process-limit: 8;
+    in property <int> serz-process-limit-max: 16;
     in-out property <string> locoswap-path: "";
     max-height: 130px;
     max-width: 400px;
@@ -313,7 +305,7 @@ export component SettingsWindow inherits Window {
             Text { horizontal-alignment: TextHorizontalAlignment.start;
                 min-width: 0px;
                 overflow: TextOverflow.elide;
-                text: "Используется потоков процессора:";
+                text: "Потоков процессора: {serz-process-limit as int} / {serz-process-limit-max}";
                 vertical-alignment: TextVerticalAlignment.center; }
             Slider {
                 value <=> serz-process-limit;
@@ -321,7 +313,8 @@ export component SettingsWindow inherits Window {
                 minimum: 1;
                 orientation: Orientation.horizontal;
                 accessible-role: AccessibleRole.slider;
-                maximum: 16;
+                maximum: serz-process-limit-max;
+                step: 1;
             }
         }
         HorizontalBox {

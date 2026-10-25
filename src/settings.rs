@@ -106,9 +106,12 @@ pub(crate) fn append_asset_replacement_log(
 }
 
 pub(crate) fn maximum_serz_processes() -> usize {
+    // Оставляем один поток процессора свободным, чтобы параллельные serz.exe
+    // не загружали систему до полного зависания UI.
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
+        .saturating_sub(1)
         .max(1)
 }
 
