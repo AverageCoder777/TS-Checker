@@ -98,15 +98,11 @@ export component MainWindow inherits Window {
             }
         }
         CheckBox {
-            text: "Игнор-лист маршрутов";
+            text: "Игнор-лист включен";
             checked <=> ignore-list-open;
         }
         ListView {
             for folder in incomplete-folders: Text { text: folder; }
-        }
-        HorizontalBox {
-            Button { text: "Запуск"; }
-            Button { text: "Остановка"; }
         }
         Text { text: status; }
     }
