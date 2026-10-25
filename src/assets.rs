@@ -2059,7 +2059,7 @@ pub(crate) fn repair_umlaut_asset_chain(
     let mut staged_by_source: HashMap<RouteFile, StagedUmlautFile> = HashMap::new();
     let mut renamed_tg_files: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut scan_all_geometry = false;
-    let mut changed_references = 0;
+    
     // Папки с умляутами переименовываются целиком: все файлы внутри них
     // переезжают вместе с папкой, даже если их содержимое не меняется.
     let renamed_folders = folders_with_umlauts(&assets_root, &canonical_asset)?;
@@ -2188,7 +2188,7 @@ pub(crate) fn repair_umlaut_asset_chain(
             if transliterate_umlauts(&reference_text) != reference_text
                 && translated_dependency == canonical_dependency
             {
-                changed_references += 1;
+                
             }
             if translated_dependency != canonical_dependency {
                 let replacement = translated_reference(
@@ -2200,7 +2200,7 @@ pub(crate) fn repair_umlaut_asset_chain(
                     &reference,
                 )?;
                 edits.push((range, escape_xml_text(&replacement)));
-                changed_references += 1;
+                
             }
         }
         let mut rewritten = xml.clone();
@@ -2252,7 +2252,7 @@ pub(crate) fn repair_umlaut_asset_chain(
                 for (reference, range) in referenced_geometry_paths(&xml) {
                     let reference_text = reference.to_text();
                     if transliterate_umlauts(&reference_text) != reference_text {
-                        changed_references += 1;
+                        
                     }
                     let Some((dependency, _)) = resolve_product_reference(
                         &assets_root,
@@ -2405,7 +2405,7 @@ pub(crate) fn repair_umlaut_asset_chain(
             .into_iter()
             .filter(|reference| reference.path.eq_ignore_ascii_case(asset_relative_path))
         {
-            changed_references += 1;
+            
             edits.extend([
                 (reference.provider_range, new_parts[0].to_owned()),
                 (reference.product_range, new_parts[1].to_owned()),
@@ -2561,11 +2561,7 @@ pub(crate) fn repair_umlaut_asset_chain(
         let _ = fs::remove_dir(folder);
     }
     Ok(UmlautRepairReport {
-        changed_files: committed.len(),
-        changed_references,
         new_asset_path: new_relative_asset,
-        log_file: None,
-        log_error: None,
     })
 }
 
@@ -3807,7 +3803,6 @@ mod tests {
         )
         .expect("ремонт должен пройти");
 
-        eprintln!("REPORT files={:?}", report.files);
         eprintln!("REPORT new_path={}", report.new_asset_path);
         let names: Vec<String> = std::fs::read_dir(&folder)
             .unwrap()
@@ -3921,8 +3916,8 @@ mod tests {
         );
         match &result {
             Ok(report) => eprintln!(
-                "REPAIR изменено файлов: {}, новый путь: {}, файлы: {:?}",
-                report.changed_files, report.new_asset_path, report.files
+                "REPAIR новый путь: {}",
+                report.new_asset_path
             ),
             Err(error) => eprintln!("REPAIR ошибка: {error}"),
         }

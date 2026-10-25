@@ -256,11 +256,7 @@ struct AssetReplacementReport {
 }
 
 struct UmlautRepairReport {
-    changed_files: usize,
-    changed_references: usize,
     new_asset_path: String,
-    log_file: Option<PathBuf>,
-    log_error: Option<String>,
 }
 
 #[derive(Serialize)]

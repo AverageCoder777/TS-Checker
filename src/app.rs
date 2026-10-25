@@ -35,7 +35,6 @@ type InventoryScanOutcome = (Vec<UmlautAsset>, Vec<String>);
 
 pub(crate) struct CheckerApp {
     pub(crate) rw_path: String,
-    startup_scan_started: bool,
     pub(crate) routes: Vec<Route>,
     pub(crate) selected_route: Option<usize>,
     /// Сценарии выбранного маршрута.
@@ -60,26 +59,15 @@ pub(crate) struct CheckerApp {
     pub(crate) result: Option<CheckResult>,
     pub(crate) status: String,
     pub(crate) incomplete_folders: Vec<IncompleteRouteFolder>,
-    incomplete_window_open: bool,
     selected_incomplete: Option<usize>,
     pub(crate) ignored_route_ids: HashSet<String>,
-    ignore_list_window_open: bool,
     route_scan: Option<Receiver<Result<RouteScanOutcome, String>>>,
     check: Option<Receiver<CheckMessage>>,
     asset_replacement: Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
-    umlaut_repair: Option<Receiver<(String, Result<UmlautRepairReport, String>)>>,
     asset_replacement_feedback: Option<Result<String, String>>,
     /// Ассет, для которого в главном окне открыто подтверждение транслитерации.
-    pending_umlaut_repair: Option<UmlautAsset>,
     /// Замены символов, предложенные пользователем для сломанных имён.
-    character_fixes: CharacterFixes,
-    pending_delete: Option<Vec<PathBuf>>,
-    delete_paths: Option<Vec<PathBuf>>,
-    delete_rx: Option<Receiver<Result<usize, String>>>,
-    delete_feedback: Option<Result<usize, String>>,
-    settings_window_open: bool,
     pub(crate) asset_viewer_open: bool,
-    asset_editor_only: bool,
     pub(crate) asset_viewer_document: Option<EditorDocument>,
     pub(crate) editor_sync_pending: bool,
     pub(crate) asset_viewer_load: Option<Receiver<Result<EditorDocument, String>>>,
@@ -87,7 +75,6 @@ pub(crate) struct CheckerApp {
     pub(crate) route_thumbnails_enabled: bool,
     pub(crate) serz_process_limit: usize,
     pub(crate) locoswap_path: String,
-    attempted_route_icons: HashSet<PathBuf>,
     pub(crate) asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
     pub(crate) inventory_action_tx: Sender<InventoryAction>,
     inventory_action_rx: Receiver<InventoryAction>,
@@ -127,13 +114,10 @@ impl Default for CheckerApp {
         }
         Self {
             rw_path,
-            startup_scan_started: false,
             routes: Vec::new(),
             incomplete_folders: Vec::new(),
-            incomplete_window_open: false,
             selected_incomplete: None,
             ignored_route_ids,
-            ignore_list_window_open: false,
             selected_route: None,
             scenarios: Vec::new(),
             scenarios_route: None,
@@ -149,17 +133,8 @@ impl Default for CheckerApp {
             route_scan: None,
             check: None,
             asset_replacement: None,
-            umlaut_repair: None,
             asset_replacement_feedback: None,
-            pending_umlaut_repair: None,
-            character_fixes: CharacterFixes::new(),
-            pending_delete: None,
-            delete_paths: None,
-            delete_rx: None,
-            delete_feedback: None,
-            settings_window_open: false,
             asset_viewer_open: false,
-            asset_editor_only: false,
             asset_viewer_document: None,
             editor_sync_pending: false,
             asset_viewer_load: None,
@@ -167,7 +142,6 @@ impl Default for CheckerApp {
             route_thumbnails_enabled,
             serz_process_limit,
             locoswap_path: load_locoswap_path(),
-            attempted_route_icons: HashSet::new(),
             asset_inventory_state: Arc::new(Mutex::new(AssetInventoryWindowState::default())),
             inventory_action_tx,
             inventory_action_rx,
@@ -317,8 +291,6 @@ impl CheckerApp {
 
     pub(crate) fn asset_only(path: PathBuf) -> Self {
         let mut app = Self {
-            startup_scan_started: true,
-            asset_editor_only: true,
             ..Self::default()
         };
         app.start_asset_view(path);
@@ -327,8 +299,6 @@ impl CheckerApp {
 
     pub(crate) fn asset_only_error(error: String) -> Self {
         Self {
-            startup_scan_started: true,
-            asset_editor_only: true,
             asset_viewer_open: true,
             status: error,
             ..Self::default()
