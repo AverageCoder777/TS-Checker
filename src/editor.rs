@@ -163,11 +163,7 @@ pub(crate) fn next_backup_path(source_path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_converted_asset, is_viewable_asset_name, next_backup_path, validate_xml_document,
-        EditorDocument,
-    };
-    use std::path::Path;
-    use std::sync::Arc;
+        install_converted_asset, is_viewable_asset_name, next_backup_path, validate_xml_document,};
 
     #[test]
     fn supports_bin_and_geopcdx_names_case_insensitively() {

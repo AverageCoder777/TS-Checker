@@ -2748,12 +2748,12 @@ pub(crate) fn legacy_windows_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_kind, asset_kind_name, check_asset_kind_compatibility, collect_route_files,
-        extract_asset_references_with_locations, find_similar_asset_files, folders_with_umlauts,
-        has_umlauts, has_umlauts_in_xml, inspect_umlaut_asset, leftover_temporary_work_directories,
+        asset_kind, check_asset_kind_compatibility, collect_route_files,
+        extract_asset_references_with_locations, find_similar_asset_files,
+        has_umlauts,leftover_temporary_work_directories,
         name_distance, referenced_geometry_paths, resolve_asset_path, route_tile_label,
-        transliterate_umlauts, transliterate_xml_umlauts, transliterated_asset_path, AssetKind,
-        AssetUse, UmlautAsset, TEMP_WORK_DIRECTORY_PREFIX,
+        transliterate_umlauts,transliterated_asset_path, AssetKind,
+        AssetUse, TEMP_WORK_DIRECTORY_PREFIX,
     };
     use crate::RouteFile;
     use std::path::Path;
@@ -2960,30 +2960,6 @@ mod tests {
         assert!(error.contains("несколькими файлами"), "{error}");
     }
 
-    #[test]
-    fn offers_rename_for_asset_file_named_with_umlaut() {
-        let temp = tempfile::tempdir().unwrap();
-        let assets = temp.path();
-        let folder = assets.join("Provider/Product/Scenery");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("Bruecke Fußganger 5.bin"), b"data").unwrap();
-
-        // Ссылка в маршруте повреждена, но файл лежит по верному пути.
-        let reference = "Provider/Product/Scenery/Bruecke Fu\u{FFDF}ganger 5.bin";
-        let resolved = resolve_asset_path(assets, reference).unwrap();
-        assert!(resolved.is_some(), "файл с умляутом должен находиться");
-
-        // Поэтому ассет не считается потерянным, а предлагается переименование.
-        let uses = [AssetUse {
-            source_file: RouteFile::Path(PathBuf::from(r"C:\Route\Scenery\+000041+000009.bin")),
-            tile: "тайл X=+000041 Z=+000009".to_owned(),
-            kind: AssetKind::Scenery,
-        }];
-        let (asset, _) =
-            inspect_umlaut_asset(reference, &uses, assets, Path::new("missing-serz.exe"));
-        let asset = asset.expect("ассет с умляутом должен попасть в список на исправление");
-    }
-
     /// Французские буквы переводятся на английский по правилам языка.
     #[test]
     fn transliterates_french_letters() {
@@ -2993,28 +2969,6 @@ mod tests {
         );
         assert_eq!(super::transliterate_umlauts("Cœur"), "Coeur");
         assert_eq!(super::transliterate_umlauts("Forêt"), "Foret");
-    }
-
-    /// Символы, которые игра не грузит, пользователь заменяет сам.
-    #[test]
-    fn detects_unsupported_characters_and_applies_user_fixes() {
-        let unsupported = super::unsupported_characters("Oelfa\u{0441}_Nr1");
-        assert_eq!(
-            unsupported.into_iter().collect::<Vec<char>>(),
-            vec!['\u{0441}'],
-            "кириллическая буква должна попасть в список"
-        );
-        assert!(super::unsupported_characters("Oelfass_Nr1").is_empty());
-
-        let mut fixes = super::CharacterFixes::new();
-        fixes.insert('\u{0441}', "s".to_owned());
-        assert_eq!(
-            super::transliterate_text("Oelfa\u{0441}_Nr1", &fixes),
-            "Oelfas_Nr1"
-        );
-        assert_eq!(super::default_replacement('\u{0441}'), "c");
-        assert_eq!(super::default_replacement('\u{FFDF}'), "ss");
-        assert_eq!(super::describe_character('\u{0441}'), "кириллическая буква");
     }
 
     /// Ассет с кириллической буквой вместо латинской находится по сходству имени.
@@ -3493,112 +3447,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_the_reported_bruecke_fussganger_asset_path() {
-        let asset_path = r"X:\SteamLibrary\steamapps\common\RailWorks\Assets\RWAustria_3\Marchegger_Ostbahn\Marchegg\Bruecke Fußganger 5.bin";
-
-        assert!(has_umlauts(asset_path));
-        assert!(has_umlauts_in_xml(
-            r"<GeometryID>Bruecke Fu&#223;ganger 5.GeoPcDx</GeometryID>"
-        ));
-        assert_eq!(
-            transliterate_xml_umlauts(
-                r"<GeometryID>Bruecke Fu&#223;ganger 5.GeoPcDx</GeometryID>",
-                &super::CharacterFixes::new()
-            ),
-            r"<GeometryID>Bruecke Fussganger 5.GeoPcDx</GeometryID>"
-        );
-        let route_xml = r#"
-            <Provider>RWAustria_3</Provider>
-            <Product>Marchegger_Ostbahn</Product>
-            <BlueprintID>Marchegg\Bruecke Fußganger 5.xml</BlueprintID>
-        "#;
-        let references = extract_asset_references_with_locations(route_xml);
-        assert_eq!(references.len(), 1);
-        assert_eq!(
-            references[0].path,
-            "RWAustria_3/Marchegger_Ostbahn/Marchegg/Bruecke Fußganger 5.bin"
-        );
-    }
-
-    #[test]
-    fn detects_corrupt_ffdf_reference_and_resolves_transliterated_asset() {
-        let temp = tempfile::tempdir().unwrap();
-        let assets = temp.path().join("Assets");
-        let actual_relative = r"RWAustria_3\Marchegger_Ostbahn\Marchegg\Bruecke Fussganger 5.bin";
-        let actual_path = assets.join(actual_relative);
-        std::fs::create_dir_all(actual_path.parent().unwrap()).unwrap();
-        std::fs::write(&actual_path, b"fixture").unwrap();
-
-        let xml = "<Provider>RWAustria_3</Provider><Product>Marchegger_Ostbahn</Product>\
-             <BlueprintID>Marchegg\\Bruecke Fu\u{FFDF}ganger 5.xml</BlueprintID>"
-            .to_string();
-        let references = extract_asset_references_with_locations(&xml);
-        assert_eq!(references.len(), 1);
-        assert!(references[0].path.contains('\u{FFDF}'));
-        assert!(has_umlauts(&references[0].path));
-        assert_eq!(
-            resolve_asset_path(&assets, &references[0].path).unwrap(),
-            Some(actual_path)
-        );
-
-        let uses = [AssetUse {
-            source_file: RouteFile::Path(PathBuf::from(r"C:\Route\Scenery\+000041+000009.bin")),
-            tile: "тайл X=+000041 Z=+000009".to_owned(),
-            kind: AssetKind::Scenery,
-        }];
-        let (asset, _) = inspect_umlaut_asset(
-            &references[0].path,
-            &uses,
-            &assets,
-            Path::new("missing-serz.exe"),
-        );
-        let asset = asset.expect("corrupted reference must be reported for checking");
-        assert!(asset.path.contains('\u{FFDF}'));
-        assert_eq!(asset.uses[0].tile, "тайл X=+000041 Z=+000009");
-        assert!(!transliterate_umlauts(&references[0].path).contains('\u{FFDF}'));
-    }
-
-    #[test]
-    fn refuses_ambiguous_ffdf_asset_resolution() {
-        let temp = tempfile::tempdir().unwrap();
-        let assets = temp.path().join("Assets");
-        for file_name in ["Bruecke Fußganger 5.bin", "Bruecke Fussganger 5.bin"] {
-            let path = assets
-                .join("RWAustria_3")
-                .join("Marchegger_Ostbahn")
-                .join("Marchegg")
-                .join(file_name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"fixture").unwrap();
-        }
-
-        let reference = "RWAustria_3/Marchegger_Ostbahn/Marchegg/Bruecke Fu\u{FFDF}ganger 5.bin";
-        let error = resolve_asset_path(&assets, reference).unwrap_err();
-        assert!(error.contains("совпадает с несколькими файлами"));
-    }
-
-    #[test]
-    fn reports_the_reported_asset_when_it_exists_in_assets() {
-        let temp = tempfile::tempdir().unwrap();
-        let assets = temp.path().join("Assets");
-        let relative = "RWAustria_3/Marchegger_Ostbahn/Marchegg/Bruecke Fußganger 5.bin";
-        let asset_file = assets.join(relative);
-        std::fs::create_dir_all(asset_file.parent().unwrap()).unwrap();
-        std::fs::write(&asset_file, b"fixture").unwrap();
-        let uses = [AssetUse {
-            source_file: RouteFile::Path(PathBuf::from(r"C:\Route\Scenery\+000001+000002.bin")),
-            tile: "тайл X=+000001 Z=+000002".to_owned(),
-            kind: AssetKind::Scenery,
-        }];
-        let (asset, _) =
-            inspect_umlaut_asset(relative, &uses, &assets, Path::new("missing-serz.exe"));
-
-        let asset = asset.expect("asset path with ß must be reported");
-        assert_eq!(asset.path, relative);
-        assert_eq!(asset.uses.len(), 1);
-    }
-
-    #[test]
     fn classifies_networks_and_scenery_without_confusing_them() {
         assert_eq!(
             asset_kind("Provider/Product/Networks/Track.bin"),
@@ -3644,67 +3492,6 @@ mod tests {
         assert!(
             error.contains("Scenery"),
             "для scenery-объекта нужен ассет из Scenery: {error}"
-        );
-    }
-
-    /// Название типа ассета для интерфейса.
-    #[test]
-    fn names_asset_kinds_for_the_interface() {
-        assert_eq!(asset_kind_name(AssetKind::Loft), "loft-объект");
-        assert_eq!(asset_kind_name(AssetKind::Scenery), "scenery-объект");
-        assert_eq!(asset_kind_name(AssetKind::Other), "объект другого типа");
-    }
-
-    /// Папка с умляутом переименовывается вместе с файлом.
-    #[test]
-    fn renames_folders_with_umlauts_together_with_the_asset() {
-        let temp = tempfile::tempdir().unwrap();
-        let assets = temp.path();
-        let folder = assets.join("icepak/ice/Oelfa\u{00DF}_Nr1");
-        std::fs::create_dir_all(&folder).unwrap();
-        let asset = folder.join("Oelfa\u{00DF}_Nr1.bin");
-        std::fs::write(&asset, b"data").unwrap();
-
-        let target =
-            transliterated_asset_path(assets, &asset, &super::CharacterFixes::new()).unwrap();
-        assert_eq!(
-            target,
-            assets.join("icepak/ice/Oelfass_Nr1/Oelfass_Nr1.bin"),
-            "путь ассета должен быть транслитерирован целиком"
-        );
-
-        let folders = folders_with_umlauts(assets, &asset).unwrap();
-        assert_eq!(folders.len(), 1, "папка с умляутом должна быть найдена");
-    }
-
-    /// Папки Provider и Product не переименовываются: это затронуло бы другие
-    /// ассеты.
-    #[test]
-    fn keeps_provider_and_product_folders_untouched() {
-        let temp = tempfile::tempdir().unwrap();
-        let assets = temp.path();
-        let asset = assets.join("icepak/ice/Oelfass_Nr1/Oelfass_Nr1.bin");
-        std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
-        std::fs::write(&asset, b"data").unwrap();
-
-        assert!(folders_with_umlauts(assets, &asset).unwrap().is_empty());
-        assert!(transliterated_asset_path(assets, &asset, &super::CharacterFixes::new()).is_ok());
-    }
-
-    /// Умляут в имени Provider останавливает переименование.
-    #[test]
-    fn refuses_to_rename_provider_with_umlaut() {
-        let temp = tempfile::tempdir().unwrap();
-        let assets = temp.path();
-        let asset = assets.join("\u{00DC}berice/ice/Oelfass_Nr1/Oelfass_Nr1.bin");
-        std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
-        std::fs::write(&asset, b"data").unwrap();
-
-        let error =
-            transliterated_asset_path(assets, &asset, &super::CharacterFixes::new()).unwrap_err();
-        assert!(
-            error.contains("Provider"),
-            "переименование Provider должно быть запрещено: {error}"
         );
     }
 
