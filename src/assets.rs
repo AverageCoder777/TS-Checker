@@ -125,38 +125,42 @@ pub(crate) fn collect_archive_members(route_path: &Path) -> Result<Vec<RouteFile
         {
             continue;
         }
-        let file = fs::File::open(&path)
-            .map_err(|error| format!("Не удалось открыть архив {}: {error}", path.display()))?;
-        let mut zip = zip::ZipArchive::new(file)
-            .map_err(|error| format!("Не удалось прочитать архив {}: {error}", path.display()))?;
-        for index in 0..zip.len() {
-            let Ok(member) = zip.by_index(index) else {
-                continue;
-            };
-            if !member.is_file() {
-                continue;
-            }
-            let Ok(name) = member.name() else {
-                continue;
-            };
-            let relative = Path::new(name.as_ref());
-            if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                continue;
-            }
-            if !relative.extension().is_some_and(|extension| {
-                extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("xml")
-            }) {
-                continue;
-            }
-            members.push(RouteFile::Archive {
-                archive: path.clone(),
-                name: name.into_owned(),
-            });
+    let file = fs::File::open(&path)
+        .map_err(|error| format!("Не удалось открыть архив {}: {error}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|error| format!("Не удалось прочитать архив {}: {error}", path.display()))?;
+    let archive_stamp = crate::analysis_cache::FileStamp::of(&path);
+    // Индекс имён записей архива строится один раз в памяти: поиск и
+    // дедупликация имён идут через HashSet, а не через линейный обход zip.
+    let mut seen_names: HashSet<String> = HashSet::new();
+    for name_result in zip.file_names() {
+        let Ok(name) = name_result else {
+            continue;
+        };
+        let name = name.into_owned();
+        let normalized_name = name.replace('\\', "/");
+        if !seen_names.insert(normalized_name.to_lowercase()) {
+            continue;
         }
+        let relative = Path::new(&name);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+        if !relative.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("xml")
+        }) {
+            continue;
+        }
+        members.push(RouteFile::Archive {
+            archive: path.clone(),
+            name: name.to_owned(),
+            stamp: archive_stamp,
+        });
+    }
     }
     Ok(members)
 }
@@ -1274,6 +1278,60 @@ where
 
     let temp_dir = tempdir()
         .map_err(|error| format!("Не удалось создать временную папку для Serz: {error}"))?;
+
+    // Архивы маршрута (.ap) распаковываются один раз целиком: иначе каждый
+    // файл архива открывает zip заново, что на MainContent.ap умножает время
+    // проверки в несколько раз.
+    let mut archives_to_extract: Vec<PathBuf> = route_files
+        .iter()
+        .filter_map(|route_file| match route_file {
+            RouteFile::Archive { archive, .. } => Some(archive.clone()),
+            RouteFile::Path(_) => None,
+        })
+        .collect();
+    archives_to_extract.sort();
+    archives_to_extract.dedup();
+    for archive_path in &archives_to_extract {
+        let archive_file = match fs::File::open(archive_path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        let mut archive = match ZipArchive::new(archive_file) {
+            Ok(archive) => archive,
+            Err(_) => continue,
+        };
+        for index in 0..archive.len() {
+            let mut member = match archive.by_index(index) {
+                Ok(member) => member,
+                Err(_) => continue,
+            };
+            if member.is_dir() {
+                continue;
+            }
+            let Ok(name) = member.name().map(|name| name.into_owned()) else {
+                continue;
+            };
+            let relative = Path::new(&name);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                continue;
+            }
+            let target = temp_dir.path().join(relative);
+            if target.exists() {
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(mut output) = fs::File::create(&target) {
+                let _ = std::io::copy(&mut member, &mut output);
+            }
+        }
+    }
+
     let normal_binary_count = normal_files
         .iter()
         .filter(|path| {
@@ -1425,13 +1483,12 @@ where
         "Уникальных ссылок: {}. Проверка файлов и архивов .ap...",
         asset_uses.len(),
     ));
-    let ap_start = std::time::Instant::now();
     let mut ap_cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
 
     // Уникальные папки продуктов, для которых нужно проверить .ap-архивы.
     // Читаем архивы параллельно: открытие большого .ap занимает секунды, и
     // последовательное чтение нескольких архивов задерживает всю проверку.
-    let mut product_dirs: Vec<PathBuf> = asset_uses
+    let mut product_dirs: HashSet<PathBuf> = asset_uses
         .keys()
         .filter_map(|relative_asset| {
             let parts: Vec<&str> = relative_asset.split('/').collect();
@@ -1447,8 +1504,6 @@ where
             Some(assets_path.join(parts[0]).join(parts[1]))
         })
         .collect();
-    product_dirs.sort();
-    product_dirs.dedup();
 
     let archive_results: Result<Vec<(PathBuf, HashSet<String>, Vec<String>)>, String> =
         pool.install(|| {
@@ -1486,7 +1541,7 @@ where
                                         continue;
                                     }
                                 };
-                                let mut archive = match ZipArchive::new(archive_file) {
+                                let archive = match ZipArchive::new(archive_file) {
                                     Ok(archive) => archive,
                                     Err(error) => {
                                         errors.push(format!(
@@ -3206,6 +3261,7 @@ mod tests {
         let inside = crate::RouteFile::Archive {
             archive: route.join("MainContent.ap"),
             name: "TemplateRoutes/route.xml".to_owned(),
+            stamp: None,
         };
         let target = inside.install_target(route);
         assert_eq!(target, route.join("TemplateRoutes/route.xml"));
@@ -3278,6 +3334,7 @@ mod tests {
             source_file: RouteFile::Archive {
                 archive: archive.clone(),
                 name: "Scenery/Grass.xml".to_owned(),
+                stamp: None,
             },
             tile: "тайл X=+000000 Z=+000000".to_owned(),
             kind: AssetKind::Scenery,

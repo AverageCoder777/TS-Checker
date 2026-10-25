@@ -278,7 +278,22 @@ pub(crate) fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetRef
     let haystack = xml.as_bytes();
     let mut references: Vec<(usize, AssetReference)> = Vec::new();
     let mut covered: Vec<std::ops::Range<usize>> = Vec::new();
+    // Контекст (scenery/loft/vehicle) определяется ближайшим предыдущим тегом.
+    // Чтобы не делать O(N) rfind для каждого блока на гигантском Tracks.bin,
+    // поддерживаем индексы последних тегов инкрементально.
+    let mut context_cursor = 0usize;
+    let mut vehicle_ctx: Option<usize> = None;
+    let mut scenery_ctx: Option<usize> = None;
+    let mut loft_ctx: Option<usize> = None;
     for (open_at, block_end, content_start, content_end) in absolute_blueprint_blocks(haystack) {
+        update_context_state(
+            xml,
+            &mut context_cursor,
+            open_at,
+            &mut vehicle_ctx,
+            &mut scenery_ctx,
+            &mut loft_ctx,
+        );
         covered.push(open_at..block_end);
         let Some((provider_range, _)) =
             find_tagged_value(haystack, "Provider", content_start, content_end)
@@ -302,7 +317,7 @@ pub(crate) fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetRef
             provider_range,
             product_range,
             blueprint_range,
-            reference_kind(xml, open_at),
+            kind_from_context_state(&vehicle_ctx, &scenery_ctx, &loft_ctx),
         ) else {
             continue;
         };
@@ -320,6 +335,14 @@ pub(crate) fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetRef
             continue;
         };
         cursor = end;
+        update_context_state(
+            xml,
+            &mut context_cursor,
+            position,
+            &mut vehicle_ctx,
+            &mut scenery_ctx,
+            &mut loft_ctx,
+        );
         while covered_index < covered.len() && covered[covered_index].end <= position {
             covered_index += 1;
         }
@@ -333,7 +356,7 @@ pub(crate) fn extract_asset_references_with_locations(xml: &str) -> Vec<AssetRef
             provider_range,
             product_range,
             blueprint_range,
-            reference_kind(xml, position),
+            kind_from_context_state(&vehicle_ctx, &scenery_ctx, &loft_ctx),
         ) else {
             continue;
         };
@@ -484,6 +507,53 @@ pub(crate) fn route_tile_label(route_path: &Path, source_file: &RouteFile) -> St
         }
     }
     relative
+}
+
+fn update_context_state(
+    xml: &str,
+    cursor: &mut usize,
+    pos: usize,
+    vehicle: &mut Option<usize>,
+    scenery: &mut Option<usize>,
+    loft: &mut Option<usize>,
+) {
+    if pos <= *cursor {
+        return;
+    }
+    let end = pos.min(xml.len());
+    let slice = &xml[*cursor..end];
+    if let Some(index) = slice.rfind("<iRailVehicleBlueprint") {
+        *vehicle = Some(*cursor + index);
+    }
+    if let Some(index) = slice.rfind("<SceneryRenderBlueprint") {
+        *scenery = Some(*cursor + index);
+    }
+    if let Some(index) = slice.rfind("<RenderBlueprint") {
+        *loft = Some(*cursor + index);
+    }
+    *cursor = end;
+}
+
+fn kind_from_context_state(
+    vehicle: &Option<usize>,
+    scenery: &Option<usize>,
+    loft: &Option<usize>,
+) -> AssetKind {
+    let mut candidates: Vec<(usize, AssetKind)> = Vec::new();
+    if let Some(index) = vehicle {
+        candidates.push((*index, AssetKind::Vehicle));
+    }
+    if let Some(index) = scenery {
+        candidates.push((*index, AssetKind::Scenery));
+    }
+    if let Some(index) = loft {
+        candidates.push((*index, AssetKind::Loft));
+    }
+    candidates
+        .into_iter()
+        .max_by_key(|(index, _)| *index)
+        .map(|(_, kind)| kind)
+        .unwrap_or(AssetKind::Other)
 }
 pub(crate) fn asset_kind(path: &str) -> AssetKind {
     let components: Vec<_> = path.split('/').collect();

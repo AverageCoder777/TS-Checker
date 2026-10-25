@@ -148,20 +148,22 @@ pub(crate) fn resolve_blueprint_file(
                     continue;
                 }
                 if let Ok(file) = fs::File::open(&path) {
-                    if let Ok(mut zip) = zip::ZipArchive::new(file) {
-                        for i in 0..zip.len() {
-                            if let Ok(member) = zip.by_index(i) {
-                                if member.is_file() {
-                                    let member_name =
-                                        member.name().map(|c| c.to_string()).unwrap_or_default();
-                                    let member_stem = Path::new(&member_name)
-                                        .file_stem()
-                                        .map(|s| s.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    if member_stem.eq_ignore_ascii_case(&file_stem) {
-                                        return Some(path.clone());
-                                    }
-                                }
+                    if let Ok(zip) = zip::ZipArchive::new(file) {
+                        let mut seen = std::collections::HashSet::new();
+                        for name_result in zip.file_names() {
+                            let Ok(name) = name_result else {
+                                continue;
+                            };
+                            let member_name = name.into_owned();
+                            let member_stem = Path::new(&member_name)
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            if !seen.insert(member_stem.to_lowercase()) {
+                                continue;
+                            }
+                            if member_stem.eq_ignore_ascii_case(&file_stem) {
+                                return Some(path.clone());
                             }
                         }
                     }

@@ -24,7 +24,7 @@ pub(crate) const ANALYSIS_CACHE_FILE_NAME: &str = ".ts-checker-analysis-cache.js
 const CACHE_VERSION: u32 = 4;
 
 /// Признаки файла, по которым определяется его неизменность.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct FileStamp {
     pub(crate) modified: u64,
     pub(crate) size: u64,
