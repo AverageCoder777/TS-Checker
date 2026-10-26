@@ -129,7 +129,7 @@ export component AssetInventoryWindow inherits Window {
 
     callback toggle-missing-only();
     callback search-changed(string);
-    callback row-clicked(int);
+    callback row-selected(int);
     callback open-in-editor();
     callback scan-umlauts();
     callback sort-ascending(int);
@@ -157,7 +157,7 @@ export component AssetInventoryWindow inherits Window {
         }
         StandardTableView {
             current-row-changed(row) => {
-                root.row-clicked(row);
+                root.row-selected(row);
             }
             columns: [
                 { title: "Путь ассета", min-width: 200px, horizontal-stretch: 2, sort-order: SortOrder.ascending },

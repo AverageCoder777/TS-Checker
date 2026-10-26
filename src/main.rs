@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use zip::ZipArchive;
 
@@ -1391,26 +1392,26 @@ fn main() {
             }
         }
     });
-    inventory_win.on_row_clicked(move |row| {
+    let mut inv_last_row: i32 = -1;
+    let mut inv_last_click = Instant::now();
+    const INV_DOUBLE_CLICK_MS: u64 = 400;
+    inventory_win.on_row_selected(move |row| {
+        let now = Instant::now();
+        let is_double = row == inv_last_row
+            && now.saturating_duration_since(inv_last_click)
+                <= Duration::from_millis(INV_DOUBLE_CLICK_MS);
+        inv_last_row = row;
+        inv_last_click = now;
+        if !is_double || row < 0 {
+            return;
+        }
         if let Some(inv) = inv_handle9.upgrade() {
-            if row < 0 {
-                return;
-            }
             let rows = inv.get_inventory_rows();
             if (row as usize) >= rows.row_count() {
                 return;
             }
             let first_cell = rows.row_data(row as usize).and_then(|rm| rm.row_data(0));
             let path_text = first_cell.map(|c| c.text.to_string()).unwrap_or_default();
-            // debug log
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(r"C:\Users\kosty\AppData\Local\Temp\kilo\dblclick.log")
-            {
-                let _ = writeln!(f, "row={} path_text={:?}", row, path_text);
-            }
             if path_text.is_empty() {
                 return;
             }
