@@ -395,16 +395,17 @@ export component MissingAssetsWindow inherits Window {
 export component SettingsWindow inherits Window {
     title: "Настройки";
     min-width: 400px;
-    min-height: 130px;
+    min-height: 160px;
 
     in-out property <float> serz-process-limit: 8;
     in property <int> serz-process-limit-max: 16;
     in-out property <string> locoswap-path: "";
-    max-height: 130px;
+    max-height: 160px;
     max-width: 400px;
-    preferred-height: 130px;
+    preferred-height: 160px;
     preferred-width: 400px;
     in-out property <bool> route-thumbnails-enabled: true;
+    in-out property <bool> route-scan-on-hdd: false;
 
     callback save-settings();
     callback pick-locoswap();
@@ -456,6 +457,11 @@ export component SettingsWindow inherits Window {
             min-height: 20px;
             text: "Миниатюры маршрутов";
             checked <=> route-thumbnails-enabled;
+        }
+        CheckBox {
+            min-height: 20px;
+            text: "Игра установлена на HDD";
+            checked <=> route-scan-on-hdd;
         }
         Button {
             min-height: 20px;

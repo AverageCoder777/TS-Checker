@@ -172,6 +172,51 @@ pub(crate) fn write_serz_process_limit(path: &Path, limit: usize) -> Result<(), 
     })
 }
 
+pub(crate) fn route_scan_on_hdd_setting_file() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| {
+        PathBuf::from(app_data)
+            .join("TS-Checker")
+            .join("route_scan_on_hdd.txt")
+    })
+}
+
+pub(crate) fn load_route_scan_on_hdd() -> Result<bool, String> {
+    let path = route_scan_on_hdd_setting_file()
+        .ok_or_else(|| "Windows APPDATA не определена; настройка HDD недоступна.".to_owned())?;
+    match fs::read_to_string(&path) {
+        Ok(value) => match value.trim() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(format!("Некорректное значение настройки HDD в {}.", path.display())),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("Не удалось прочитать настройку HDD {}: {error}", path.display())),
+    }
+}
+
+pub(crate) fn save_route_scan_on_hdd(enabled: bool) -> Result<(), String> {
+    let path = route_scan_on_hdd_setting_file()
+        .ok_or_else(|| "Windows APPDATA не определена; настройку HDD не сохранили.".to_owned())?;
+    let parent = path.parent().ok_or_else(|| "Некорректный путь к настройкам HDD.".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!("Не удалось создать папку настроек: {error}")
+    })?;
+    fs::write(&path, enabled.to_string()).map_err(|error| {
+        format!("Не удалось сохранить настройку HDD {}: {error}", path.display())
+    })
+}
+
+/// Количество потоков сканирования маршрутов.
+/// На HDD — жёстко 4 (I/O-bound, больше потоков только гасят диск).
+/// Иначе — лимит серз-процессов (CPU-bound).
+pub(crate) fn route_scan_max_threads(serz_process_limit: usize, on_hdd: bool) -> usize {
+    if on_hdd {
+        4
+    } else {
+        serz_process_limit.max(1)
+    }
+}
+
 pub(crate) fn load_route_thumbnail_setting() -> Result<bool, String> {
     let path = route_thumbnail_setting_file().ok_or_else(|| {
         "Windows APPDATA не определена; настройка миниатюр недоступна.".to_owned()

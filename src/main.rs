@@ -16,13 +16,7 @@ use std::thread;
 use tempfile::tempdir;
 use zip::ZipArchive;
 
-/// Сколько процессов Serz запускать по умолчанию.
-///
-/// Конвертация файлов идёт параллельно и упирается в процессор, поэтому
-/// полезно задействовать все ядра. Значение всё равно ограничивается
-/// числом доступных процессоров.
 const DEFAULT_CONCURRENT_SERZ: usize = 8;
-const MAX_CONCURRENT_ROUTE_SCANS: usize = 4;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Route {
@@ -876,6 +870,7 @@ fn main() {
         settings_win.set_serz_process_limit_max(settings::maximum_serz_processes() as i32);
         settings_win.set_locoswap_path(app.locoswap_path.clone().into());
         settings_win.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
+        settings_win.set_route_scan_on_hdd(app.route_scan_on_hdd);
     }
     settings_win.on_pick_locoswap(move || {
         if let Some(sw) = settings_handle.upgrade() {
@@ -897,13 +892,16 @@ fn main() {
             let limit = sw.get_serz_process_limit() as usize;
             let path = sw.get_locoswap_path().to_string();
             let thumbs = sw.get_route_thumbnails_enabled();
+            let hdd = sw.get_route_scan_on_hdd();
             if let Ok(mut app) = app_clone11.lock() {
                 app.serz_process_limit = limit;
                 app.locoswap_path = path.clone();
                 app.route_thumbnails_enabled = thumbs;
+                app.route_scan_on_hdd = hdd;
                 let _ = crate::settings::save_serz_process_limit(limit);
                 let _ = crate::settings::save_locoswap_path(&path);
                 let _ = crate::settings::save_route_thumbnail_setting(thumbs);
+                let _ = crate::settings::save_route_scan_on_hdd(hdd);
             }
         }
     });

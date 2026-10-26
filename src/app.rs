@@ -64,6 +64,7 @@ pub(crate) struct CheckerApp {
     pub(crate) asset_viewer_save: Option<Receiver<Result<SavedAsset, String>>>,
     pub(crate) route_thumbnails_enabled: bool,
     pub(crate) serz_process_limit: usize,
+    pub(crate) route_scan_on_hdd: bool,
     pub(crate) locoswap_path: String,
     pub(crate) asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
     pub(crate) inventory_action_tx: Sender<InventoryAction>,
@@ -94,12 +95,20 @@ impl Default for CheckerApp {
                 Some(error),
             ),
         };
+        let (route_scan_on_hdd, route_scan_hdd_warning) = match load_route_scan_on_hdd() {
+            Ok(value) => (value, None),
+            Err(error) => (false, Some(error)),
+        };
         let (inventory_action_tx, inventory_action_rx) = mpsc::channel();
         if let Some(warning) = settings_warning {
             status.push(' ');
             status.push_str(&warning);
         }
         if let Some(warning) = serz_settings_warning {
+            status.push(' ');
+            status.push_str(&warning);
+        }
+        if let Some(warning) = route_scan_hdd_warning {
             status.push(' ');
             status.push_str(&warning);
         }
@@ -137,6 +146,7 @@ impl Default for CheckerApp {
             asset_viewer_save: None,
             route_thumbnails_enabled,
             serz_process_limit,
+            route_scan_on_hdd,
             locoswap_path: load_locoswap_path(),
             asset_inventory_state: Arc::new(Mutex::new(AssetInventoryWindowState::default())),
             inventory_action_tx,
@@ -363,8 +373,9 @@ impl CheckerApp {
         self.result = None;
         self.status = "Сканирование маршрутов...".to_owned();
         let ignored_route_ids = self.ignored_route_ids.clone();
+        let max_threads = crate::settings::route_scan_max_threads(self.serz_process_limit, self.route_scan_on_hdd);
         thread::spawn(move || {
-            let result = scan_routes_with_cache(&root, &ignored_route_ids, allow_cache);
+            let result = scan_routes_with_cache(&root, &ignored_route_ids, allow_cache, max_threads);
             let _ = tx.send(result);
         });
     }

@@ -65,6 +65,7 @@ pub(crate) fn scan_routes_with_cache(
     rw_path: &Path,
     ignored_route_ids: &HashSet<String>,
     allow_cache: bool,
+    max_threads: usize,
 ) -> Result<RouteScanOutcome, String> {
     let canonical_game_path = rw_path.canonicalize().map_err(|error| {
         format!(
@@ -115,7 +116,7 @@ pub(crate) fn scan_routes_with_cache(
         }
     }
 
-    let result = scan_routes_with_ignored(&canonical_game_path, ignored_route_ids)?;
+    let result = scan_routes_with_ignored(&canonical_game_path, ignored_route_ids, max_threads)?;
     if let Some(cache_path) = cache_file {
         let cache = RouteScanCache {
             icon_scan_version: 4,
@@ -163,12 +164,13 @@ pub(crate) fn scan_routes_with_cache(
 
 #[cfg(test)]
 pub(crate) fn scan_routes(rw_path: &Path) -> Result<RouteScanResult, String> {
-    scan_routes_with_ignored(rw_path, &HashSet::new())
+    scan_routes_with_ignored(rw_path, &HashSet::new(), 4)
 }
 
 pub(crate) fn scan_routes_with_ignored(
     rw_path: &Path,
     ignored_route_ids: &HashSet<String>,
+    max_threads: usize,
 ) -> Result<RouteScanResult, String> {
     let routes_path = rw_path.join("Content").join("Routes");
     let entries = fs::read_dir(&routes_path)
@@ -189,7 +191,7 @@ pub(crate) fn scan_routes_with_ignored(
         }
     }
 
-    let thread_count = route_folders.len().clamp(1, MAX_CONCURRENT_ROUTE_SCANS);
+    let thread_count = route_folders.len().clamp(1, max_threads);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
