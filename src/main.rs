@@ -1771,7 +1771,7 @@ mod tests {
         let ignored_ids = ["route".to_owned(), "ignored-incomplete".to_owned()]
             .into_iter()
             .collect();
-        let ignored_scan = scan_routes_with_ignored(temp.path(), &ignored_ids).unwrap();
+        let ignored_scan = scan_routes_with_ignored(temp.path(), &ignored_ids, 4).unwrap();
         assert!(ignored_scan.incomplete_folders.is_empty());
         assert_eq!(ignored_scan.routes.len(), 2);
     }
