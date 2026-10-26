@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView, Slider, TextEdit } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView, Slider, TextEdit, ComboBox } from "std-widgets.slint";
 
 export struct RouteItem {
     name: string,
@@ -11,6 +11,7 @@ export component MainWindow inherits Window {
     min-height: 1000px;
 
     in property <[RouteItem]> route-items: [];
+    in-out property <bool> route-thumbnails-enabled: true;
     in-out property <bool> ignore-list-open: false;
     in property <[string]> ignored-routes: [];
     in property <[string]> incomplete-folders: [];
@@ -39,7 +40,7 @@ export component MainWindow inherits Window {
         }
         ListView {
             min-height: 150px;
-            preferred-height: 150px;
+            preferred-height: 400px;
             for item[i] in route-items: Rectangle {
                 background: i == selected-route ? #3a3a3a : transparent;
                 TouchArea {
@@ -54,15 +55,16 @@ export component MainWindow inherits Window {
                         spacing: 6px;
                         alignment: start;
                         padding: 2px;
-                         Image {
-                             source: item.icon-source;
-                             width: 256px;
-                             height: 128px;
-                             preferred-width: 256px;
-                             preferred-height: 128px;
-                         }
+                        Image {
+                            source: item.icon-source;
+                            width: route-thumbnails-enabled ? 256px : 0px;
+                            height: route-thumbnails-enabled ? 128px : 0px;
+                            preferred-width: route-thumbnails-enabled ? 256px : 0px;
+                            preferred-height: route-thumbnails-enabled ? 128px : 0px;
+                        }
                         Text {
                             text: item.name;
+                            font-size: 16px;
                             vertical-alignment: center;
                         }
                     }
@@ -89,17 +91,22 @@ export component MainWindow inherits Window {
             }
         }
         HorizontalBox {
+            min-height: 30px;
+            preferred-height: 40px;
             Button {
+                min-height: 30px;
                 text: "Проверить маршрут";
                 enabled: selected-route >= 0;
                 clicked => { start-check(); }
             }
             Button {
+                min-height: 30px;
                 text: "Показать все объекты";
                 enabled: has-result;
                 clicked => { show-inventory(); }
             }
             Button {
+                min-height: 30px;
                 text: "Настройки";
                 clicked => { open-settings(); }
             }
@@ -111,7 +118,7 @@ export component MainWindow inherits Window {
         log_view := TextEdit {
             text: check-log;
             edited => { reset-log(); }
-            height: 120px;
+            height: 100px;
         }
         Text { text: status; }
     }
@@ -418,20 +425,25 @@ export component MissingAssetsWindow inherits Window {
 export component SettingsWindow inherits Window {
     title: "Настройки";
     min-width: 400px;
-    min-height: 160px;
+    min-height: 190px;
 
-    in-out property <float> serz-process-limit: 8;
+    in-out property <int> serz-process-limit: 8;
     in property <int> serz-process-limit-max: 16;
+    in property <[string]> serz-presets: [];
+    in-out property <int> serz-process-limit-index: 0;
     in-out property <string> locoswap-path: "";
-    max-height: 160px;
+    in-out property <string> game-path: "";
+    max-height: 210px;
     max-width: 400px;
-    preferred-height: 160px;
+    preferred-height: 210px;
     preferred-width: 400px;
     in-out property <bool> route-thumbnails-enabled: true;
     in-out property <bool> route-scan-on-hdd: false;
 
     callback save-settings();
     callback pick-locoswap();
+    callback pick-game();
+    callback serz-preset-selected(int);
 
     VerticalBox {
         HorizontalBox {
@@ -441,16 +453,16 @@ export component SettingsWindow inherits Window {
             Text { horizontal-alignment: TextHorizontalAlignment.start;
                 min-width: 0px;
                 overflow: TextOverflow.elide;
-                text: "Потоков процессора: {serz-process-limit as int} / {serz-process-limit-max}";
+                text: "Потоков процессора:";
                 vertical-alignment: TextVerticalAlignment.center; }
-            Slider {
-                value <=> serz-process-limit;
-                min-width: 170px;
-                minimum: 1;
-                orientation: Orientation.horizontal;
-                accessible-role: AccessibleRole.slider;
-                maximum: serz-process-limit-max;
-                step: 1;
+            
+            ComboBox {
+                width: 100px;
+                model: serz-presets;
+                current-index <=> serz-process-limit-index;
+                selected(text) => {
+                    root.serz-preset-selected(self.current-index)
+                }
             }
         }
         HorizontalBox {
@@ -475,6 +487,29 @@ export component SettingsWindow inherits Window {
             Button { icon-size: 15px;
                 min-height: 20px;
                 text: "Обзор..."; clicked => { pick-locoswap(); } }
+        }
+        HorizontalBox {
+            alignment: LayoutAlignment.stretch;
+            cross-axis-alignment: CrossAxisAlignment.center;
+            min-height: 20px;
+            padding: 0px;
+            spacing: 8px;
+            Text { horizontal-alignment: TextHorizontalAlignment.start;
+                line-height-factor: 0;
+                min-height: 20px;
+                overflow: TextOverflow.elide;
+                text: "Папка с игрой:";
+                vertical-alignment: TextVerticalAlignment.center;
+                wrap: TextWrap.word-wrap; }
+            LineEdit {
+                font-family: "";
+                font-italic: false;
+                font-size: 0px;
+                horizontal-alignment: TextHorizontalAlignment.left;
+                min-height: 20px; text <=> game-path; }
+            Button { icon-size: 15px;
+                min-height: 20px;
+                text: "Обзор..."; clicked => { pick-game(); } }
         }
         CheckBox {
             min-height: 20px;

@@ -106,12 +106,9 @@ pub(crate) fn append_asset_replacement_log(
 }
 
 pub(crate) fn maximum_serz_processes() -> usize {
-    // Оставляем один поток процессора свободным, чтобы параллельные serz.exe
-    // не загружали систему до полного зависания UI.
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
-        .saturating_sub(1)
         .max(1)
 }
 
@@ -295,6 +292,20 @@ pub(crate) fn load_last_game_path() -> String {
         .map(|path| path.trim().to_owned())
         .filter(|path| !path.is_empty())
         .unwrap_or_else(|| r"C:\Program Files (x86)\Steam\steamapps\common\RailWorks".to_owned())
+}
+
+pub(crate) fn save_last_game_path(path: &str) -> Result<(), String> {
+    let path_file = last_game_path_file()
+        .ok_or_else(|| "Windows APPDATA не определена; путь к игре не сохранить.".to_owned())?;
+    let parent = path_file
+        .parent()
+        .ok_or_else(|| "Некорректный путь к настройкам игры.".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!("Не удалось создать папку настроек: {error}")
+    })?;
+    fs::write(&path_file, path).map_err(|error| {
+        format!("Не удалось сохранить путь к игре {}: {error}", path_file.display())
+    })
 }
 
 #[cfg(test)]

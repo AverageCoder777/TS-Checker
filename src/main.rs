@@ -601,6 +601,7 @@ fn main() {
     let ui_handle = ui.as_weak();
     if let Ok(mut app) = app.lock() {
         app.start_route_scan();
+        ui.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
     }
     let app_clone = app.clone();
     let app_clone2 = app.clone();
@@ -623,6 +624,7 @@ fn main() {
     let clipboard = std::sync::Arc::new(std::sync::Mutex::new(arboard::Clipboard::new().unwrap()));
     let mut last_count: usize = 0;
     let mut last_query = String::new();
+    let mut last_thumbnails_enabled: bool = false;
     let mut last_status = String::new();
     let mut last_check_log = String::new();
     let app_clone7 = app.clone();
@@ -749,7 +751,7 @@ fn main() {
                 }
                 let q = ui.get_search_query().to_string();
                 app.search_query = q.clone();
-                if app.routes.len() == last_count && q == last_query {
+                if app.routes.len() == last_count && q == last_query && app.route_thumbnails_enabled == last_thumbnails_enabled {
                     if app.status != last_status {
                         last_status = app.status.clone();
                         ui.set_status(last_status.clone().into());
@@ -758,20 +760,26 @@ fn main() {
                         last_check_log = app.check_log.clone();
                         ui.set_check_log(last_check_log.clone().into());
                     }
-                    ui.set_has_result(app.result.is_some());
+                ui.set_has_result(app.result.is_some());
+                ui.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
                     return;
                 }
                 last_count = app.routes.len();
                 last_query = q.clone();
+                last_thumbnails_enabled = app.route_thumbnails_enabled;
                 let query = q.to_lowercase();
                 let items: Vec<RouteItem> = app
                     .routes
                     .iter()
                     .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
                     .map(|r| {
-                        let icon = match r.icon_path.clone() {
-                            Some(p) => load_route_icon_image(&p),
-                            None => slint::Image::default(),
+                        let icon = if app.route_thumbnails_enabled {
+                            match r.icon_path.clone() {
+                                Some(p) => load_route_icon_image(&p),
+                                None => slint::Image::default(),
+                            }
+                        } else {
+                            slint::Image::default()
                         };
                         RouteItem {
                             name: r.name.clone().into(),
@@ -866,12 +874,34 @@ fn main() {
     let settings_win = SettingsWindow::new().unwrap();
     let settings_handle = settings_win.as_weak();
     let settings_handle2 = settings_win.as_weak();
+    let settings_handle3 = settings_win.as_weak();
+    let settings_handle4 = settings_win.as_weak();
     if let Ok(app) = app_clone11.lock() {
-        settings_win.set_serz_process_limit(app.serz_process_limit as f32);
-        settings_win.set_serz_process_limit_max(settings::maximum_serz_processes() as i32);
+        let available = settings::maximum_serz_processes();
+        let all_presets: [usize; 6] = [1, 6, 8, 12, 16, 32];
+        let presets: Vec<slint::SharedString> = all_presets
+            .iter()
+            .filter(|p| **p <= available)
+            .map(|p| p.to_string().into())
+            .collect();
+        let mut current = app.serz_process_limit.clamp(1, available);
+        if !presets.iter().any(|p| *p == current.to_string()) {
+            current = presets
+                .iter()
+                .filter(|p| p.parse::<usize>().map(|v| v <= current).unwrap_or(false))
+                .map(|p| p.parse::<usize>().unwrap_or(1))
+                .max()
+                .unwrap_or(1);
+        }
+        let index = presets.iter().position(|p| *p == current.to_string()).unwrap_or(0);
+        settings_win.set_serz_process_limit(current as i32);
+        settings_win.set_serz_process_limit_max(available as i32);
+        settings_win.set_serz_presets(slint::ModelRc::new(slint::VecModel::from(presets)));
+        settings_win.set_serz_process_limit_index(index as i32);
         settings_win.set_locoswap_path(app.locoswap_path.clone().into());
         settings_win.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
         settings_win.set_route_scan_on_hdd(app.route_scan_on_hdd);
+        settings_win.set_game_path(app.rw_path.clone().into());
     }
     settings_win.on_pick_locoswap(move || {
         if let Some(sw) = settings_handle.upgrade() {
@@ -888,19 +918,53 @@ fn main() {
             }
         }
     });
+    settings_win.on_pick_game(move || {
+        if let Some(sw) = settings_handle3.upgrade() {
+            let current = sw.get_game_path().to_string();
+            let mut dialog = rfd::FileDialog::new().set_title("Выберите папку с игрой RailWorks");
+            if !current.is_empty() {
+                let p = std::path::PathBuf::from(&current);
+                if p.is_dir() {
+                    dialog = dialog.set_directory(&p);
+                } else if let Some(parent) = p.parent() {
+                    dialog = dialog.set_directory(parent);
+                }
+            }
+            if let Some(path) = dialog.pick_folder() {
+                sw.set_game_path(path.to_string_lossy().to_string().into());
+            }
+        }
+    });
+    let app_clone12 = app_clone11.clone();
+    settings_win.on_serz_preset_selected(move |i| {
+        if let Some(sw) = settings_handle4.upgrade() {
+            let presets = sw.get_serz_presets();
+            if let Some(item) = presets.row_data(i as usize) {
+                if let Ok(limit) = item.to_string().parse::<usize>() {
+                    let _ = sw.set_serz_process_limit(limit as i32);
+                    if let Ok(mut app) = app_clone12.lock() {
+                        app.serz_process_limit = limit;
+                    }
+                }
+            }
+        }
+    });
     settings_win.on_save_settings(move || {
         if let Some(sw) = settings_handle2.upgrade() {
             let limit = sw.get_serz_process_limit() as usize;
             let path = sw.get_locoswap_path().to_string();
+            let game_path = sw.get_game_path().to_string();
             let thumbs = sw.get_route_thumbnails_enabled();
             let hdd = sw.get_route_scan_on_hdd();
             if let Ok(mut app) = app_clone11.lock() {
                 app.serz_process_limit = limit;
                 app.locoswap_path = path.clone();
+                app.rw_path = game_path.clone();
                 app.route_thumbnails_enabled = thumbs;
                 app.route_scan_on_hdd = hdd;
                 let _ = crate::settings::save_serz_process_limit(limit);
                 let _ = crate::settings::save_locoswap_path(&path);
+                let _ = crate::settings::save_last_game_path(&game_path);
                 let _ = crate::settings::save_route_thumbnail_setting(thumbs);
                 let _ = crate::settings::save_route_scan_on_hdd(hdd);
             }
