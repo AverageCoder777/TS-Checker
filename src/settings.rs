@@ -308,6 +308,38 @@ pub(crate) fn save_last_game_path(path: &str) -> Result<(), String> {
     })
 }
 
+pub(crate) fn hide_quick_drive_free_roam_setting_file() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| {
+        PathBuf::from(app_data)
+            .join("TS-Checker")
+            .join("hide_quick_drive_free_roam.txt")
+    })
+}
+
+pub(crate) fn load_hide_quick_drive_free_roam() -> Result<bool, String> {
+    let path = hide_quick_drive_free_roam_setting_file()
+        .ok_or_else(|| "Windows APPDATA не определена; настройка сценариев недоступна.".to_owned())?;
+    match fs::read_to_string(&path) {
+        Ok(value) => match value.trim() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(format!("Некорректное значение настройки сценариев в {}.", path.display())),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("Не удалось прочитать настройку сценариев {}: {error}", path.display())),
+    }
+}
+
+pub(crate) fn save_hide_quick_drive_free_roam(enabled: bool) -> Result<(), String> {
+    let path = hide_quick_drive_free_roam_setting_file()
+        .ok_or_else(|| "Windows APPDATA не определена; настройку сценариев не сохранили.".to_owned())?;
+    let parent = path.parent().ok_or_else(|| "Некорректный путь к настройкам сценариев.".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
+    fs::write(&path, enabled.to_string()).map_err(|error| {
+        format!("Не удалось сохранить настройку сценариев {}: {error}", path.display())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::append_asset_replacement_log;

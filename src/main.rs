@@ -838,10 +838,15 @@ fn main() {
                 app.selected_route = None;
             }
             app.refresh_scenarios();
-            let scen: Vec<slint::SharedString> = app
+            let hide = app.hide_quick_drive_free_roam;
+            let scen: Vec<ScenarioItem> = app
                 .scenarios
                 .iter()
-                .map(|s| s.name.clone().into())
+                .filter(|s| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                .map(|s| ScenarioItem {
+                    name: s.name.clone().into(),
+                    scenario_type: s.scenario_type.clone().into(),
+                })
                 .collect();
             if let Some(ui) = ui_handle2.upgrade() {
                 ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen)));
@@ -901,6 +906,7 @@ fn main() {
         settings_win.set_locoswap_path(app.locoswap_path.clone().into());
         settings_win.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
         settings_win.set_route_scan_on_hdd(app.route_scan_on_hdd);
+        settings_win.set_hide_quick_drive_free_roam(app.hide_quick_drive_free_roam);
         settings_win.set_game_path(app.rw_path.clone().into());
     }
     settings_win.on_pick_locoswap(move || {
@@ -956,17 +962,20 @@ fn main() {
             let game_path = sw.get_game_path().to_string();
             let thumbs = sw.get_route_thumbnails_enabled();
             let hdd = sw.get_route_scan_on_hdd();
+            let hide_scenarios = sw.get_hide_quick_drive_free_roam();
             if let Ok(mut app) = app_clone11.lock() {
                 app.serz_process_limit = limit;
                 app.locoswap_path = path.clone();
                 app.rw_path = game_path.clone();
                 app.route_thumbnails_enabled = thumbs;
                 app.route_scan_on_hdd = hdd;
+                app.hide_quick_drive_free_roam = hide_scenarios;
                 let _ = crate::settings::save_serz_process_limit(limit);
                 let _ = crate::settings::save_locoswap_path(&path);
                 let _ = crate::settings::save_last_game_path(&game_path);
                 let _ = crate::settings::save_route_thumbnail_setting(thumbs);
                 let _ = crate::settings::save_route_scan_on_hdd(hdd);
+                let _ = crate::settings::save_hide_quick_drive_free_roam(hide_scenarios);
             }
         }
     });
@@ -979,14 +988,32 @@ fn main() {
         if let Ok(mut app) = app_clone18.lock() {
             // ensure scenarios loaded for selected route
             app.refresh_scenarios();
-            let scen_idx = idx as usize;
+            let hide = app.hide_quick_drive_free_roam;
+            let filtered_indices: Vec<usize> = app
+                .scenarios
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                .map(|(i, _)| i)
+                .collect();
+            let ui_idx = idx as usize;
+            let Some(&scen_idx) = filtered_indices.get(ui_idx) else {
+                return;
+            };
             if scen_idx >= app.scenarios.len() {
                 return;
             }
             crate::scenario::load_scenario_metadata(&mut app.scenarios[scen_idx]);
             // update scenario list label after lazy metadata load
-            let scen_items: Vec<slint::SharedString> =
-                app.scenarios.iter().map(|s| s.name.clone().into()).collect();
+            let scen_items: Vec<ScenarioItem> = app
+                .scenarios
+                .iter()
+                .filter(|s| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                .map(|s| ScenarioItem {
+                    name: s.name.clone().into(),
+                    scenario_type: s.scenario_type.clone().into(),
+                })
+                .collect();
             if let Some(ui) = ui_handle3.upgrade() {
                 ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen_items)));
                 ui.set_selected_scenario(idx);
@@ -1583,7 +1610,6 @@ mod tests {
         parse_asset_launch_args, parse_route_name, preferred_serz_path, scan_routes,
         scan_routes_with_ignored, validate_serz_process, ScenarioClueCollection,
     };
-    use crate::app::CheckerApp;
     use std::ffi::OsString;
     use std::fs;
     use std::io::Write;

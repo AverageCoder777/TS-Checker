@@ -25,6 +25,8 @@ pub(crate) struct RouteScenario {
     pub(crate) path: PathBuf,
     /// Название сценария.
     pub(crate) name: String,
+    /// Тип сценария: Standard, Career, Free Roam, Quick Drive.
+    pub(crate) scenario_type: String,
     /// Метаданные уже прочитаны.
     pub(crate) metadata_loaded: bool,
     /// Дата сценария.
@@ -210,16 +212,17 @@ pub(crate) struct ScenarioVehicle {
 
 /// Читает сценарии маршрута: папки в Scenarios и их файлы.
 #[allow(dead_code)]
-pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<RouteScenario> {
+pub(crate) fn read_route_scenarios(route_path: &Path, serz_path: &Path) -> Vec<RouteScenario> {
     use rayon::prelude::*;
     let scenarios_path = route_path.join("Scenarios");
     let Ok(entries) = fs::read_dir(&scenarios_path) else {
         return Vec::new();
     };
     let dirs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
-    let mut scenarios: Vec<RouteScenario> = dirs.into_par_iter().map(|path| {
+        let mut scenarios: Vec<RouteScenario> = dirs.into_par_iter().map(|path| {
         let id = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let mut scenario = RouteScenario { path: path.clone(), name: id.clone(), metadata_loaded: false, ..RouteScenario::default() };
+        let mut scenario = RouteScenario { path: path.clone(), name: id.clone(), scenario_type: String::new(), metadata_loaded: false, ..RouteScenario::default() };
+        let mut properties_had_type = false;
         if let Ok(xml) = fs::read_to_string(path.join("ScenarioProperties.xml")) {
             scenario.name = localised_text(&xml, "DisplayName");
             if scenario.name.is_empty() { scenario.name = id.clone(); }
@@ -248,13 +251,24 @@ pub(crate) fn read_route_scenarios(route_path: &Path, _serz_path: &Path) -> Vec<
             scenario.state = element_text(&xml, "StateName");
             scenario.player_consist = element_text(&xml, "QuickDrivePlayerConsistName");
             scenario.date = scenario_date(&xml);
+            scenario.scenario_type = scenario_type_from_xml(&xml);
+            properties_had_type = has_scenario_type_marker(&xml);
             scenario.metadata_loaded = true;
-        } else {
-            scenario.name = id;
-            scenario.metadata_loaded = true;
+        }
+        if !properties_had_type {
+            if let Some(bin_xml) = read_scenario_file(&path, serz_path) {
+                let from_bin = scenario_type_from_xml(&bin_xml);
+                if has_scenario_type_marker(&bin_xml) {
+                    scenario.scenario_type = from_bin;
+                }
+            }
+        }
+        if scenario.scenario_type.is_empty() {
+            scenario.scenario_type = "Standard".to_owned();
         }
         scenario
     }).collect();
+
     scenarios.sort_by(|left, right| left.name.cmp(&right.name));
     scenarios
 }
@@ -287,6 +301,9 @@ pub(crate) fn load_scenario_metadata(scenario: &mut RouteScenario) {
         scenario.state = element_text(&xml, "StateName");
         scenario.player_consist = element_text(&xml, "QuickDrivePlayerConsistName");
         scenario.date = scenario_date(&xml);
+        if scenario.scenario_type.is_empty() {
+            scenario.scenario_type = scenario_type_from_xml(&xml);
+        }
         scenario.weather = element_text(&xml, "WeatherBlueprint");
         if scenario.weather.is_empty() {
             scenario.weather = element_text(&xml, "Weather");
@@ -312,6 +329,9 @@ pub(crate) fn load_scenario_metadata(scenario: &mut RouteScenario) {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+    }
+    if scenario.scenario_type.is_empty() {
+        scenario.scenario_type = "Standard".to_owned();
     }
     scenario.metadata_loaded = true;
 }
@@ -544,6 +564,82 @@ fn scenario_date(xml: &str) -> String {
     }
     format!("{day:02}.{month:02}.{year}")
 }
+fn has_scenario_type_marker(xml: &str) -> bool {
+    for tag in ["ScenarioClass", "ScenarioType", "ScenarioMode", "Type", "Class"] {
+        if !element_text(xml, tag).is_empty() {
+            return true;
+        }
+    }
+    if !element_text(xml, "QuickDrivePlayerConsistName").is_empty() {
+        return true;
+    }
+    let lower = xml.to_lowercase().replace('_', " ");
+    lower.contains("freeroam")
+        || lower.contains("free roam")
+        || lower.contains("quickdrive")
+        || lower.contains("quick drive")
+        || lower.contains("career")
+        || lower.contains("<careerrules")
+        || lower.contains("etemplate")
+        || lower.contains("template scenario")
+}
+
+/// Определяет тип сценария по XML свойств/сценария.
+pub(crate) fn scenario_type_from_xml(xml: &str) -> String {
+    // Явный тег ScenarioClass / аналоги.
+    for tag in ["ScenarioClass", "ScenarioType", "ScenarioMode", "Type", "Class"] {
+        let value = element_text(xml, tag);
+        if !value.is_empty() {
+            let normalized = normalize_scenario_type(&value);
+            if !normalized.is_empty() {
+                return normalized;
+            }
+        }
+    }
+
+    // Быстрые выводы по структуре.
+    if !element_text(xml, "QuickDrivePlayerConsistName").is_empty() {
+        return "Quick Drive".to_owned();
+    }
+    let lower = xml.to_lowercase().replace('_', " ");
+    if lower.contains("freeroam") || lower.contains("free roam") {
+        return "Free Roam".to_owned();
+    }
+    if lower.contains("quickdrive") || lower.contains("quick drive") || lower.contains("etemplate") || lower.contains("template scenario") {
+        return "Quick Drive".to_owned();
+    }
+    if lower.contains("<careerrules") {
+        return "Career".to_owned();
+    }
+    if lower.contains("career") {
+        return "Career".to_owned();
+    }
+    "Standard".to_owned()
+}
+
+fn normalize_scenario_type(value: &str) -> String {
+    let v = value.trim().to_lowercase().replace(['_', '-'], " ");
+    if v.contains("free") && v.contains("roam") {
+        "Free Roam".to_owned()
+    } else if v.contains("quick") && v.contains("drive") {
+        "Quick Drive".to_owned()
+    } else if v.contains("career") {
+        "Career".to_owned()
+    } else if v.contains("standard") || v.contains("normal") {
+        "Standard".to_owned()
+    } else if v.contains("template") {
+        "Quick Drive".to_owned()
+    } else if v.is_empty() {
+        String::new()
+    } else {
+        value.trim().to_owned()
+    }
+}
+
+pub(crate) fn is_hidden_scenario_type(scenario_type: &str) -> bool {
+    matches!(scenario_type.trim().to_lowercase().as_str(), "quick drive" | "free roam")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

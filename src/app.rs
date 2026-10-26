@@ -65,6 +65,7 @@ pub(crate) struct CheckerApp {
     pub(crate) route_thumbnails_enabled: bool,
     pub(crate) serz_process_limit: usize,
     pub(crate) route_scan_on_hdd: bool,
+    pub(crate) hide_quick_drive_free_roam: bool,
     pub(crate) locoswap_path: String,
     pub(crate) asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
     pub(crate) inventory_action_tx: Sender<InventoryAction>,
@@ -99,6 +100,10 @@ impl Default for CheckerApp {
             Ok(value) => (value, None),
             Err(error) => (false, Some(error)),
         };
+        let (hide_quick_drive_free_roam, hide_scenarios_warning) = match load_hide_quick_drive_free_roam() {
+            Ok(value) => (value, None),
+            Err(error) => (false, Some(error)),
+        };
         let (inventory_action_tx, inventory_action_rx) = mpsc::channel();
         if let Some(warning) = settings_warning {
             status.push(' ');
@@ -109,6 +114,10 @@ impl Default for CheckerApp {
             status.push_str(&warning);
         }
         if let Some(warning) = route_scan_hdd_warning {
+            status.push(' ');
+            status.push_str(&warning);
+        }
+        if let Some(warning) = hide_scenarios_warning {
             status.push(' ');
             status.push_str(&warning);
         }
@@ -147,6 +156,7 @@ impl Default for CheckerApp {
             route_thumbnails_enabled,
             serz_process_limit,
             route_scan_on_hdd,
+            hide_quick_drive_free_roam,
             locoswap_path: load_locoswap_path(),
             asset_inventory_state: Arc::new(Mutex::new(AssetInventoryWindowState::default())),
             inventory_action_tx,

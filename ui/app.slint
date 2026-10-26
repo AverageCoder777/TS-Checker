@@ -5,6 +5,11 @@ export struct RouteItem {
     icon-source: image,
 }
 
+export struct ScenarioItem {
+    name: string,
+    scenario-type: string,
+}
+
 export component MainWindow inherits Window {
     title: "TS-Checker";
     min-width: 1300px;
@@ -21,7 +26,7 @@ export component MainWindow inherits Window {
     in property <string> status: "";
     in-out property <string> search-query: "";
     in-out property <int> selected-route: -1;
-    in property <[string]> scenario-items: [];
+    in property <[ScenarioItem]> scenario-items: [];
     in-out property <int> selected-scenario: -1;
     in property <bool> has-result: false;
 
@@ -71,7 +76,7 @@ export component MainWindow inherits Window {
                 }
             }
         }
-        Text { text: "Сценарии маршрута:"; }
+        //Text { text: "Сценарии маршрута:"; font-size: 14px; }//
         ListView {
             for s[i] in scenario-items: Rectangle {
                 background: i == selected-scenario ? #3a3a3a : transparent;
@@ -83,9 +88,27 @@ export component MainWindow inherits Window {
                         scenario-selected(i);
                     }
                     HorizontalLayout {
-                        alignment: start;
+                        spacing: 8px;
+                        alignment: LayoutAlignment.stretch;
                         padding: 2px;
-                        Text { text: s; vertical-alignment: center; }
+                        Text {
+                            text: s.name;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            wrap: TextWrap.no-wrap;
+                            overflow: TextOverflow.elide;
+                        }
+                        Text {
+                            text: s.scenario-type;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            width: 130px;
+                            horizontal-alignment: TextHorizontalAlignment.right;
+                            wrap: TextWrap.no-wrap;
+                            overflow: TextOverflow.elide;
+                        }
                     }
                 }
             }
@@ -111,16 +134,12 @@ export component MainWindow inherits Window {
                 clicked => { open-settings(); }
             }
         }
-        CheckBox {
-            text: "Игнор-лист включен";
-            checked <=> ignore-list-open;
-        }
         log_view := TextEdit {
             text: check-log;
             edited => { reset-log(); }
             height: 100px;
         }
-        Text { text: status; }
+        Text { text: status; font-size: 13px; }
     }
 }
 
@@ -425,7 +444,7 @@ export component MissingAssetsWindow inherits Window {
 export component SettingsWindow inherits Window {
     title: "Настройки";
     min-width: 400px;
-    min-height: 190px;
+    min-height: 210px;
 
     in-out property <int> serz-process-limit: 8;
     in property <int> serz-process-limit-max: 16;
@@ -433,12 +452,13 @@ export component SettingsWindow inherits Window {
     in-out property <int> serz-process-limit-index: 0;
     in-out property <string> locoswap-path: "";
     in-out property <string> game-path: "";
-    max-height: 210px;
+    max-height: 230px;
     max-width: 400px;
-    preferred-height: 210px;
+    preferred-height: 230px;
     preferred-width: 400px;
     in-out property <bool> route-thumbnails-enabled: true;
     in-out property <bool> route-scan-on-hdd: false;
+    in-out property <bool> hide-quick-drive-free-roam: false;
 
     callback save-settings();
     callback pick-locoswap();
@@ -520,6 +540,11 @@ export component SettingsWindow inherits Window {
             min-height: 20px;
             text: "Игра установлена на HDD";
             checked <=> route-scan-on-hdd;
+        }
+        CheckBox {
+            min-height: 20px;
+            text: "Не отображать Quick-Drive и Free-Roam сценарии";
+            checked <=> hide-quick-drive-free-roam;
         }
         Button {
             min-height: 20px;
