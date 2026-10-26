@@ -2146,45 +2146,4 @@ mod tests {
             ))
         );
     }
-    #[test]
-    fn repro_ui_check_flow() {
-        let mut app = CheckerApp::default();
-        app.rw_path = r"X:\SteamLibrary\steamapps\common\RailWorks".to_owned();
-        app.start_route_scan();
-        let start = std::time::Instant::now();
-        loop {
-            app.receive_background_results();
-            if !app.routes.is_empty() {
-                break;
-            }
-            if start.elapsed().as_secs() > 60 {
-                panic!("route scan timeout");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        println!("routes: {}", app.routes.len());
-        // select the target route
-        if let Some(idx) = app
-            .routes
-            .iter()
-            .position(|r| r.id == "8378d7b6-30ad-4c29-a5ac-16d3c2b26ff7")
-        {
-            app.selected_route = Some(idx);
-        }
-        assert!(app.selected_route.is_some(), "no selected route");
-        app.start_check();
-        let start = std::time::Instant::now();
-        loop {
-            app.receive_background_results();
-            if !app.is_checking() {
-                break;
-            }
-            if start.elapsed().as_secs() > 120 {
-                panic!("check timeout after {:?}", start.elapsed());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        println!("check done status={}", app.status);
-        assert!(app.result.is_some());
-    }
 }
