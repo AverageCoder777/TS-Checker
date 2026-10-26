@@ -800,6 +800,13 @@ fn main() {
                     .map(|f| f.id.clone().into())
                     .collect();
                 ui.set_incomplete_folders(slint::ModelRc::new(slint::VecModel::from(incomplete)));
+                if let Some(route) = app.selected_route.and_then(|i| app.routes.get(i)) {
+                    ui.set_selected_route_name(route.name.clone().into());
+                    ui.set_selected_route_id(route.id.clone().into());
+                } else {
+                    ui.set_selected_route_name("".into());
+                    ui.set_selected_route_id("".into());
+                }
                 if app.status != last_status {
                     last_status = app.status.clone();
                     ui.set_status(last_status.clone().into());
@@ -851,6 +858,13 @@ fn main() {
             if let Some(ui) = ui_handle2.upgrade() {
                 ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen)));
                 ui.set_selected_scenario(-1);
+                if let Some(route) = app.selected_route.and_then(|i| app.routes.get(i)) {
+                    ui.set_selected_route_name(route.name.clone().into());
+                    ui.set_selected_route_id(route.id.clone().into());
+                } else {
+                    ui.set_selected_route_name("".into());
+                    ui.set_selected_route_id("".into());
+                }
             }
         }
     });

@@ -12,7 +12,7 @@ export struct ScenarioItem {
 
 export component MainWindow inherits Window {
     title: "TS-Checker";
-    min-width: 1300px;
+    min-width: 1350px;
     min-height: 1000px;
 
     in property <[RouteItem]> route-items: [];
@@ -26,6 +26,8 @@ export component MainWindow inherits Window {
     in property <string> status: "";
     in-out property <string> search-query: "";
     in-out property <int> selected-route: -1;
+    in property <string> selected-route-name: "";
+    in property <string> selected-route-id: "";
     in property <[ScenarioItem]> scenario-items: [];
     in-out property <int> selected-scenario: -1;
     in property <bool> has-result: false;
@@ -38,108 +40,172 @@ export component MainWindow inherits Window {
     callback open-settings();
     callback scenario-selected(int);
 
-    VerticalBox {
-        LineEdit {
-            placeholder-text: "Поиск маршрутов...";
-            text <=> search-query;
-        }
-        ListView {
-            min-height: 150px;
-            preferred-height: 400px;
-            for item[i] in route-items: Rectangle {
-                background: i == selected-route ? #3a3a3a : transparent;
-                TouchArea {
-                    clicked => {
-                        selected-route = i;
-                        route-selected(i);
-                    }
-                    double-clicked => {
-                        open-route-folder();
-                    }
-                    HorizontalLayout {
-                        spacing: 6px;
-                        alignment: start;
-                        padding: 2px;
-                        Image {
-                            source: item.icon-source;
-                            width: route-thumbnails-enabled ? 256px : 0px;
-                            height: route-thumbnails-enabled ? 128px : 0px;
-                            preferred-width: route-thumbnails-enabled ? 256px : 0px;
-                            preferred-height: route-thumbnails-enabled ? 128px : 0px;
-                        }
-                        Text {
-                            text: item.name;
-                            font-size: 16px;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
+    HorizontalLayout {
+        // Left master: compact route list
+        VerticalBox {
+            preferred-width: 380px;
+            min-width: 380px;
+            max-width: 380px;
+            horizontal-stretch: 0;
+            LineEdit {
+                placeholder-text: "Поиск маршрутов...";
+                text <=> search-query;
             }
-        }
-        //Text { text: "Сценарии маршрута:"; font-size: 14px; }//
-        ListView {
-            for s[i] in scenario-items: Rectangle {
-                background: i == selected-scenario ? #3a3a3a : transparent;
-                TouchArea {
-                    clicked => {
-                        selected-scenario = i;
-                    }
-                    double-clicked => {
-                        scenario-selected(i);
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: LayoutAlignment.stretch;
-                        padding: 2px;
-                        Text {
-                            text: s.name;
-                            font-size: 14px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                            min-width: 0px;
-                            wrap: TextWrap.no-wrap;
-                            overflow: TextOverflow.elide;
+            ListView {
+                vertical-stretch: 1;
+                for item[i] in route-items: Rectangle {
+                    min-height: 52px;
+                    preferred-height: 56px;
+                    background: i == selected-route ? #3a3a3a : transparent;
+                    TouchArea {
+                        clicked => {
+                            selected-route = i;
+                            route-selected(i);
                         }
-                        Text {
-                            text: s.scenario-type;
-                            font-size: 14px;
-                            vertical-alignment: center;
-                            width: 130px;
-                            horizontal-alignment: TextHorizontalAlignment.right;
-                            wrap: TextWrap.no-wrap;
-                            overflow: TextOverflow.elide;
+                        double-clicked => {
+                            open-route-folder();
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: LayoutAlignment.start;
+                            padding: 4px;
+                            Image {
+                                source: item.icon-source;
+                                width: route-thumbnails-enabled ? 64px : 0px;
+                                height: route-thumbnails-enabled ? 40px : 0px;
+                                preferred-width: route-thumbnails-enabled ? 64px : 0px;
+                                preferred-height: route-thumbnails-enabled ? 40px : 0px;
+                            }
+                            Text {
+                                text: item.name;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                wrap: TextWrap.no-wrap;
+                                overflow: TextOverflow.elide;
+                            }
                         }
                     }
                 }
             }
         }
-        HorizontalBox {
-            min-height: 30px;
-            preferred-height: 40px;
-            Button {
-                min-height: 30px;
-                text: "Проверить маршрут";
-                enabled: selected-route >= 0;
-                clicked => { start-check(); }
+        // Right detail
+        VerticalBox {
+            horizontal-stretch: 1;
+            padding: 8px;
+            spacing: 6px;
+            if selected-route >= 0 : HorizontalLayout {
+                spacing: 12px;
+                alignment: LayoutAlignment.start;
+                Rectangle {
+                    width: 256px;
+                    height: 128px;
+                    horizontal-stretch: 0;
+                    border-radius: 6px;
+                    clip: true;
+                    background: transparent;
+                    Image {
+                        source: route-items[selected-route].icon-source;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: cover;
+                    }
+                }
+                VerticalBox {
+                    horizontal-stretch: 1;
+                    alignment: LayoutAlignment.center;
+                    spacing: 4px;
+                    Text {
+                        text: selected-route-name;
+                        font-size: 18px;
+                        font-weight: 700;
+                        wrap: TextWrap.no-wrap;
+                        overflow: TextOverflow.elide;
+                    }
+                    Text {
+                        text: "GUID: " + selected-route-id;
+                        font-size: 12px;
+                        color: #999999;
+                        wrap: TextWrap.no-wrap;
+                        overflow: TextOverflow.elide;
+                    }
+                    Text {
+                        text: "Сценариев: \{scenario-items.length}";
+                        font-size: 13px;
+                        color: #cccccc;
+                    }
+                }
             }
-            Button {
-                min-height: 30px;
-                text: "Показать все объекты";
-                enabled: has-result;
-                clicked => { show-inventory(); }
+            Text { text: "Сценарии маршрута:"; font-size: 14px; }
+            ListView {
+                vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-height: 120px;
+                for s[i] in scenario-items: Rectangle {
+                    background: i == selected-scenario ? #3a3a3a : (Math.mod(i, 2) == 0 ? #1f1f1f : #262626);
+                    TouchArea {
+                        clicked => {
+                            selected-scenario = i;
+                        }
+                        double-clicked => {
+                            scenario-selected(i);
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: LayoutAlignment.stretch;
+                            padding: 2px;
+                            Text {
+                                text: s.name;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                wrap: TextWrap.no-wrap;
+                                overflow: TextOverflow.elide;
+                            }
+                            Text {
+                                text: s.scenario-type;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                width: 130px;
+                                horizontal-alignment: TextHorizontalAlignment.right;
+                                wrap: TextWrap.no-wrap;
+                                overflow: TextOverflow.elide;
+                            }
+                        }
+                    }
+                }
             }
-            Button {
+            HorizontalBox {
                 min-height: 30px;
-                text: "Настройки";
-                clicked => { open-settings(); }
+                preferred-height: 40px;
+                Button {
+                    min-height: 30px;
+                    text: "Проверить маршрут";
+                    enabled: selected-route >= 0;
+                    clicked => { start-check(); }
+                }
+                Button {
+                    min-height: 30px;
+                    text: "Показать все объекты";
+                    enabled: has-result;
+                    clicked => { show-inventory(); }
+                }
+                Button {
+                    min-height: 30px;
+                    text: "Настройки";
+                    clicked => { open-settings(); }
+                }
             }
+            log_view := TextEdit {
+                text: check-log;
+                edited => { reset-log(); }
+                vertical-stretch: 1;
+                min-height: 120px;
+            }
+            Text { text: status; font-size: 13px; }
         }
-        log_view := TextEdit {
-            text: check-log;
-            edited => { reset-log(); }
-            height: 100px;
-        }
-        Text { text: status; font-size: 13px; }
     }
 }
 
