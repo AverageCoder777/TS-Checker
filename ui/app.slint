@@ -232,38 +232,58 @@ export component ScenarioWindow inherits Window {
     callback open-selected-vehicle-path();
 
     VerticalBox {
+        padding: 8px;
         spacing: 6px;
         VerticalBox {
+            alignment: LayoutAlignment.stretch;
+            min-height: 60px;
+            padding: 4px;
+            padding-left: 4px;
+            preferred-height: 60px;
             spacing: 2px;
             HorizontalBox {
                 alignment: LayoutAlignment.start;
                 preferred-width: 10px;
+                padding: 0px;
+                padding-left: 8px;
+                preferred-height: 5px;
                 width: 0px;
                 Text { text: "Начало:"; font-size: 14px; }
                 Text { text: scenario-start-time; font-size: 14px; }
             }
             HorizontalBox {
                 alignment: LayoutAlignment.start;
+                padding: 0px;
+                padding-left: 8px;
+                preferred-height: 5px;
                 Text { text: "Автор:"; font-size: 14px; }
                 Text { text: scenario-author; font-size: 14px; }
             }
             HorizontalBox {
                 alignment: LayoutAlignment.start;
+                padding: 0px;
+                padding-left: 8px;
+                preferred-height: 5px;
                 Text { text: "Погода:"; font-size: 14px; }
                 Text { text: scenario-weather; font-size: 14px; }
             }
             HorizontalBox {
                 alignment: LayoutAlignment.start;
-                preferred-height: 10px;
+                padding: 0px;
+                padding-left: 8px;
+                preferred-height: 5px;
                 Text { text: "Сезон:"; font-size: 14px; }
                 Text { text: scenario-season; font-size: 14px; }
             }
         }
         HorizontalBox {
-            alignment: LayoutAlignment.stretch;
+            alignment: LayoutAlignment.start;
+            padding: 0px;
+            padding-left: 4px;
             VerticalBox {
                 horizontal-stretch: 1;
-                min-width: 220px;
+                min-width: 280px;
+                padding: 8px;
                 alignment: LayoutAlignment.start;
                 Text { text: "Составы"; font-size: 16px; color: #888888; }
                 ListView {
@@ -296,7 +316,8 @@ export component ScenarioWindow inherits Window {
             }
             VerticalBox {
                 horizontal-stretch: 1;
-                min-width: 220px;
+                max-width: 0px;
+                min-width: 200px;
                 alignment: LayoutAlignment.start;
                 Text { text: "Подвижные единицы"; font-size: 16px; color: #888888; }
                 ListView {
@@ -349,6 +370,8 @@ export component ScenarioWindow inherits Window {
             }
         }
         Button {
+            max-height: 30px;
+            min-height: 30px;
             text: "Открыть в LocoSwap";
             clicked => { open-locoswap(); }
         }

@@ -1034,7 +1034,7 @@ fn main() {
                     .map(|cc| {
                         cc.vehicles
                             .iter()
-                            .map(|v| format!("{} - {}", v.provider, v.name).into())
+                            .map(|v| format!("{}", v.name).into())// раньше было map(|v| format!("{} - {}", v.provider, v.name).into())
                             .collect()
                     })
                     .unwrap_or_default();
