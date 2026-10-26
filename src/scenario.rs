@@ -54,6 +54,9 @@ pub(crate) struct ScenarioConsist {
     pub(crate) name: String,
     pub(crate) vehicles: Vec<ScenarioVehicle>,
     pub(crate) is_player: bool,
+    /// Порядковый номер cConsist в исходном XML (с учётом пустых составов),
+    /// нужен для открытия нужного состава в LocoSwap.
+    pub(crate) index: usize,
 }
 
 /// Находит позицию открывающего тега элемента (с учётом атрибутов).
@@ -340,6 +343,7 @@ pub(crate) fn read_scenario_file(scenario_path: &Path, serz_path: &Path) -> Opti
 pub(crate) fn scenario_consists(xml: &str) -> Vec<ScenarioConsist> {
     let mut consists = Vec::new();
     let mut rest = xml;
+    let mut consist_index = 0usize;
     while let Some(start) = rest.find("<cConsist") {
         rest = &rest[start..];
         let end = rest.find("</cConsist>").unwrap_or(rest.len());
@@ -352,8 +356,10 @@ pub(crate) fn scenario_consists(xml: &str) -> Vec<ScenarioConsist> {
                 name,
                 vehicles,
                 is_player,
+                index: consist_index,
             });
         }
+        consist_index += 1;
         rest = &rest[end..];
     }
     consists

@@ -2653,12 +2653,19 @@ fn serz_output(serz_path: &Path, args: &[String]) -> Result<std::process::Output
     let parent = serz_path
         .parent()
         .ok_or_else(|| format!("Некорректный путь к Serz: {}", serz_path.display()))?;
-    let child = Command::new(serz_path)
-        .current_dir(parent)
+    let mut cmd = Command::new(serz_path);
+    cmd.current_dir(parent)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let child = cmd
         .spawn()
         .map_err(|error| format!("не удалось запустить serz.exe: {error}"))?;
     let child = Arc::new(Mutex::new(Some(child)));

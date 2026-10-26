@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 slint::include_modules!();
 use slint::Model;
 
@@ -389,6 +390,103 @@ fn load_route_icon_image(icon_path: &std::path::Path) -> slint::Image {
     slint::Image::load_from_path(icon_path).unwrap_or_default()
 }
 
+fn load_vehicle_preview_image(
+    rw_path: &std::path::Path,
+    route_path: &std::path::Path,
+    vehicle: &ScenarioVehicle,
+    resolved: Option<&std::path::PathBuf>,
+) -> slint::Image {
+    let resolved = resolved
+        .cloned()
+        .or_else(|| crate::blueprint::resolve_blueprint_file_cached_free(
+            rw_path,
+            route_path,
+            &vehicle.blueprint,
+            &vehicle.provider,
+            &vehicle.product,
+        ));
+    let Some(path) = resolved else {
+        return slint::Image::default();
+    };
+
+    // Обычный файл на диске: картинка лежит рядом в LocoInformation/image.png.
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ap"))
+    {
+        let image_path = path
+            .parent()
+            .unwrap_or(path.as_path())
+            .join("LocoInformation")
+            .join("image.png");
+        if image_path.is_file() {
+            if let Ok(data) = std::fs::read(&image_path) {
+                if let Ok(image) = slint::Image::load_from_data(&data, Some("png")) {
+                    return image;
+                }
+            }
+            return slint::Image::load_from_path(&image_path).unwrap_or_default();
+        }
+        return slint::Image::default();
+    }
+
+    // Архив .ap: ищем запись блюпринта, затем соседнюю LocoInformation/image.png.
+    let Ok(file) = std::fs::File::open(&path) else {
+        return slint::Image::default();
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        return slint::Image::default();
+    };
+
+    let stem = std::path::Path::new(&vehicle.blueprint)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| vehicle.blueprint.clone());
+    let mut base_dir = String::new();
+    let mut found = false;
+    for index in 0..zip.len() {
+        let Ok(entry) = zip.by_index(index) else { continue; };
+        let name = entry.name().unwrap_or_default().to_string();
+        let entry_stem = std::path::Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if entry_stem.eq_ignore_ascii_case(&stem) {
+            base_dir = name
+                .rsplit_once('/')
+                .or_else(|| name.rsplit_once('\\'))
+                .map(|(dir, _)| dir.to_owned())
+                .unwrap_or_default();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return slint::Image::default();
+    }
+
+    let image_name = if base_dir.is_empty() {
+        "LocoInformation/image.png".to_owned()
+    } else {
+        format!("{}/LocoInformation/image.png", base_dir.trim_end_matches('/'))
+    };
+
+    for index in 0..zip.len() {
+        let Ok(mut entry) = zip.by_index(index) else { continue; };
+        let entry_name = entry.name().unwrap_or_default().to_string();
+        if !entry_name.eq_ignore_ascii_case(&image_name) {
+            continue;
+        }
+        let mut data = Vec::new();
+        if std::io::Read::read_to_end(&mut entry, &mut data).is_ok() {
+            if let Ok(image) = slint::Image::load_from_data(&data, Some("png")) {
+                return image;
+            }
+        }
+    }
+    slint::Image::default()
+}
+
 fn build_inventory_rows(
     state: &app::AssetInventoryWindowState,
     show_missing: bool,
@@ -527,6 +625,7 @@ fn main() {
     let app_clone18 = app.clone();
     let app_clone19 = app.clone();
     let app_clone20 = app.clone();
+    let clipboard = std::sync::Arc::new(std::sync::Mutex::new(arboard::Clipboard::new().unwrap()));
     let mut last_count: usize = 0;
     let mut last_query = String::new();
     let mut last_status = String::new();
@@ -534,6 +633,16 @@ fn main() {
     let app_clone7 = app.clone();
     let missing_win = MissingAssetsWindow::new().unwrap();
     let missing_handle = missing_win.as_weak();
+    missing_win.on_copy_to_clipboard({
+        let clipboard = clipboard.clone();
+        move |text| {
+            if let Ok(mut ctx) = clipboard.lock() {
+                if let Err(e) = ctx.set_text(text.to_string()) {
+                    eprintln!("Ошибка копирования в буфер: {:?}", e);
+                }
+            }
+        }
+    });
     missing_win.on_replace_missing(move |idx| {
         let (missing, rw_path) = {
             if let Ok(app) = app_clone7.lock() {
@@ -888,11 +997,9 @@ fn main() {
                 app.scenario_vehicle_files = Some(vf);
             }
             let vehicle_files = app.scenario_vehicle_files.clone().unwrap_or_default();
-            // store for later consist selection: put into a temp via app fields? We'll store in scenario_vehicle_files (already).
             app.selected_scenario = Some(scen_idx);
             app.selected_consist = Some(0);
             app.scenario_window_open = true;
-            // populate window
             if let Some(sw) = scenario_handle.upgrade() {
                 sw.set_scenario_name(scenario.name.clone().into());
                 sw.set_scenario_title(format!("Сценарий: {}", if scenario.name.trim().is_empty() { "Без названия" } else { scenario.name.as_str() }).into());
@@ -996,11 +1103,151 @@ fn main() {
             }
         }
     });
+    let app_clone_locoswap_consist = app.clone();
     scenario_win.on_open_locoswap(move || {
         if let Ok(app) = app_clone16.lock() {
             let path = app.locoswap_path.clone();
             if !path.is_empty() && std::path::Path::new(&path).is_file() {
                 let _ = std::process::Command::new(&path).spawn();
+            }
+        }
+    });
+    scenario_win.on_open_locoswap_consist(move |idx| {
+        if let Ok(app) = app_clone_locoswap_consist.lock() {
+            let locoswap_path = app.locoswap_path.clone();
+            if locoswap_path.is_empty() || !std::path::Path::new(&locoswap_path).is_file() {
+                return;
+            }
+            let scen_idx = match app.selected_scenario {
+                Some(i) => i,
+                None => return,
+            };
+            let scenario = match app.scenarios.get(scen_idx) {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            let consist_index = scenario
+                .consists
+                .as_ref()
+                .and_then(|consists| consists.get(idx as usize))
+                .map(|consist| consist.index)
+                .unwrap_or(idx as usize);
+            let _ = std::process::Command::new(&locoswap_path)
+                .arg(&scenario.path)
+                .arg("--consist")
+                .arg(consist_index.to_string())
+                .arg("--vehicle")
+                .arg("-1")
+                .spawn();
+        }
+    });
+    let app_clone_vehicle_preview = app.clone();
+    let scenario_handle_preview = scenario_win.as_weak();
+    scenario_win.on_vehicle_selected(move |idx| {
+        if let Ok(mut app) = app_clone_vehicle_preview.lock() {
+            app.selected_vehicle = Some(idx as usize);
+            let rw_path = std::path::PathBuf::from(app.rw_path.trim());
+            let route_path = app
+                .selected_route
+                .and_then(|i| app.routes.get(i))
+                .map(|r| r.path.clone())
+                .unwrap_or_default();
+            let scen_idx = match app.selected_scenario {
+                Some(i) => i,
+                None => return,
+            };
+            let scenario = match app.scenarios.get(scen_idx) {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            let consist_idx = app.selected_consist.unwrap_or(0);
+            let consists = match scenario.consists.as_ref() {
+                Some(c) => c,
+                None => return,
+            };
+            let vehicle = match consists.get(consist_idx).and_then(|c| c.vehicles.get(idx as usize)) {
+                Some(v) => v.clone(),
+                None => return,
+            };
+            let resolved = crate::blueprint::resolve_blueprint_file_cached_free(
+                &rw_path,
+                &route_path,
+                &vehicle.blueprint,
+                &vehicle.provider,
+                &vehicle.product,
+            );
+            let path_text = resolved
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| vehicle.blueprint.clone());
+            let image = load_vehicle_preview_image(&rw_path, &route_path, &vehicle, resolved.as_ref());
+            if let Some(sw) = scenario_handle_preview.upgrade() {
+                if let Some(idx) = path_text.find("Assets"){
+                    sw.set_selected_vehicle_path(path_text[idx..].into());
+                } else {
+                    sw.set_selected_vehicle_path(path_text.into());
+                }
+                sw.set_selected_vehicle_image(image);
+            }
+        }
+    });
+    let app_clone_open_vehicle_preview = app.clone();
+    scenario_win.on_open_selected_vehicle_path(move || {
+        if let Ok(app) = app_clone_open_vehicle_preview.lock() {
+            let scen_idx = match app.selected_scenario {
+                Some(i) => i,
+                None => return,
+            };
+            let consist_idx = app.selected_consist.unwrap_or(0);
+            let vehicle_idx = match app.selected_vehicle {
+                Some(i) => i,
+                None => return,
+            };
+            let scenario = match app.scenarios.get(scen_idx) {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            let consists = match scenario.consists.as_ref() {
+                Some(c) => c,
+                None => return,
+            };
+            let consist = match consists.get(consist_idx) {
+                Some(c) => c,
+                None => return,
+            };
+            let vehicle = match consist.vehicles.get(vehicle_idx) {
+                Some(v) => v.clone(),
+                None => return,
+            };
+            let rw_path = app.rw_path.clone();
+            let route_path = app
+                .selected_route
+                .and_then(|i| app.routes.get(i))
+                .map(|r| r.path.clone())
+                .unwrap_or_default();
+            let resolved = crate::blueprint::resolve_blueprint_file_cached_free(
+                std::path::Path::new(rw_path.trim()),
+                std::path::Path::new(&route_path),
+                &vehicle.blueprint,
+                &vehicle.provider,
+                &vehicle.product,
+            );
+            if let Some(path) = resolved {
+                if path.is_file() {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg("/select,")
+                        .arg(path.as_os_str())
+                        .spawn();
+                } else {
+                    let mut cur = path.as_path();
+                    while !cur.exists() {
+                        match cur.parent() {
+                            Some(p) => cur = p,
+                            None => break,
+                        }
+                    }
+                    let _ = crate::windows::open_in_file_explorer(cur);
+                }
             }
         }
     });
@@ -1041,55 +1288,25 @@ fn main() {
                 &vehicle.product,
             );
             if let Some(path) = resolved {
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if ext == "ap" {
+                if path.is_file() {
                     let _ = std::process::Command::new("explorer.exe")
-                        .arg(format!("/select,\"{}\"", path.display()))
+                        .arg("/select,")
+                        .arg(path.as_os_str())
                         .spawn();
-                } else if ext == "bin" && path.is_file() {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(format!("/select,\"{}\"", path.display()))
-                        .spawn();
-                } else if path.is_file() {
-                    let _ = crate::windows::open_in_file_explorer(path.parent().unwrap_or(path.as_path()));
-                } else {
-                    let mut cur = path.as_path();
-                    while !cur.exists() {
-                        match cur.parent() {
-                            Some(p) => cur = p,
-                            None => break,
-                        }
-                    }
-                    let _ = crate::windows::open_in_file_explorer(cur);
-                }
+                  } else {
+                      let mut cur = path.as_path();
+                      while !cur.exists() {
+                          match cur.parent() {
+                              Some(p) => cur = p,
+                              None => break,
+                          }
+                      }
+                      let _ = crate::windows::open_in_file_explorer(cur);
+                  }
             } else {
-                let full = std::path::PathBuf::from(rw_path.trim())
-                    .join("Assets")
-                    .join(vehicle.blueprint.replace('/', "\\"));
-                let target = if full.exists() {
-                    full.clone()
-                } else {
-                    let mut cur = full.as_path();
-                    while !cur.exists() {
-                        match cur.parent() {
-                            Some(p) => cur = p,
-                            None => break,
-                        }
-                    }
-                    cur.to_path_buf()
-                };
-                if full.is_file() {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(format!("/select,\"{}\"", full.display()))
-                        .spawn();
-                } else {
-                    let _ = crate::windows::open_in_file_explorer(&target);
+                  // Если блюпринт не найден, ничего не открываем.
                 }
-            }
+
         }
     });
     ui.on_open_route_folder(move || {
@@ -1214,7 +1431,8 @@ fn main() {
             let target = if full.exists() {
                 // open containing folder with the file selected
                 let _ = std::process::Command::new("explorer.exe")
-                    .arg(format!("/select,\"{}\"", full.display()))
+                    .arg("/select,")
+                    .arg(full.as_os_str())
                     .spawn();
                 return;
             } else {

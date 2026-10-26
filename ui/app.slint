@@ -7,8 +7,8 @@ export struct RouteItem {
 
 export component MainWindow inherits Window {
     title: "TS-Checker";
-    min-width: 1100px;
-    min-height: 700px;
+    min-width: 1300px;
+    min-height: 1000px;
 
     in property <[RouteItem]> route-items: [];
     in-out property <bool> ignore-list-open: false;
@@ -47,16 +47,19 @@ export component MainWindow inherits Window {
                         selected-route = i;
                         route-selected(i);
                     }
+                    double-clicked => {
+                        open-route-folder();
+                    }
                     HorizontalLayout {
                         spacing: 6px;
                         alignment: start;
                         padding: 2px;
                          Image {
                              source: item.icon-source;
-                             width: 128px;
-                             height: 64px;
-                             preferred-width: 128px;
-                             preferred-height: 64px;
+                             width: 256px;
+                             height: 128px;
+                             preferred-width: 256px;
+                             preferred-height: 128px;
                          }
                         Text {
                             text: item.name;
@@ -90,11 +93,6 @@ export component MainWindow inherits Window {
                 text: "Проверить маршрут";
                 enabled: selected-route >= 0;
                 clicked => { start-check(); }
-            }
-            Button {
-                text: "Открыть маршрут в проводнике";
-                enabled: selected-route >= 0;
-                clicked => { open-route-folder(); }
             }
             Button {
                 text: "Показать все объекты";
@@ -205,7 +203,7 @@ export component IncompleteFoldersWindow inherits Window {
 
 export component ScenarioWindow inherits Window {
     title: scenario-title;
-    min-width: 900px;
+    min-width: 1150px;
     min-height: 560px;
 
     in property <string> scenario-title: "";
@@ -215,19 +213,28 @@ export component ScenarioWindow inherits Window {
     in property <string> scenario-start-time: "";
     in property <string> scenario-weather: "";
     in property <[string]> consist-names: [];
+    accessible-role: AccessibleRole.none;
     in property <[bool]> consist-missing: [];
     in property <[string]> vehicle-names: [];
     in property <[bool]> vehicle-missing: [];
     in property <[string]> vehicle-paths: [];
+    in property <string> selected-vehicle-path: "";
+    in property <image> selected-vehicle-image;
 
     in-out property <int> selected-consist: -1;
+    in-out property <int> selected-vehicle: -1;
 
     callback consist-selected(int);
     callback open-locoswap();
+    callback open-locoswap-consist(int);
     callback open-vehicle-path(int);
+    callback vehicle-selected(int);
+    callback open-selected-vehicle-path();
 
     VerticalBox {
+        spacing: 6px;
         VerticalBox {
+            spacing: 2px;
             HorizontalBox {
                 alignment: LayoutAlignment.start;
                 preferred-width: 10px;
@@ -247,14 +254,21 @@ export component ScenarioWindow inherits Window {
             }
             HorizontalBox {
                 alignment: LayoutAlignment.start;
+                preferred-height: 10px;
                 Text { text: "Сезон:"; font-size: 14px; }
                 Text { text: scenario-season; font-size: 14px; }
             }
         }
         HorizontalBox {
+            alignment: LayoutAlignment.stretch;
             VerticalBox {
-                Text { text: "Составы"; font-size: 13px; color: #888888; }
+                horizontal-stretch: 1;
+                min-width: 220px;
+                alignment: LayoutAlignment.start;
+                Text { text: "Составы"; font-size: 16px; color: #888888; }
                 ListView {
+                    min-height: 250px;
+                    preferred-height: 250px;
                     for c[i] in consist-names: Rectangle {
                         background: i == selected-consist ? #3a3a3a : transparent;
                         TouchArea {
@@ -264,11 +278,16 @@ export component ScenarioWindow inherits Window {
                             }
                             HorizontalLayout {
                                 alignment: start;
-                                padding: 2px;
+                                padding: 1px;
                                 Text {
                                     text: c;
+                                    font-size: 14px;
                                     vertical-alignment: center;
                                     color: consist-missing[i] ? #ff6666 : #4caf50;
+                                }
+                                if consist-missing[i] : Button {
+                                    text: "LocoSwap";
+                                    clicked => { open-locoswap-consist(i); }
                                 }
                             }
                         }
@@ -276,22 +295,56 @@ export component ScenarioWindow inherits Window {
                 }
             }
             VerticalBox {
-                Text { text: "Подвижные единицы"; font-size: 13px; color: #888888; }
+                horizontal-stretch: 1;
+                min-width: 220px;
+                alignment: LayoutAlignment.start;
+                Text { text: "Подвижные единицы"; font-size: 16px; color: #888888; }
                 ListView {
+                    min-height: 250px;
+                    preferred-height: 250px;
                     for v[i] in vehicle-names: Rectangle {
+                        background: i == selected-vehicle ? #3a3a3a : transparent;
                         TouchArea {
+                            clicked => {
+                                selected-vehicle = i;
+                                vehicle-selected(i);
+                            }
                             double-clicked => { open-vehicle-path(i); }
                             HorizontalLayout {
                                 alignment: start;
-                                padding: 2px;
+                                padding: 1px;
                                 Text {
                                     text: v;
+                                    font-size: 14px;
                                     vertical-alignment: center;
                                     color: vehicle-missing[i] ? #ff6666 : #4caf50;
                                 }
                             }
                         }
                     }
+                }
+            }
+            VerticalBox {
+                horizontal-stretch: 0;
+                min-width: 390px;
+                max-width: 400px;
+                preferred-width: 390px;
+                alignment: LayoutAlignment.start;
+                cross-axis-alignment: CrossAxisAlignment.start;
+                Text { text: "Вагон"; font-size: 16px; color: #888888; }
+                TouchArea {
+                    double-clicked => { open-selected-vehicle-path(); }
+                    Text {
+                        text: selected-vehicle-path;
+                        font-size: 12px;
+                        wrap: TextWrap.no-wrap;
+                        color: #4da3ff;
+                    }
+                }
+                Image {
+                    source: selected-vehicle-image;
+                    width: 384px;
+                    height: 192px;
                 }
             }
         }
@@ -308,6 +361,7 @@ export component MissingAssetsWindow inherits Window {
 
     in property <[string]> missing-assets: [];
     callback replace-missing(int);
+    callback copy-to-clipboard(string);
 
     VerticalBox {
         Text { text: "Недостающие ассеты маршрута:"; }
@@ -318,9 +372,18 @@ export component MissingAssetsWindow inherits Window {
                 Text {
                     text: asset;
                     vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                }
+                Button {
+                    text: "Копировать";
+                    horizontal-stretch: 0;
+                    min-width: 80px;
+                    clicked => { copy-to-clipboard(asset); }
                 }
                 Button {
                     text: "Заменить...";
+                    horizontal-stretch: 0;
                     min-width: 90px;
                     clicked => { replace-missing(i); }
                 }

@@ -38,6 +38,7 @@ pub(crate) struct CheckerApp {
     scenarios_route: Option<String>,
     pub(crate) selected_scenario: Option<usize>,
     pub(crate) selected_consist: Option<usize>,
+    pub(crate) selected_vehicle: Option<usize>,
     pub(crate) scenario_window_open: bool,
     pub(crate) scenario_consist_info: Option<Vec<(String, bool)>>,
     pub(crate) scenario_vehicle_files: Option<Vec<Vec<bool>>>,
@@ -112,8 +113,9 @@ impl Default for CheckerApp {
             scenarios: Vec::new(),
             scenarios_route: None,
             selected_scenario: None,
-            selected_consist: None,
-            scenario_window_open: false,
+        selected_consist: None,
+        selected_vehicle: None,
+        scenario_window_open: false,
             scenario_consist_info: None,
             scenario_vehicle_files: None,
             search_query: String::new(),
@@ -429,6 +431,7 @@ impl CheckerApp {
         self.scenarios_route = Some(route.id.clone());
         self.selected_scenario = None;
         self.selected_consist = None;
+        self.selected_vehicle = None;
         self.scenario_consist_info = None;
         self.scenario_vehicle_files = None;
     }

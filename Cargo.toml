@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+arboard = "3.7.0"
 rfd = "0.15"
 walkdir = "2.5"
 rayon = "1.12"
