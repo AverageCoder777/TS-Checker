@@ -761,7 +761,16 @@ fn main() {
                         ui.set_check_log(last_check_log.clone().into());
                     }
                 ui.set_has_result(app.result.is_some());
+                ui.set_missing_assets_count(app.result.as_ref().map(|r| r.missing_assets.len() as i32).unwrap_or(0));
+                ui.set_is_checking(app.is_checking());
+                if app.is_checking() {
+                    ui.set_show_log(true);
+                }
                 ui.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
+                ui.set_is_checking(app.is_checking());
+                if app.is_checking() {
+                    ui.set_show_log(true);
+                }
                     return;
                 }
                 last_count = app.routes.len();
@@ -816,6 +825,7 @@ fn main() {
                     ui.set_check_log(last_check_log.clone().into());
                 }
                 ui.set_has_result(app.result.is_some());
+                ui.set_missing_assets_count(app.result.as_ref().map(|r| r.missing_assets.len() as i32).unwrap_or(0));
             }
         },
     );
@@ -868,7 +878,11 @@ fn main() {
             }
         }
     });
+    let ui_handle_start_check = ui_handle.clone();
     ui.on_start_check(move || {
+        if let Some(ui) = ui_handle_start_check.upgrade() {
+            ui.set_show_log(true);
+        }
         if let Ok(mut app) = app_clone3.lock() {
             app.start_check();
         }

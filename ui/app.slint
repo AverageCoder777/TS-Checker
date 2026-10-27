@@ -26,6 +26,9 @@ export component MainWindow inherits Window {
     in property <string> status: "";
     in-out property <string> search-query: "";
     in-out property <int> selected-route: -1;
+    in property <bool> is-checking: false;
+    in-out property <bool> show_log: false;
+    in property <int> missing-assets-count: 0;
     in property <string> selected-route-name: "";
     in property <string> selected-route-id: "";
     in property <[ScenarioItem]> scenario-items: [];
@@ -47,9 +50,18 @@ export component MainWindow inherits Window {
             min-width: 380px;
             max-width: 380px;
             horizontal-stretch: 0;
-            LineEdit {
-                placeholder-text: "Поиск маршрутов...";
-                text <=> search-query;
+            HorizontalLayout {
+                spacing: 6px;
+                LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: "Поиск маршрутов...";
+                    text <=> search-query;
+                }
+                Button {
+                    text: "⚙";
+                    min-width: 32px;
+                    clicked => { open-settings(); }
+                }
             }
             ListView {
                 vertical-stretch: 1;
@@ -99,8 +111,8 @@ export component MainWindow inherits Window {
                 spacing: 12px;
                 alignment: LayoutAlignment.start;
                 Rectangle {
-                    width: 256px;
-                    height: 128px;
+                    width: 200px;
+                    height: 100px;
                     horizontal-stretch: 0;
                     border-radius: 6px;
                     clip: true;
@@ -137,12 +149,41 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+            Rectangle { height: 16px; }
             Text { text: "Сценарии маршрута:"; font-size: 14px; }
-            ListView {
+            HorizontalBox {
+                min-height: 32px;
+                preferred-height: 32px;
+                padding-top: 4px;
+                Text {
+                    text: "Название сценария";
+                    font-size: 13px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: "Тип";
+                    font-size: 13px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    width: 130px;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                }
+            }
+            Rectangle {
                 vertical-stretch: 1;
                 horizontal-stretch: 1;
                 min-height: 120px;
-                for s[i] in scenario-items: Rectangle {
+                border-width: 1px;
+                border-color: #444444;
+                border-radius: 4px;
+                background: #181818;
+                clip: true;
+                ListView {
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    for s[i] in scenario-items: Rectangle {
                     background: i == selected-scenario ? #3a3a3a : (Math.mod(i, 2) == 0 ? #1f1f1f : #262626);
                     TouchArea {
                         clicked => {
@@ -176,15 +217,29 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+                }
             }
             HorizontalBox {
                 min-height: 30px;
                 preferred-height: 40px;
-                Button {
+                Rectangle {
                     min-height: 30px;
-                    text: "Проверить маршрут";
-                    enabled: selected-route >= 0;
-                    clicked => { start-check(); }
+                    preferred-height: 32px;
+                    horizontal-stretch: 0;
+                    border-radius: 4px;
+                    background: route_check_touch.pressed ? #047857 : (route_check_touch.has-hover ? #10b981 : #059669);
+                    route_check_touch := TouchArea {
+                        enabled: selected-route >= 0;
+                        clicked => { show_log = true; start-check(); }
+                    }
+                    Text {
+                        text: "Проверить маршрут";
+                        color: #ffffff;
+                        font-size: 14px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
                 Button {
                     min-height: 30px;
@@ -194,17 +249,52 @@ export component MainWindow inherits Window {
                 }
                 Button {
                     min-height: 30px;
-                    text: "Настройки";
-                    clicked => { open-settings(); }
+                    text: show_log ? "Скрыть лог" : "Показать лог";
+                    clicked => { show_log = !show_log; }
                 }
             }
-            log_view := TextEdit {
-                text: check-log;
-                edited => { reset-log(); }
-                vertical-stretch: 1;
-                min-height: 120px;
+            if show_log : Rectangle {
+                height: 160px;
+                width: 100%;
+                border-width: 1px;
+                border-color: #444444;
+                border-radius: 4px;
+                background: #1a1a1a;
+                clip: true;
+                VerticalLayout {
+                    spacing: 0px;
+                    HorizontalLayout {
+                        preferred-height: 24px;
+                        min-height: 24px;
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        Text {
+                            text: "Лог";
+                            font-size: 13px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            color: #aaaaaa;
+                        }
+                        /*Button {
+                            text: "X";
+                            min-width: 24px;
+                            clicked => { show_log = false; }
+                        }*/
+                    }
+                    log_view := TextEdit {
+                        text: check-log;
+                        edited => { reset-log(); }
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                    }
+                }
             }
-            Text { text: status; font-size: 13px; }
+            Text {
+                text: status;
+                font-size: 13px;
+                color: missing-assets-count > 0 ? #ef4444 : #22c55e;
+            }
         }
     }
 }
