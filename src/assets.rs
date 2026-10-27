@@ -416,8 +416,9 @@ pub(crate) fn read_serz_xml(serz_path: &Path, asset_path: &Path) -> Result<Strin
         })
     });
     conversion?;
-    fs::read_to_string(&xml_path)
-        .map_err(|error| format!("Не удалось прочитать XML {}: {error}", xml_path.display()))
+    let bytes = fs::read(&xml_path)
+        .map_err(|error| format!("Не удалось прочитать XML {}: {error}", xml_path.display()))?;
+    Ok(decode_xml_bytes(&bytes))
 }
 
 /// Ссылка на объект ассета внутри XML RailWorks.
@@ -921,6 +922,16 @@ pub(crate) fn scan_umlaut_assets(
     Ok((umlaut_assets, errors))
 }
 
+pub(crate) fn decode_xml_bytes(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if !text.contains('\u{FFFD}') {
+            return text.to_owned();
+        }
+    }
+    let (decoded, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
+    decoded.into_owned()
+}
+
 fn analyze_route_file(
     route_file: &RouteFile,
     index: usize,
@@ -1017,10 +1028,7 @@ fn analyze_route_file(
         }
     };
 
-    let xml_text = match String::from_utf8(xml_data) {
-        Ok(text) => text,
-        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
-    };
+    let xml_text = decode_xml_bytes(&xml_data);
 
     let references = extract_asset_references_with_locations(&xml_text);
 
@@ -1471,11 +1479,19 @@ where
         } else {
             false
         };
-        let missing = full_asset_path.is_none() && !in_archive;
-        if missing {
+        let resolved_path = full_asset_path.clone();
+        let corrupted = has_broken_character(&relative_asset) && resolved_path.is_some();
+        let missing = resolved_path.is_none() && !in_archive;
+        if missing || corrupted {
+            let suggested_repair = resolved_path
+                .as_ref()
+                .and_then(|path| path.strip_prefix(assets_path).ok())
+                .map(|path| path.to_string_lossy().replace('\\', "/"));
             missing_assets.push(MissingAsset {
                 path: display_path.clone(),
                 uses: uses.clone(),
+                suggested_repair,
+                is_corrupted_link: corrupted,
             });
         }
         asset_inventory.push(ReferencedAsset {
