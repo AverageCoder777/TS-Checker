@@ -55,7 +55,8 @@ pub(crate) struct CheckerApp {
     pub(crate) ignored_route_ids: HashSet<String>,
     route_scan: Option<Receiver<Result<RouteScanOutcome, String>>>,
     check: Option<Receiver<CheckMessage>>,
-    asset_replacement: Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
+    pub(crate) asset_replacement: Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
+    pub(crate) asset_replacement_queue: Vec<(MissingAsset, PathBuf, String)>,
     asset_replacement_feedback: Option<Result<String, String>>,
     pub(crate) asset_viewer_open: bool,
     pub(crate) asset_viewer_document: Option<EditorDocument>,
@@ -147,6 +148,7 @@ impl Default for CheckerApp {
             route_scan: None,
             check: None,
             asset_replacement: None,
+            asset_replacement_queue: Vec::new(),
             asset_replacement_feedback: None,
             asset_viewer_open: false,
             asset_viewer_document: None,
@@ -307,6 +309,15 @@ impl CheckerApp {
             });
             let _ = tx.send((missing_path, result));
         });
+    }
+
+    pub(crate) fn start_next_asset_replacement(&mut self) {
+        if self.asset_replacement.is_some() {
+            return;
+        }
+        if let Some((missing, replacement, replacement_relative)) = self.asset_replacement_queue.pop() {
+            self.start_asset_replacement(missing, replacement, false, replacement_relative, std::collections::BTreeMap::new());
+        }
     }
 
     pub(crate) fn asset_only(path: PathBuf) -> Self {
@@ -715,6 +726,7 @@ impl CheckerApp {
                 }
             }
         }
+        self.start_next_asset_replacement();
 
         let route_result = self.route_scan.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),

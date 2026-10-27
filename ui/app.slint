@@ -691,10 +691,14 @@ export component MissingAssetsWindow inherits Window {
 
     in property <[string]> missing-assets: [];
     in property <[int]> missing-counts: [];
+    in property <[string]> missing-suggested-repairs: [];
+    in property <[bool]> missing-corrupted: [];
     in-out property <[string]> active-tile-list: [];
     in property <string> active-tile-asset: "";
     in-out property <int> selected-asset: -1;
     callback replace-missing(int);
+    callback repair-corrupted(int);
+    callback repair-all-corrupted();
     callback copy-to-clipboard(string);
     callback copy-all-to-clipboard();
     callback close-missing();
@@ -766,6 +770,23 @@ export component MissingAssetsWindow inherits Window {
                             overflow: TextOverflow.elide;
                         }
 
+                        if missing-corrupted[i] : Rectangle {
+                            background: #d97706;
+                            border-radius: 3px;
+                            height: 20px;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                Text {
+                                    text: "Повреждён путь";
+                                    color: #ffffff;
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
                         Rectangle {
                             background: #25282e;
                             border-radius: 3px;
@@ -783,12 +804,27 @@ export component MissingAssetsWindow inherits Window {
                             }
                         }
 
+                        if missing-corrupted[i] && missing-suggested-repairs[i] != "" : Text {
+                            text: "-> " + missing-suggested-repairs[i];
+                            font-size: 11px;
+                            color: #fbbf24;
+                            vertical-alignment: center;
+                            overflow: TextOverflow.elide;
+                        }
+
                         Button {
                             text: "📋";
                             horizontal-stretch: 0;
                             min-width: 32px;
                             preferred-height: 24px;
                             clicked => { copy-to-clipboard(asset); }
+                        }
+
+                        if missing-corrupted[i] : Button {
+                            text: "Починить";
+                            min-width: 70px;
+                            preferred-height: 24px;
+                            clicked => { repair-corrupted(i); }
                         }
 
                         Button {
@@ -821,7 +857,7 @@ export component MissingAssetsWindow inherits Window {
                         overflow: TextOverflow.elide;
                     }
                     Button {
-                        text: "X";
+                        text: "✕ Закрыть";
                         preferred-height: 20px;
                         clicked => { active-tile-list = []; }
                     }
@@ -854,6 +890,24 @@ export component MissingAssetsWindow inherits Window {
                 clicked => { copy-all-to-clipboard(); }
             }
             Rectangle { horizontal-stretch: 1; }
+            Rectangle {
+                min-width: 210px;
+                preferred-width: 210px;
+                preferred-height: 32px;
+                border-radius: 4px;
+                background: repair_all_touch.pressed ? #047857 : (repair_all_touch.has-hover ? #10b981 : #059669);
+                repair_all_touch := TouchArea {
+                    clicked => { repair-all-corrupted(); }
+                }
+                Text {
+                    text: "Починить все битые пути";
+                    color: #ffffff;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
             Rectangle {
                 min-width: 190px;
                 preferred-width: 190px;

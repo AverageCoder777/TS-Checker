@@ -312,12 +312,159 @@ fn names_match(expected: &str, candidate: &str) -> bool {
         })
 }
 
+fn has_corrupted_or_nonascii(value: &str) -> bool {
+    !value.is_ascii()
+        || has_broken_character(value)
+        || value
+            .chars()
+            .any(|character| matches!(character, '\u{FFFD}' | '?' | '¦' | '¢') || character.is_control())
+}
+
 /// Ищет файл ассета по ссылке из маршрута.
 ///
 /// Ссылка может содержать испорченные символы: сначала проверяются имена с
 /// транслитерацией, затем — с настоящим умляутом. Так ассет, который на диске
 /// называется с умляутом, не считается утерянным, а попадает в список на
 /// переименование.
+const GLITCH_WILDCARD: char = '\u{E000}';
+
+fn normalize_fuzzy_segment(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            let folded = match ch {
+                'ä' | 'Ä' | 'á' | 'à' | 'â' | 'ã' | 'å' => 'a',
+                'ö' | 'Ö' | 'ó' | 'ò' | 'ô' | 'õ' => 'o',
+                'ü' | 'Ü' | 'ú' | 'ù' | 'û' => 'u',
+                'é' | 'è' | 'ê' | 'ë' => 'e',
+                'í' | 'ì' | 'î' | 'ï' => 'i',
+                'ß' => 's',
+                _ => ch.to_ascii_lowercase(),
+            };
+            out.push(folded);
+        } else if matches!(ch, '¦' | '|' | '\u{FFFD}' | '?') {
+            out.push(GLITCH_WILDCARD);
+        }
+    }
+    out
+}
+
+fn fold_german_diphthongs(value: &str) -> String {
+    value
+        .replace("ae", "a")
+        .replace("oe", "o")
+        .replace("ue", "u")
+}
+
+fn glitch_match(query: &[char], candidate: &[char]) -> bool {
+    if query.is_empty() {
+        return candidate.is_empty();
+    }
+    if query[0] == GLITCH_WILDCARD {
+        for extra in 1..=2 {
+            if candidate.len() >= extra && glitch_match(&query[1..], &candidate[extra..]) {
+                return true;
+            }
+        }
+        false
+    } else {
+        !candidate.is_empty() && query[0] == candidate[0] && glitch_match(&query[1..], &candidate[1..])
+    }
+}
+
+fn fuzzy_match_name(query: &str, candidate: &str) -> bool {
+    let query_digits: String = query.chars().filter(|character| character.is_ascii_digit()).collect();
+    let candidate_digits: String = candidate.chars().filter(|character| character.is_ascii_digit()).collect();
+    if query_digits != candidate_digits {
+        return false;
+    }
+
+    let left = normalize_fuzzy_segment(query);
+    let right_raw = normalize_fuzzy_segment(candidate);
+    if left.is_empty() || right_raw.is_empty() {
+        return false;
+    }
+
+    let has_glitch = left.contains(GLITCH_WILDCARD);
+    if !has_glitch {
+        // Clean path: exact normalized equality only.
+        return left == right_raw;
+    }
+
+    // Glitch tolerance: allow 1-2 characters in the candidate at the glitch
+    // position. Try both raw and diphthong-folded candidate forms.
+    let right_folded = fold_german_diphthongs(&right_raw);
+    let left_chars: Vec<char> = left.chars().collect();
+    let right_raw_chars: Vec<char> = right_raw.chars().collect();
+    let right_folded_chars: Vec<char> = right_folded.chars().collect();
+    glitch_match(&left_chars, &right_raw_chars) || glitch_match(&left_chars, &right_folded_chars)
+}
+
+fn find_fuzzy_child(parent: &Path, query: &str, want_directory: bool) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() != want_directory {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if fuzzy_match_name(query, &name) {
+                candidates.push(path);
+            }
+        }
+    }
+    candidates
+        .iter()
+        .find(|path| path.file_name().map(|name| name.to_string_lossy().is_ascii()).unwrap_or(false))
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
+}
+
+fn fuzzy_resolve_disk_path(assets_path: &Path, relative_asset: &str) -> Option<(PathBuf, String)> {
+    let normalized = relative_asset.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let mut current = assets_path.join(parts[0]).join(parts[1]);
+    if !current.is_dir() {
+        current = find_fuzzy_child(assets_path, parts[0], true)?.join(parts[1]);
+        if !current.is_dir() {
+            return None;
+        }
+    }
+    let relative_segments = &parts[2..];
+    let last_index = relative_segments.len().saturating_sub(1);
+    let mut matched_segments = Vec::new();
+    for (index, segment) in relative_segments.iter().enumerate() {
+        if index == last_index {
+            let matched = find_fuzzy_child(&current, segment, false)?;
+            let name = matched
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())?;
+            matched_segments.push(name);
+            let disk_path = matched;
+            let relative_repair = format!(
+                "{}/{}/{}",
+                parts[0],
+                parts[1],
+                matched_segments.join("/")
+            );
+            return Some((disk_path, relative_repair));
+        }
+        let matched = find_fuzzy_child(&current, segment, true)?;
+        let name = matched
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())?;
+        matched_segments.push(name);
+        current = matched;
+    }
+    None
+}
+
 fn resolve_asset_path(assets_path: &Path, relative_asset: &str) -> Result<Option<PathBuf>, String> {
     let exact = assets_path.join(relative_asset.replace('/', "\\"));
     if exact.is_file() {
@@ -355,6 +502,12 @@ fn resolve_asset_path(assets_path: &Path, relative_asset: &str) -> Result<Option
                 candidates.push((candidate, identity));
             }
         }
+    }
+    if let Some(position) = candidates
+        .iter()
+        .position(|(path, _)| path.to_string_lossy().is_ascii())
+    {
+        return Ok(Some(candidates.remove(position).0));
     }
     match candidates.len() {
         0 => Ok(find_similar_asset_path(assets_path, relative_asset)),
@@ -1479,25 +1632,46 @@ where
         } else {
             false
         };
-        let resolved_path = full_asset_path.clone();
-        let corrupted = has_broken_character(&relative_asset) && resolved_path.is_some();
-        let missing = resolved_path.is_none() && !in_archive;
-        if missing || corrupted {
-            let suggested_repair = resolved_path
-                .as_ref()
-                .and_then(|path| path.strip_prefix(assets_path).ok())
-                .map(|path| path.to_string_lossy().replace('\\', "/"));
+        let is_in_archive = in_archive;
+        let (resolved_disk_path, suggested_repair, is_corrupted) = if let Some(exact_path) = full_asset_path {
+            (Some(exact_path), None, false)
+        } else if is_in_archive {
+            // Exists inside .ap archive - perfectly valid!
+            (None, None, false)
+        } else if let Some((fuzzy_disk_path, relative_repair)) =
+            fuzzy_resolve_disk_path(assets_path, &relative_asset)
+        {
+            // Fuzzy candidates are only auto-repairable corrupted/encoding variants.
+            // Clean ASCII names that merely look similar are genuinely missing.
+            let query_corrupted = has_corrupted_or_nonascii(&relative_asset);
+            let umlaut_folded_equivalent = !relative_asset.is_ascii()
+                && normalize_fuzzy_segment(&relative_asset)
+                    == normalize_fuzzy_segment(&relative_repair);
+            if query_corrupted || umlaut_folded_equivalent {
+                (Some(fuzzy_disk_path), Some(relative_repair), true)
+            } else {
+                (None, None, false)
+            }
+        } else {
+            // Genuinely missing
+            (None, None, false)
+        };
+
+        let is_missing = !is_in_archive && resolved_disk_path.is_none() && !is_corrupted;
+
+        if is_missing || is_corrupted {
             missing_assets.push(MissingAsset {
                 path: display_path.clone(),
                 uses: uses.clone(),
                 suggested_repair,
-                is_corrupted_link: corrupted,
+                is_corrupted_link: is_corrupted,
             });
         }
+
         asset_inventory.push(ReferencedAsset {
             path: display_path,
             uses,
-            missing,
+            missing: is_missing,
         });
     }
     missing_assets.sort_by(|left, right| left.path.cmp(&right.path));

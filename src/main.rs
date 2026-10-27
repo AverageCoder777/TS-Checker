@@ -64,6 +64,8 @@ struct CheckResult {
 struct MissingAsset {
     path: String,
     uses: Vec<AssetUse>,
+    suggested_repair: Option<String>,
+    is_corrupted_link: bool,
 }
 
 #[derive(Clone)]
@@ -676,6 +678,65 @@ fn main() {
             }
         }
     });
+    missing_win.on_repair_corrupted({
+        let app = app_clone7.clone();
+        move |idx| {
+            if let Ok(mut app) = app.lock() {
+                let missing_assets = app.result.as_ref().map(|r| r.missing_assets.clone()).unwrap_or_default();
+                if let Some(missing) = missing_assets.get(idx as usize).cloned() {
+                    if let Some(repair) = missing.suggested_repair.clone() {
+                        let assets_path = std::path::PathBuf::from(app.rw_path.trim()).join("Assets");
+                        let replacement = assets_path.join(repair.replace('/', "\\"));
+                        let replacement_relative = repair.clone();
+                        app.start_asset_replacement(
+                            missing,
+                            replacement,
+                            false,
+                            replacement_relative,
+                            std::collections::BTreeMap::new(),
+                        );
+                    }
+                }
+            }
+        }
+    });
+    missing_win.on_repair_all_corrupted({
+        let app = app_clone7.clone();
+        move || {
+            if let Ok(mut app) = app.lock() {
+                let missing_assets = app.result.as_ref().map(|r| r.missing_assets.clone()).unwrap_or_default();
+                let repairable: Vec<_> = missing_assets
+                    .into_iter()
+                    .filter(|asset| {
+                        asset
+                            .suggested_repair
+                            .as_ref()
+                            .is_some_and(|repair| !repair.trim().is_empty())
+                    })
+                    .collect();
+                let repairable_count = repairable.len();
+                eprintln!("[Repair] Found {} repairable assets", repairable_count);
+                if repairable_count == 0 {
+                    eprintln!("[Repair] No candidates resolved; fuzzy directory matching failed.");
+                    return;
+                }
+                let assets_path = std::path::PathBuf::from(app.rw_path.trim()).join("Assets");
+                let queue: Vec<_> = repairable
+                    .into_iter()
+                    .filter_map(|missing| {
+                        let repair = missing.suggested_repair.clone()?;
+                        let replacement = assets_path.join(repair.replace('/', "\\"));
+                        Some((missing, replacement, repair))
+                    })
+                    .collect();
+                app.asset_replacement_queue = queue;
+                app.asset_replacement = None;
+                app.missing_assets_shown = false;
+                app.start_next_asset_replacement();
+            }
+        }
+    });
+
     missing_win.on_inspect_tiles({
         let app = app_clone7.clone();
         let handle = missing_handle.clone();
@@ -918,9 +979,13 @@ fn main() {
                     let missing_assets = app.result.as_ref().map(|r| r.missing_assets.clone()).unwrap_or_default();
                     let paths: Vec<slint::SharedString> = missing_assets.iter().map(|m| m.path.clone().into()).collect();
                     let counts: Vec<i32> = missing_assets.iter().map(|m| m.uses.len() as i32).collect();
+                    let repairs: Vec<slint::SharedString> = missing_assets.iter().map(|m| m.suggested_repair.clone().unwrap_or_default().into()).collect();
+                    let corrupted: Vec<bool> = missing_assets.iter().map(|m| m.is_corrupted_link).collect();
                     if let Some(mw) = missing_handle.upgrade() {
                         mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(paths)));
                         mw.set_missing_counts(slint::ModelRc::new(slint::VecModel::from(counts)));
+                        mw.set_missing_suggested_repairs(slint::ModelRc::new(slint::VecModel::from(repairs)));
+                        mw.set_missing_corrupted(slint::ModelRc::new(slint::VecModel::from(corrupted)));
                         mw.set_active_tile_list(slint::ModelRc::new(slint::VecModel::<slint::SharedString>::default()));
                         mw.set_active_tile_asset("".into());
                         let _ = mw.show();
