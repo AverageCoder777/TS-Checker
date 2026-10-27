@@ -10,13 +10,11 @@ pub(crate) fn is_skipped_route_scan_directory(name: &str, ignore_scenarios: bool
 
 fn is_allowed_route_directory(name: &str, ignore_scenarios: bool) -> bool {
     [
-        "Terrain",
         "Scenery",
         "Scenarios",
         "RouteInfo",
         "RouteInformation",
         "Networks",
-        "MixMap",
     ]
     .iter()
     .any(|allowed| name.eq_ignore_ascii_case(allowed))
@@ -178,7 +176,10 @@ pub(crate) fn unexpected_route_directories(route_path: &Path) -> Result<Vec<Stri
             .is_dir()
         {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !is_allowed_route_directory(&name, false) {
+            let known = is_allowed_route_directory(&name, false)
+                || name.eq_ignore_ascii_case("Terrain")
+                || name.eq_ignore_ascii_case("MixMap");
+            if !known {
                 unexpected.push(name);
             }
         }
@@ -943,6 +944,14 @@ fn analyze_route_file(
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"));
     let xml_data = if is_binary {
+        if fs::metadata(&file_path).map(|metadata| metadata.len()).unwrap_or(0) < 256 {
+            return FileAnalysis {
+                from_cache: false,
+                file: route_file.clone(),
+                uses: Vec::new(),
+                error: None,
+            };
+        }
         // Serz хранит имена элементов обычными строками, поэтому файл без
         // `BlueprintID` заведомо не содержит ссылок на ассеты. Такие файлы не
         // конвертируются: на больших маршрутах это основная часть работы.
@@ -1182,64 +1191,17 @@ where
         .filter(|file| is_tracks_bin(file))
         .cloned()
         .collect();
+    // LPT: тяжёлые файлы (Tracks.bin) ставим первыми, чтобы пул не простаивал.
+    let mut all_files = heavy_files.clone();
+    all_files.extend(normal_files.iter().cloned());
 
     let temp_dir = tempdir()
         .map_err(|error| format!("Не удалось создать временную папку для Serz: {error}"))?;
 
-    // Архивы маршрута (.ap) распаковываются один раз целиком: иначе каждый
-    // файл архива открывает zip заново, что на MainContent.ap умножает время
-    // проверки в несколько раз.
-    let mut archives_to_extract: Vec<PathBuf> = route_files
-        .iter()
-        .filter_map(|route_file| match route_file {
-            RouteFile::Archive { archive, .. } => Some(archive.clone()),
-            RouteFile::Path(_) => None,
-        })
-        .collect();
-    archives_to_extract.sort();
-    archives_to_extract.dedup();
-    for archive_path in &archives_to_extract {
-        let archive_file = match fs::File::open(archive_path) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        let mut archive = match ZipArchive::new(archive_file) {
-            Ok(archive) => archive,
-            Err(_) => continue,
-        };
-        for index in 0..archive.len() {
-            let mut member = match archive.by_index(index) {
-                Ok(member) => member,
-                Err(_) => continue,
-            };
-            if member.is_dir() {
-                continue;
-            }
-            let Ok(name) = member.name().map(|name| name.into_owned()) else {
-                continue;
-            };
-            let relative = Path::new(&name);
-            if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                continue;
-            }
-            let target = temp_dir.path().join(relative);
-            if target.exists() {
-                continue;
-            }
-            if let Some(parent) = target.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Ok(mut output) = fs::File::create(&target) {
-                let _ = std::io::copy(&mut member, &mut output);
-            }
-        }
-    }
+    // Архивы маршрута (.ap) не распаковываются целиком: записи materialize()
+    // читаются из zip по требованию только для анализируемых .bin/.xml файлов.
 
-    let normal_binary_count = normal_files
+    let normal_binary_count = all_files
         .iter()
         .filter(|path| {
             path.extension()
@@ -1260,12 +1222,12 @@ where
     // Кэш разбора лежит в папке маршрута: неизменившиеся файлы берутся из
     // него, а заново разбираются только те, что изменились или появились.
     let mut cache = crate::analysis_cache::AnalysisCache::load(route_path);
-    for (chunk_index, chunk) in normal_files.chunks(32).enumerate() {
+    for (chunk_index, chunk) in all_files.chunks(32).enumerate() {
         let start_index = chunk_index * 32;
         report_progress(&format!(
             "Анализ файлов: {} из {}; параллельных Serz-процессов: {}...",
             start_index + 1,
-            normal_files.len(),
+            all_files.len(),
             worker_count.min(normal_binary_count.max(1))
         ));
         let chunk_analyses: Vec<FileAnalysis> = pool.install(|| {
@@ -1290,40 +1252,6 @@ where
                 .collect()
         });
         analyses.extend(chunk_analyses);
-    }
-    // Networks/Tracks.bin проверяется последним и без пула: это очень большой
-    // файл, его конвертация идёт одним процессом Serz.
-    if !heavy_files.is_empty() {
-        report_progress("Анализ Networks/Tracks.bin...");
-        for (offset, route_file) in heavy_files.iter().enumerate() {
-            let name = route_file.route_name(route_path);
-            let stamp = route_file.stamp();
-            let analysis = if let (Some(name), Some(stamp)) = (&name, stamp) {
-                if let Some(cached) = cache.get(name, stamp) {
-                    FileAnalysis {
-                        from_cache: true,
-                        file: route_file.clone(),
-                        uses: cached.uses.clone(),
-                        error: None,
-                    }
-                } else {
-                    analyze_route_file(
-                        route_file,
-                        normal_files.len() + offset,
-                        temp_dir.path(),
-                        serz_path,
-                    )
-                }
-            } else {
-                analyze_route_file(
-                    route_file,
-                    normal_files.len() + offset,
-                    temp_dir.path(),
-                    serz_path,
-                )
-            };
-            analyses.push(analysis);
-        }
     }
     let mut asset_uses: HashMap<String, Vec<AssetUse>> = HashMap::new();
     // Написание пути, как оно встретилось в маршруте: ключ в asset_uses приведён
