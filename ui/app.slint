@@ -401,6 +401,7 @@ export component ScenarioWindow inherits Window {
     in property <[bool]> vehicle-missing: [];
     in property <[string]> vehicle-paths: [];
     in property <string> selected-vehicle-path: "";
+    in property <string> selected-vehicle-info: "";
     in property <image> selected-vehicle-image;
 
     in-out property <int> selected-consist: -1;
@@ -412,150 +413,175 @@ export component ScenarioWindow inherits Window {
     callback open-vehicle-path(int);
     callback vehicle-selected(int);
     callback open-selected-vehicle-path();
+    callback open-scenario-folder();
+    callback close-scenario();
 
     VerticalBox {
         padding: 8px;
-        spacing: 6px;
-        VerticalBox {
-            alignment: LayoutAlignment.stretch;
-            min-height: 60px;
-            padding: 4px;
-            padding-left: 4px;
-            preferred-height: 60px;
-            spacing: 2px;
-            HorizontalBox {
-                alignment: LayoutAlignment.start;
-                preferred-width: 10px;
-                padding: 0px;
-                padding-left: 8px;
-                preferred-height: 5px;
-                width: 0px;
-                Text { text: "Начало:"; font-size: 14px; }
-                Text { text: scenario-start-time; font-size: 14px; }
-            }
-            HorizontalBox {
-                alignment: LayoutAlignment.start;
-                padding: 0px;
-                padding-left: 8px;
-                preferred-height: 5px;
-                Text { text: "Автор:"; font-size: 14px; }
-                Text { text: scenario-author; font-size: 14px; }
-            }
-            HorizontalBox {
-                alignment: LayoutAlignment.start;
-                padding: 0px;
-                padding-left: 8px;
-                preferred-height: 5px;
-                Text { text: "Погода:"; font-size: 14px; }
-                Text { text: scenario-weather; font-size: 14px; }
-            }
-            HorizontalBox {
-                alignment: LayoutAlignment.start;
-                padding: 0px;
-                padding-left: 8px;
-                preferred-height: 5px;
-                Text { text: "Сезон:"; font-size: 14px; }
-                Text { text: scenario-season; font-size: 14px; }
+        spacing: 8px;
+        Rectangle {
+            background: #1e1e1e;
+            border-radius: 6px;
+            VerticalBox {
+                padding: 8px;
+                spacing: 4px;
+                Text { text: scenario-name; font-size: 16px; font-weight: 700; }
+                HorizontalBox {
+                    Text { text: "Начало:"; font-size: 13px; color: #aaaaaa; }
+                    Text { text: scenario-start-time; font-size: 13px; }
+                }
+                HorizontalBox {
+                    Text { text: "Автор:"; font-size: 13px; color: #aaaaaa; }
+                    Text { text: scenario-author; font-size: 13px; }
+                }
+                HorizontalBox {
+                    Text { text: "Погода:"; font-size: 13px; color: #aaaaaa; }
+                    Text { text: scenario-weather; font-size: 13px; }
+                }
+                HorizontalBox {
+                    Text { text: "Сезон:"; font-size: 13px; color: #aaaaaa; }
+                    Text { text: scenario-season; font-size: 13px; }
+                }
             }
         }
         HorizontalBox {
-            alignment: LayoutAlignment.start;
-            padding: 0px;
-            padding-left: 4px;
-            VerticalBox {
+            spacing: 6px;
+            vertical-stretch: 1;
+            Rectangle {
                 horizontal-stretch: 1;
-                min-width: 280px;
-                padding: 8px;
-                alignment: LayoutAlignment.start;
-                Text { text: "Составы"; font-size: 16px; color: #888888; }
-                ListView {
-                    min-height: 250px;
-                    preferred-height: 250px;
-                    for c[i] in consist-names: Rectangle {
-                        background: i == selected-consist ? #3a3a3a : transparent;
-                        TouchArea {
-                            clicked => {
-                                selected-consist = i;
-                                consist-selected(i);
-                            }
-                            HorizontalLayout {
-                                alignment: start;
-                                padding: 1px;
-                                Text {
-                                    text: c;
-                                    font-size: 14px;
-                                    vertical-alignment: center;
-                                    color: consist-missing[i] ? #ff6666 : #4caf50;
+                border-width: 1px;
+                border-color: #444444;
+                border-radius: 4px;
+                background: #181818;
+                clip: true;
+                VerticalBox {
+                    padding: 6px;
+                    spacing: 4px;
+                    Text { text: "Составы"; font-size: 14px; font-weight: 600; color: #cccccc; }
+                    ListView {
+                        vertical-stretch: 1;
+                        for c[i] in consist-names: Rectangle {
+                            background: i == selected-consist ? #3a3a3a : transparent;
+                            TouchArea {
+                                clicked => {
+                                    selected-consist = i;
+                                    consist-selected(i);
                                 }
-                                if consist-missing[i] : Button {
-                                    text: "LocoSwap";
-                                    clicked => { open-locoswap-consist(i); }
+                                HorizontalLayout {
+                                    padding: 2px;
+                                    Text {
+                                        text: c;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                        color: c.starts-with("[Игрок]") ? #10b981 : #dddddd;
+                                        horizontal-stretch: 1;
+                                        wrap: TextWrap.no-wrap;
+                                        overflow: TextOverflow.elide;
+                                    }
+                                    if consist-missing[i] : Button {
+                                        text: "LocoSwap";
+                                        clicked => { open-locoswap-consist(i); }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            VerticalBox {
+            Rectangle {
                 horizontal-stretch: 1;
-                max-width: 0px;
-                min-width: 200px;
-                alignment: LayoutAlignment.start;
-                Text { text: "Подвижные единицы"; font-size: 16px; color: #888888; }
-                ListView {
-                    min-height: 250px;
-                    preferred-height: 250px;
-                    for v[i] in vehicle-names: Rectangle {
-                        background: i == selected-vehicle ? #3a3a3a : transparent;
-                        TouchArea {
-                            clicked => {
-                                selected-vehicle = i;
-                                vehicle-selected(i);
-                            }
-                            double-clicked => { open-vehicle-path(i); }
-                            HorizontalLayout {
-                                alignment: start;
-                                padding: 1px;
-                                Text {
-                                    text: v;
-                                    font-size: 14px;
-                                    vertical-alignment: center;
-                                    color: vehicle-missing[i] ? #ff6666 : #4caf50;
+                border-width: 1px;
+                border-color: #444444;
+                border-radius: 4px;
+                background: #181818;
+                clip: true;
+                VerticalBox {
+                    padding: 6px;
+                    spacing: 4px;
+                    Text { text: "Подвижные единицы"; font-size: 14px; font-weight: 600; color: #cccccc; }
+                    ListView {
+                        vertical-stretch: 1;
+                        for v[i] in vehicle-names: Rectangle {
+                            background: i == selected-vehicle ? #3a3a3a : transparent;
+                            TouchArea {
+                                clicked => {
+                                    selected-vehicle = i;
+                                    vehicle-selected(i);
+                                }
+                                double-clicked => { open-vehicle-path(i); }
+                                HorizontalLayout {
+                                    padding: 2px;
+                                    Text {
+                                        text: v;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                        color: vehicle-missing[i] ? #ff6666 : #dddddd;
+                                        horizontal-stretch: 1;
+                                        wrap: TextWrap.no-wrap;
+                                        overflow: TextOverflow.elide;
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            VerticalBox {
-                horizontal-stretch: 0;
-                min-width: 390px;
-                max-width: 400px;
-                preferred-width: 390px;
-                alignment: LayoutAlignment.start;
-                cross-axis-alignment: CrossAxisAlignment.start;
-                Text { text: "Вагон"; font-size: 16px; color: #888888; }
-                TouchArea {
-                    double-clicked => { open-selected-vehicle-path(); }
+            Rectangle {
+                horizontal-stretch: 1;
+                border-width: 1px;
+                border-color: #444444;
+                border-radius: 4px;
+                background: #181818;
+                clip: true;
+                VerticalBox {
+                    padding: 6px;
+                    spacing: 6px;
+                    Text { text: "Свойства единицы"; font-size: 14px; font-weight: 600; color: #cccccc; }
                     Text {
-                        text: selected-vehicle-path;
+                        text: selected-vehicle-info;
                         font-size: 12px;
-                        wrap: TextWrap.no-wrap;
-                        color: #4da3ff;
+                        wrap: TextWrap.word-wrap;
+                        vertical-alignment: top;
                     }
-                }
-                Image {
-                    source: selected-vehicle-image;
-                    width: 384px;
-                    height: 192px;
+                    TouchArea {
+                        double-clicked => { open-selected-vehicle-path(); }
+                        Text {
+                            text: selected-vehicle-path;
+                            font-size: 11px;
+                            color: #4da3ff;
+                            wrap: TextWrap.no-wrap;
+                            overflow: TextOverflow.elide;
+                        }
+                    }
+                    Image {
+                        source: selected-vehicle-image;
+                        width: 100%;
+                        height: 180px;
+                        image-fit: contain;
+                    }
                 }
             }
         }
-        Button {
-            max-height: 30px;
-            min-height: 30px;
-            text: "Открыть в LocoSwap";
-            clicked => { open-locoswap(); }
+        HorizontalBox {
+            min-height: 36px;
+            preferred-height: 40px;
+            padding: 4px;
+            Button {
+                text: "Открыть папку";
+                clicked => { open-scenario-folder(); }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            Button {
+                min-width: 200px;
+                text: "Открыть в LocoSwap";
+                clicked => { open-locoswap(); }
+            }
+            Button {
+                text: "Закрыть";
+                clicked => { close-scenario(); }
+            }
         }
     }
 }

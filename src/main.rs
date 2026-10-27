@@ -1172,6 +1172,11 @@ fn main() {
                 sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
                 sw.set_vehicle_missing(slint::ModelRc::new(slint::VecModel::from(missing)));
                 sw.set_vehicle_paths(slint::ModelRc::new(slint::VecModel::from(paths)));
+                if let Some(v) = scenario.consists.as_ref().and_then(|c| c.first()).and_then(|cc| cc.vehicles.first()) {
+                    sw.set_selected_vehicle_info(format!("Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: —", v.provider, v.product, v.blueprint).into());
+                } else {
+                    sw.set_selected_vehicle_info("Выберите единицу техники".into());
+                }
                 sw.set_selected_consist(0);
                 let _ = sw.show();
             }
@@ -1222,6 +1227,22 @@ fn main() {
         }
     });
     let app_clone_locoswap_consist = app.clone();
+    let app_clone_open_scenario_folder = app.clone();
+    scenario_win.on_open_scenario_folder(move || {
+        if let Ok(app) = app_clone_open_scenario_folder.lock() {
+            if let Some(idx) = app.selected_scenario {
+                if let Some(scenario) = app.scenarios.get(idx) {
+                    let _ = open_in_file_explorer(&scenario.path);
+                }
+            }
+        }
+    });
+    let scenario_handle_close = scenario_win.as_weak();
+    scenario_win.on_close_scenario(move || {
+        if let Some(sw) = scenario_handle_close.upgrade() {
+            let _ = sw.hide();
+        }
+    });
     scenario_win.on_open_locoswap(move || {
         if let Ok(app) = app_clone16.lock() {
             let path = app.locoswap_path.clone();
@@ -1306,6 +1327,11 @@ fn main() {
                     sw.set_selected_vehicle_path(path_text.into());
                 }
                 sw.set_selected_vehicle_image(image);
+                let details = format!(
+                    "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: —",
+                    vehicle.provider, vehicle.product, vehicle.blueprint
+                );
+                sw.set_selected_vehicle_info(details.into());
             }
         }
     });
