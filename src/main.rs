@@ -1012,132 +1012,116 @@ fn main() {
     let scenario_handle2 = scenario_win.as_weak();
     let ui_handle3 = ui.as_weak();
     ui.on_scenario_selected(move |idx| {
-        // load scenario data and show window
-        if let Ok(mut app) = app_clone18.lock() {
-            // ensure scenarios loaded for selected route
-            app.refresh_scenarios();
-            let hide = app.hide_quick_drive_free_roam;
-            let filtered_indices: Vec<usize> = app
-                .scenarios
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
-                .map(|(i, _)| i)
-                .collect();
-            let ui_idx = idx as usize;
-            let Some(&scen_idx) = filtered_indices.get(ui_idx) else {
-                return;
-            };
-            if scen_idx >= app.scenarios.len() {
-                return;
-            }
-            crate::scenario::load_scenario_metadata(&mut app.scenarios[scen_idx]);
-            // update scenario list label after lazy metadata load
-            let scen_items: Vec<ScenarioItem> = app
-                .scenarios
-                .iter()
-                .filter(|s| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
-                .map(|s| ScenarioItem {
-                    name: s.name.clone().into(),
-                    scenario_type: s.scenario_type.clone().into(),
-                })
-                .collect();
-            if let Some(ui) = ui_handle3.upgrade() {
-                ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen_items)));
-                ui.set_selected_scenario(idx);
-            }
-            // lazy load consists
-            let needs_load = app.scenarios[scen_idx].consists.is_none();
-            if needs_load {
-                let scenario_path = app.scenarios[scen_idx].path.clone();
-                let serz_path =
-                    crate::assets::preferred_serz_path(std::path::Path::new(app.rw_path.trim()));
-                let consists = crate::scenario::load_consists(&scenario_path, &serz_path);
-                app.scenarios[scen_idx].consists = Some(consists);
-            }
-            let scenario = app.scenarios[scen_idx].clone();
-            let rw_path = app.rw_path.clone();
-            let route_path = app
-                .selected_route
-                .and_then(|i| app.routes.get(i))
-                .map(|r| r.path.clone())
-                .unwrap_or_default();
-            // build consist names
-            let consist_names: Vec<slint::SharedString> = scenario
-                .consists
-                .as_ref()
-                .map(|c| {
-                    c.iter()
-                        .map(|x| {
-                            if x.is_player {
-                                format!("[Игрок] {}", x.name).into()
-                            } else {
-                                x.name.clone().into()
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            // check vehicle files for all consists (cache once)
-            if app.scenario_consist_info.is_none()
-                || app
-                    .scenario_consist_info
-                    .as_ref()
-                    .map(|v| v.len())
-                    .unwrap_or(0)
-                    != consist_names.len()
-            {
-                let mut info = Vec::new();
-                let mut vf: Vec<Vec<bool>> = Vec::new();
-                if let Some(consists) = scenario.consists.as_ref() {
-                    for c in consists {
-                        let mut all_ok = true;
-                        let mut flags = Vec::new();
-                        for v in &c.vehicles {
-                            let exists = crate::blueprint::resolve_blueprint_file_cached_free(
-                                std::path::Path::new(&rw_path),
-                                &route_path,
-                                &v.blueprint,
-                                &v.provider,
-                                &v.product,
-                            )
-                            .is_some();
-                            flags.push(!exists);
-                            if !exists {
-                                all_ok = false;
-                            }
-                        }
-                        info.push((c.name.clone(), all_ok));
-                        vf.push(flags);
-                    }
+        let app = app_clone18.clone();
+        let ui_handle = ui_handle3.clone();
+        let scenario_handle = scenario_handle.clone();
+        std::thread::spawn(move || {
+            let data = (|| -> Option<(Vec<ScenarioItem>, i32, String, String, String, String, String, String, Vec<slint::SharedString>, Vec<bool>, Vec<bool>, Vec<slint::SharedString>, Vec<bool>, Vec<slint::SharedString>, String)> {
+                let mut app = app.lock().ok()?;
+                app.refresh_scenarios();
+                let hide = app.hide_quick_drive_free_roam;
+                let filtered_indices: Vec<usize> = app
+                    .scenarios
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                    .map(|(i, _)| i)
+                    .collect();
+                let ui_idx = idx as usize;
+                let &scen_idx = filtered_indices.get(ui_idx)?;
+                if scen_idx >= app.scenarios.len() {
+                    return None;
                 }
-                app.scenario_consist_info = Some(info);
-                app.scenario_vehicle_files = Some(vf);
-            }
-            let vehicle_files = app.scenario_vehicle_files.clone().unwrap_or_default();
-            app.selected_scenario = Some(scen_idx);
-            app.selected_consist = Some(0);
-            app.scenario_window_open = true;
-            if let Some(sw) = scenario_handle.upgrade() {
-                sw.set_scenario_name(scenario.name.clone().into());
-                sw.set_scenario_title(format!("Сценарий: {}", if scenario.name.trim().is_empty() { "Без названия" } else { scenario.name.as_str() }).into());
-                let fallback = |value: &str| -> String {
-                    if value.trim().is_empty() {
-                        "Не указано".to_owned()
-                    } else {
-                        value.to_owned()
+                crate::scenario::load_scenario_metadata(&mut app.scenarios[scen_idx]);
+
+                let scen_items: Vec<ScenarioItem> = app
+                    .scenarios
+                    .iter()
+                    .filter(|s| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                    .map(|s| ScenarioItem {
+                        name: s.name.clone().into(),
+                        scenario_type: s.scenario_type.clone().into(),
+                    })
+                    .collect();
+
+                let needs_load = app.scenarios[scen_idx].consists.is_none();
+                if needs_load {
+                    let scenario_path = app.scenarios[scen_idx].path.clone();
+                    let serz_path =
+                        crate::assets::preferred_serz_path(std::path::Path::new(app.rw_path.trim()));
+                    let consists = crate::scenario::load_consists(&scenario_path, &serz_path);
+                    app.scenarios[scen_idx].consists = Some(consists);
+                }
+
+                let scenario = app.scenarios[scen_idx].clone();
+                let rw_path = app.rw_path.clone();
+                let route_path = app
+                    .selected_route
+                    .and_then(|i| app.routes.get(i))
+                    .map(|r| r.path.clone())
+                    .unwrap_or_default();
+
+                let consist_names: Vec<slint::SharedString> = scenario
+                    .consists
+                    .as_ref()
+                    .map(|c| {
+                        c.iter()
+                            .map(|x| {
+                                if x.is_player {
+                                    format!("[Игрок] {}", x.name).into()
+                                } else {
+                                    x.name.clone().into()
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if app.scenario_consist_info.is_none()
+                    || app
+                        .scenario_consist_info
+                        .as_ref()
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                        != consist_names.len()
+                {
+                    let mut info = Vec::new();
+                    let mut vf = Vec::new();
+                    if let Some(consists) = scenario.consists.as_ref() {
+                        let (i, v): (Vec<(String, bool)>, Vec<Vec<bool>>) = consists
+                            .par_iter()
+                            .map(|c| {
+                                let mut all_ok = true;
+                                let mut flags = Vec::with_capacity(c.vehicles.len());
+                                for veh in &c.vehicles {
+                                    let exists = crate::blueprint::resolve_blueprint_file_cached_free(
+                                        std::path::Path::new(&rw_path),
+                                        std::path::Path::new(&route_path),
+                                        &veh.blueprint,
+                                        &veh.provider,
+                                        &veh.product,
+                                    )
+                                    .is_some();
+                                    flags.push(!exists);
+                                    if !exists {
+                                        all_ok = false;
+                                    }
+                                }
+                                ((c.name.clone(), all_ok), flags)
+                            })
+                            .unzip();
+                        info = i;
+                        vf = v;
                     }
-                };
-                let weather_name = crate::scenario::weather_display_name(
-                    std::path::Path::new(rw_path.trim()),
-                    std::path::Path::new(&route_path),
-                    &crate::assets::preferred_serz_path(std::path::Path::new(rw_path.trim())),
-                    &scenario.weather,
-                );
-                sw.set_scenario_author(fallback(&scenario.author).into());
-                sw.set_scenario_season(fallback(&scenario.season).into());
-                sw.set_scenario_start_time(fallback(&scenario.start_time).into());
-                sw.set_scenario_weather(fallback(&weather_name).into());
+                    app.scenario_consist_info = Some(info);
+                    app.scenario_vehicle_files = Some(vf);
+                }
+
+                let vehicle_files = app.scenario_vehicle_files.clone().unwrap_or_default();
+                app.selected_scenario = Some(scen_idx);
+                app.selected_consist = Some(0);
+                app.scenario_window_open = true;
+
                 let consist_missing: Vec<bool> = app
                     .scenario_consist_info
                     .as_ref()
@@ -1148,10 +1132,7 @@ fn main() {
                     .as_ref()
                     .map(|info| info.iter().map(|(_, ok)| *ok).collect())
                     .unwrap_or_default();
-                sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
-                sw.set_consist_missing(slint::ModelRc::new(slint::VecModel::from(consist_missing)));
-                sw.set_consist_complete(slint::ModelRc::new(slint::VecModel::from(consist_complete)));
-                // vehicles for first consist
+
                 let vehicles: Vec<slint::SharedString> = scenario
                     .consists
                     .as_ref()
@@ -1159,7 +1140,7 @@ fn main() {
                     .map(|cc| {
                         cc.vehicles
                             .iter()
-                            .map(|v| format!("{}", v.name).into())// раньше было map(|v| format!("{} - {}", v.provider, v.name).into())
+                            .map(|v| format!("{}", v.name).into())
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1175,19 +1156,113 @@ fn main() {
                             .collect()
                     })
                     .unwrap_or_default();
-                sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
-                sw.set_vehicle_missing(slint::ModelRc::new(slint::VecModel::from(missing)));
-                sw.set_vehicle_paths(slint::ModelRc::new(slint::VecModel::from(paths)));
-                if let Some(v) = scenario.consists.as_ref().and_then(|c| c.first()).and_then(|cc| cc.vehicles.first()) {
-                    sw.set_selected_vehicle_info(format!("Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: —", v.provider, v.product, v.blueprint).into());
+
+                let selected_vehicle_info = if let Some(v) = scenario
+                    .consists
+                    .as_ref()
+                    .and_then(|c| c.first())
+                    .and_then(|cc| cc.vehicles.first())
+                {
+                    format!(
+                        "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: —",
+                        v.provider, v.product, v.blueprint
+                    )
                 } else {
-                    sw.set_selected_vehicle_info("Выберите единицу техники".into());
-                }
-                sw.set_selected_consist(0);
-                let _ = sw.show();
+                    "Выберите единицу техники".to_owned()
+                };
+
+                let weather_name = crate::scenario::weather_display_name(
+                    std::path::Path::new(rw_path.trim()),
+                    std::path::Path::new(&route_path),
+                    &crate::assets::preferred_serz_path(std::path::Path::new(rw_path.trim())),
+                    &scenario.weather,
+                );
+
+                let scenario_name = scenario.name.clone();
+                let scenario_title = format!(
+                    "Сценарий: {}",
+                    if scenario.name.trim().is_empty() {
+                        "Без названия"
+                    } else {
+                        scenario.name.as_str()
+                    }
+                );
+                let fallback = |value: &str| -> String {
+                    if value.trim().is_empty() {
+                        "Не указано".to_owned()
+                    } else {
+                        value.to_owned()
+                    }
+                };
+                let scenario_author = fallback(&scenario.author);
+                let scenario_season = fallback(&scenario.season);
+                let scenario_start_time = fallback(&scenario.start_time);
+                let scenario_weather = fallback(&weather_name);
+
+                Some((
+                    scen_items,
+                    ui_idx as i32,
+                    scenario_name,
+                    scenario_title,
+                    scenario_author,
+                    scenario_season,
+                    scenario_start_time,
+                    scenario_weather,
+                    consist_names,
+                    consist_missing,
+                    consist_complete,
+                    vehicles,
+                    missing,
+                    paths,
+                    selected_vehicle_info,
+                ))
+            })();
+
+            if let Some((
+                scen_items,
+                ui_selected_scenario,
+                scenario_name,
+                scenario_title,
+                scenario_author,
+                scenario_season,
+                scenario_start_time,
+                scenario_weather,
+                consist_names,
+                consist_missing,
+                consist_complete,
+                vehicles,
+                missing,
+                paths,
+                selected_vehicle_info,
+            )) = data
+            {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_handle.upgrade() {
+                        ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen_items)));
+                        ui.set_selected_scenario(ui_selected_scenario);
+                    }
+                    if let Some(sw) = scenario_handle.upgrade() {
+                        sw.set_scenario_name(scenario_name.into());
+                        sw.set_scenario_title(scenario_title.into());
+                        sw.set_scenario_author(scenario_author.into());
+                        sw.set_scenario_season(scenario_season.into());
+                        sw.set_scenario_start_time(scenario_start_time.into());
+                        sw.set_scenario_weather(scenario_weather.into());
+                        sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
+                        sw.set_consist_missing(slint::ModelRc::new(slint::VecModel::from(consist_missing)));
+                        sw.set_consist_complete(slint::ModelRc::new(slint::VecModel::from(consist_complete)));
+                        sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
+                        sw.set_vehicle_missing(slint::ModelRc::new(slint::VecModel::from(missing)));
+                        sw.set_vehicle_paths(slint::ModelRc::new(slint::VecModel::from(paths)));
+                        sw.set_selected_vehicle_info(selected_vehicle_info.into());
+                        sw.set_selected_consist(0);
+                        let _ = sw.show();
+                    }
+                });
             }
-        }
+        });
     });
+
     scenario_win.on_consist_selected(move |idx| {
         if let Ok(mut app) = app_clone15.lock() {
             let scen_idx = match app.selected_scenario {
@@ -1234,6 +1309,8 @@ fn main() {
     });
     let app_clone_locoswap_consist = app.clone();
     let app_clone_open_scenario_folder = app.clone();
+    let app_clone_close_scenario = app.clone();
+    let ui_handle_close_scenario = ui.as_weak();
     scenario_win.on_open_scenario_folder(move || {
         if let Ok(app) = app_clone_open_scenario_folder.lock() {
             if let Some(idx) = app.selected_scenario {
@@ -1248,12 +1325,46 @@ fn main() {
         if let Some(sw) = scenario_handle_close.upgrade() {
             let _ = sw.hide();
         }
+        let ui_handle = ui_handle_close_scenario.clone();
+        if let Ok(mut app) = app_clone_close_scenario.lock() {
+            app.scenario_window_open = false;
+            let hide = app.hide_quick_drive_free_roam;
+            let scen: Vec<ScenarioItem> = app
+                .scenarios
+                .iter()
+                .filter(|s| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                .map(|s| ScenarioItem {
+                    name: s.name.clone().into(),
+                    scenario_type: s.scenario_type.clone().into(),
+                })
+                .collect();
+            let selected_ui = app.selected_scenario.and_then(|si| {
+                app.scenarios
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                    .position(|(i, _)| i == si)
+            });
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen)));
+                ui.set_selected_scenario(selected_ui.map(|i| i as i32).unwrap_or(-1));
+            }
+        }
     });
     scenario_win.on_open_locoswap(move || {
         if let Ok(app) = app_clone16.lock() {
             let path = app.locoswap_path.clone();
             if !path.is_empty() && std::path::Path::new(&path).is_file() {
-                let _ = std::process::Command::new(&path).spawn();
+                let mut cmd = std::process::Command::new(&path);
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    cmd.current_dir(parent);
+                }
+                if let Some(idx) = app.selected_scenario {
+                    if let Some(scenario) = app.scenarios.get(idx) {
+                        cmd.arg(&scenario.path);
+                    }
+                }
+                let _ = cmd.spawn();
             }
         }
     });
@@ -1277,7 +1388,11 @@ fn main() {
                 .and_then(|consists| consists.get(idx as usize))
                 .map(|consist| consist.index)
                 .unwrap_or(idx as usize);
-            let _ = std::process::Command::new(&locoswap_path)
+            let mut cmd = std::process::Command::new(&locoswap_path);
+            if let Some(parent) = std::path::Path::new(&locoswap_path).parent() {
+                cmd.current_dir(parent);
+            }
+            let _ = cmd
                 .arg(&scenario.path)
                 .arg("--consist")
                 .arg(consist_index.to_string())

@@ -2,12 +2,44 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 thread_local! {
     static BLUEPRINT_CACHE: RefCell<HashMap<(String, String, String, String, String), Option<PathBuf>>> =
         RefCell::new(HashMap::new());
+}
+
+static AP_ARCHIVE_INDEX: LazyLock<Mutex<HashMap<PathBuf, Option<HashSet<String>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn ap_archive_member_stems(path: &Path) -> Option<HashSet<String>> {
+    if let Ok(cache) = AP_ARCHIVE_INDEX.lock() {
+        if let Some(cached) = cache.get(path) {
+            return cached.clone();
+        }
+    }
+    let stems = (|| {
+        let file = fs::File::open(path).ok()?;
+        let zip = zip::ZipArchive::new(file).ok()?;
+        let mut seen = HashSet::new();
+        for name_result in zip.file_names() {
+            let Ok(name) = name_result else {
+                continue;
+            };
+            let member_name = name.to_string();
+            if let Some(stem) = Path::new(&member_name).file_stem() {
+                seen.insert(stem.to_string_lossy().to_ascii_lowercase());
+            }
+        }
+        Some(seen)
+    })();
+    if let Ok(mut cache) = AP_ARCHIVE_INDEX.lock() {
+        cache.insert(path.to_path_buf(), stems.clone());
+    }
+    stems
 }
 
 /// Кэшированная версия resolve_blueprint_file.
@@ -136,7 +168,7 @@ pub(crate) fn resolve_blueprint_file(
         {
             return Some(found.into_path());
         }
-        // Проверяем архивы .ap в этой папке.
+        // Проверяем архивы .ap в этой папке (центральный каталог читается один раз).
         if let Ok(entries) = fs::read_dir(root) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -147,25 +179,9 @@ pub(crate) fn resolve_blueprint_file(
                 {
                     continue;
                 }
-                if let Ok(file) = fs::File::open(&path) {
-                    if let Ok(zip) = zip::ZipArchive::new(file) {
-                        let mut seen = std::collections::HashSet::new();
-                        for name_result in zip.file_names() {
-                            let Ok(name) = name_result else {
-                                continue;
-                            };
-                            let member_name = name.into_owned();
-                            let member_stem = Path::new(&member_name)
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            if !seen.insert(member_stem.to_lowercase()) {
-                                continue;
-                            }
-                            if member_stem.eq_ignore_ascii_case(&file_stem) {
-                                return Some(path.clone());
-                            }
-                        }
+                if let Some(stems) = ap_archive_member_stems(&path) {
+                    if stems.contains(&file_stem.to_ascii_lowercase()) {
+                        return Some(path.clone());
                     }
                 }
             }
