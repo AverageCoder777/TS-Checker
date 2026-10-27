@@ -1143,8 +1143,14 @@ fn main() {
                     .as_ref()
                     .map(|info| info.iter().map(|(_, ok)| !*ok).collect())
                     .unwrap_or_default();
+                let consist_complete: Vec<bool> = app
+                    .scenario_consist_info
+                    .as_ref()
+                    .map(|info| info.iter().map(|(_, ok)| *ok).collect())
+                    .unwrap_or_default();
                 sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
                 sw.set_consist_missing(slint::ModelRc::new(slint::VecModel::from(consist_missing)));
+                sw.set_consist_complete(slint::ModelRc::new(slint::VecModel::from(consist_complete)));
                 // vehicles for first consist
                 let vehicles: Vec<slint::SharedString> = scenario
                     .consists
