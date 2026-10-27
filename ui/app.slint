@@ -395,6 +395,7 @@ export component ScenarioWindow inherits Window {
     in property <string> scenario-start-time: "";
     in property <string> scenario-weather: "";
     in property <[string]> consist-names: [];
+    in property <[bool]> consist-player: [];
     accessible-role: AccessibleRole.none;
     in property <[bool]> consist-missing: [];
     in property <[bool]> consist-complete: [];
@@ -485,8 +486,8 @@ export component ScenarioWindow inherits Window {
             spacing: 6px;
             vertical-stretch: 1;
             Rectangle {
-                min-width: 270px;
-                max-width: 270px;
+                min-width: 295px;
+                max-width: 295px;
                 horizontal-stretch: 0;
                 border-width: 1px;
                 border-color: #444444;
@@ -496,7 +497,7 @@ export component ScenarioWindow inherits Window {
                 VerticalBox {
                     padding: 6px;
                     spacing: 4px;
-                    Text { text: "Составы"; font-size: 14px; font-weight: 600; color: #cccccc; }
+                    Text { text: "Составы (" + consist-names.length + ")"; font-size: 14px; font-weight: 600; color: #cccccc; }
                     ListView {
                         vertical-stretch: 1;
                         for c[i] in consist-names: Rectangle {
@@ -515,6 +516,19 @@ export component ScenarioWindow inherits Window {
                                         font-size: 10px;
                                         vertical-alignment: center;
                                         color: consist-complete[i] ? #10b981 : #ef4444;
+                                    }
+                                    if consist-player[i] : Rectangle {
+                                        width: 42px;
+                                        height: 16px;
+                                        background: #1e3a5f;
+                                        border-radius: 3px;
+                                        Text {
+                                            text: "Игрок";
+                                            color: #93c5fd;
+                                            font-size: 10px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
                                     }
                                     Text {
                                         text: c;
@@ -536,8 +550,8 @@ export component ScenarioWindow inherits Window {
                 }
             }
             Rectangle {
-                min-width: 270px;
-                max-width: 270px;
+                min-width: 295px;
+                max-width: 295px;
                 horizontal-stretch: 0;
                 border-width: 1px;
                 border-color: #444444;
@@ -547,7 +561,7 @@ export component ScenarioWindow inherits Window {
                 VerticalBox {
                     padding: 6px;
                     spacing: 4px;
-                    Text { text: "Подвижные единицы"; font-size: 14px; font-weight: 600; color: #cccccc; }
+                    Text { text: "Подвижные единицы (" + vehicle-names.length + ")"; font-size: 14px; font-weight: 600; color: #cccccc; }
                     ListView {
                         vertical-stretch: 1;
                         for v[i] in vehicle-names: Rectangle {
@@ -595,30 +609,41 @@ export component ScenarioWindow inherits Window {
                         vertical-alignment: top;
                     }
                     TouchArea {
+                        height: 18px;
                         double-clicked => { open-selected-vehicle-path(); }
-                        Text {
-                            text: selected-vehicle-path;
-                            font-size: 11px;
-                            color: #4da3ff;
-                            wrap: TextWrap.no-wrap;
-                            overflow: TextOverflow.elide;
+                        HorizontalLayout {
+                            alignment: LayoutAlignment.start;
+                            padding: 0;
+                            Text {
+                                text: selected-vehicle-path;
+                                font-size: 11px;
+                                color: #4da3ff;
+                                horizontal-alignment: TextHorizontalAlignment.left;
+                                vertical-alignment: TextVerticalAlignment.center;
+                                wrap: TextWrap.no-wrap;
+                                overflow: TextOverflow.elide;
+                            }
                         }
                     }
-                    HorizontalLayout {
+                    if selected-vehicle-image.width > 0 : HorizontalLayout {
                         alignment: LayoutAlignment.start;
+                        padding-top: 4px;
                         Rectangle {
-                            width: 320px;
-                            height: 120px;
-                            border-radius: 6px;
+                            width: 256px;
+                            height: 128px;
+                            border-radius: 4px;
                             clip: true;
                             background: #111111;
                             Image {
                                 source: selected-vehicle-image;
-                                width: 100%;
-                                height: 100%;
+                                width: 256px;
+                                height: 128px;
                                 image-fit: contain;
                             }
                         }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
                     }
                 }
             }
@@ -665,33 +690,98 @@ export component MissingAssetsWindow inherits Window {
     min-height: 400px;
 
     in property <[string]> missing-assets: [];
+    in-out property <int> selected-asset: -1;
     callback replace-missing(int);
     callback copy-to-clipboard(string);
+    callback copy-all-to-clipboard();
+    callback close-missing();
 
     VerticalBox {
-        Text { text: "Недостающие ассеты маршрута:"; }
-        ListView {
-            for asset[i] in missing-assets: HorizontalLayout {
-                spacing: 6px;
-                padding: 2px;
+        padding: 6px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: "Недостающие ассеты маршрута";
+                font-size: 16px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                background: #3b1d24;
+                border-radius: 4px;
+                width: 34px;
+                height: 22px;
                 Text {
-                    text: asset;
+                    text: missing-assets.length;
+                    color: #f87171;
+                    horizontal-alignment: center;
                     vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    min-width: 0px;
                 }
-                Button {
-                    text: "Копировать";
-                    horizontal-stretch: 0;
-                    min-width: 80px;
-                    clicked => { copy-to-clipboard(asset); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Rectangle {
+            background: #181818;
+            border-color: #333333;
+            border-width: 1px;
+            border-radius: 4px;
+            clip: true;
+            vertical-stretch: 1;
+            ListView {
+                for asset[i] in missing-assets: Rectangle {
+                    background: i == selected-asset ? #2c2d30 : (row_touch.has-hover ? #222326 : transparent);
+                    row_touch := TouchArea {
+                        clicked => { selected-asset = i; }
+                        double-clicked => { copy-to-clipboard(asset); }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            padding: 4px;
+                            Text {
+                                text: asset;
+                                font-size: 12px;
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                overflow: TextOverflow.elide;
+                            }
+                            Button {
+                                text: "📋";
+                                horizontal-stretch: 0;
+                                min-width: 34px;
+                                clicked => { copy-to-clipboard(asset); }
+                            }
+                            Button {
+                                text: "Заменить...";
+                                horizontal-stretch: 0;
+                                min-width: 90px;
+                                clicked => { replace-missing(i); }
+                            }
+                        }
+                    }
                 }
-                Button {
-                    text: "Заменить...";
-                    horizontal-stretch: 0;
-                    min-width: 90px;
-                    clicked => { replace-missing(i); }
+            }
+        }
+        HorizontalLayout {
+            min-height: 36px;
+            padding: 4px;
+            spacing: 6px;
+            Button {
+                text: "Скопировать весь список";
+                clicked => { copy-all-to-clipboard(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Заменить выбранный...";
+                enabled: selected-asset >= 0;
+                clicked => {
+                    if (selected-asset >= 0) {
+                        replace-missing(selected-asset);
+                    }
                 }
+            }
+            Button {
+                text: "Закрыть";
+                clicked => { close-missing(); }
             }
         }
     }

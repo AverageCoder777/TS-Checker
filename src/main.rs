@@ -640,6 +640,32 @@ fn main() {
             }
         }
     });
+    missing_win.on_copy_all_to_clipboard({
+        let clipboard = clipboard.clone();
+        let missing_handle2 = missing_handle.clone();
+        move || {
+            if let Some(mw) = missing_handle2.upgrade() {
+                let model = mw.get_missing_assets();
+                let mut paths = Vec::new();
+                for i in 0..model.row_count() {
+                    if let Some(value) = model.row_data(i) {
+                        paths.push(value.to_string());
+                    }
+                }
+                if let Ok(mut ctx) = clipboard.lock() {
+                    let _ = ctx.set_text(paths.join("\n"));
+                }
+            }
+        }
+    });
+    missing_win.on_close_missing({
+        let missing_handle3 = missing_handle.clone();
+        move || {
+            if let Some(mw) = missing_handle3.upgrade() {
+                let _ = mw.hide();
+            }
+        }
+    });
     missing_win.on_replace_missing(move |idx| {
         let (missing, rw_path) = {
             if let Ok(app) = app_clone7.lock() {
@@ -1016,7 +1042,7 @@ fn main() {
         let ui_handle = ui_handle3.clone();
         let scenario_handle = scenario_handle.clone();
         std::thread::spawn(move || {
-            let data = (|| -> Option<(Vec<ScenarioItem>, i32, String, String, String, String, String, String, Vec<slint::SharedString>, Vec<bool>, Vec<bool>, Vec<slint::SharedString>, Vec<bool>, Vec<slint::SharedString>, String)> {
+            let data = (|| -> Option<(Vec<ScenarioItem>, i32, String, String, String, String, String, String, Vec<slint::SharedString>, Vec<bool>, Vec<bool>, Vec<bool>, Vec<slint::SharedString>, Vec<bool>, Vec<slint::SharedString>, String)> {
                 let mut app = app.lock().ok()?;
                 app.refresh_scenarios();
                 let hide = app.hide_quick_drive_free_roam;
@@ -1064,17 +1090,12 @@ fn main() {
                 let consist_names: Vec<slint::SharedString> = scenario
                     .consists
                     .as_ref()
-                    .map(|c| {
-                        c.iter()
-                            .map(|x| {
-                                if x.is_player {
-                                    format!("[Игрок] {}", x.name).into()
-                                } else {
-                                    x.name.clone().into()
-                                }
-                            })
-                            .collect()
-                    })
+                    .map(|c| c.iter().map(|x| x.name.clone().into()).collect())
+                    .unwrap_or_default();
+                let consist_player: Vec<bool> = scenario
+                    .consists
+                    .as_ref()
+                    .map(|c| c.iter().map(|x| x.is_player).collect())
                     .unwrap_or_default();
 
                 if app.scenario_consist_info.is_none()
@@ -1164,8 +1185,9 @@ fn main() {
                     .and_then(|cc| cc.vehicles.first())
                 {
                     format!(
-                        "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: —",
-                        v.provider, v.product, v.blueprint
+                        "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: {}",
+                        v.provider, v.product, v.blueprint,
+                        v.number.clone().unwrap_or_else(|| "—".to_owned())
                     )
                 } else {
                     "Выберите единицу техники".to_owned()
@@ -1209,6 +1231,7 @@ fn main() {
                     scenario_start_time,
                     scenario_weather,
                     consist_names,
+                    consist_player,
                     consist_missing,
                     consist_complete,
                     vehicles,
@@ -1228,6 +1251,7 @@ fn main() {
                 scenario_start_time,
                 scenario_weather,
                 consist_names,
+                consist_player,
                 consist_missing,
                 consist_complete,
                 vehicles,
@@ -1249,6 +1273,7 @@ fn main() {
                         sw.set_scenario_start_time(scenario_start_time.into());
                         sw.set_scenario_weather(scenario_weather.into());
                         sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
+                        sw.set_consist_player(slint::ModelRc::new(slint::VecModel::from(consist_player)));
                         sw.set_consist_missing(slint::ModelRc::new(slint::VecModel::from(consist_missing)));
                         sw.set_consist_complete(slint::ModelRc::new(slint::VecModel::from(consist_complete)));
                         sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
@@ -1449,8 +1474,9 @@ fn main() {
                 }
                 sw.set_selected_vehicle_image(image);
                 let details = format!(
-                    "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: —",
-                    vehicle.provider, vehicle.product, vehicle.blueprint
+                    "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: {}",
+                    vehicle.provider, vehicle.product, vehicle.blueprint,
+                    vehicle.number.clone().unwrap_or_else(|| "—".to_owned())
                 );
                 sw.set_selected_vehicle_info(details.into());
             }

@@ -208,6 +208,8 @@ pub(crate) struct ScenarioVehicle {
     pub(crate) blueprint: String,
     /// Отображаемое название модели.
     pub(crate) name: String,
+    /// Номер единицы техники, если он указан в сценарии.
+    pub(crate) number: Option<String>,
 }
 
 /// Читает сценарии маршрута: папки в Scenarios и их файлы.
@@ -409,6 +411,11 @@ pub(crate) fn scenario_vehicle(entity: &str) -> Option<ScenarioVehicle> {
     let product = element_text(block, "Product");
     let blueprint = element_text(block, "BlueprintID");
     let name = element_text(entity, "Name");
+    let number = ["Number", "UniqueNumber", "CarriageNumber"]
+        .iter()
+        .map(|tag| element_text(entity, tag))
+        .find(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned());
     if blueprint.is_empty() && name.is_empty() {
         return None;
     }
@@ -417,6 +424,7 @@ pub(crate) fn scenario_vehicle(entity: &str) -> Option<ScenarioVehicle> {
         product,
         blueprint,
         name,
+        number,
     })
 }
 
