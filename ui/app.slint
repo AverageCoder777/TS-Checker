@@ -690,11 +690,15 @@ export component MissingAssetsWindow inherits Window {
     min-height: 400px;
 
     in property <[string]> missing-assets: [];
+    in property <[int]> missing-counts: [];
+    in-out property <[string]> active-tile-list: [];
+    in property <string> active-tile-asset: "";
     in-out property <int> selected-asset: -1;
     callback replace-missing(int);
     callback copy-to-clipboard(string);
     callback copy-all-to-clipboard();
     callback close-missing();
+    callback inspect-tiles(int);
 
     VerticalBox {
         padding: 6px;
@@ -710,13 +714,19 @@ export component MissingAssetsWindow inherits Window {
             Rectangle {
                 background: #3b1d24;
                 border-radius: 4px;
-                width: 34px;
+                min-width: 26px;
                 height: 22px;
-                Text {
-                    text: missing-assets.length;
-                    color: #f87171;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                HorizontalLayout {
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    Text {
+                        text: missing-assets.length;
+                        color: #f87171;
+                        font-size: 11px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
             Rectangle { horizontal-stretch: 1; }
@@ -731,31 +741,105 @@ export component MissingAssetsWindow inherits Window {
             ListView {
                 for asset[i] in missing-assets: Rectangle {
                     background: i == selected-asset ? #2c2d30 : (row_touch.has-hover ? #222326 : transparent);
+                    border-radius: 3px;
+
                     row_touch := TouchArea {
                         clicked => { selected-asset = i; }
-                        double-clicked => { copy-to-clipboard(asset); }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            padding: 4px;
-                            Text {
-                                text: asset;
-                                font-size: 12px;
-                                horizontal-stretch: 1;
-                                min-width: 0px;
-                                overflow: TextOverflow.elide;
+                        double-clicked => { replace-missing(i); }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        padding-left: 8px;
+                        padding-right: 6px;
+                        padding-top: 4px;
+                        padding-bottom: 4px;
+
+                        Text {
+                            text: asset;
+                            font-size: 12px;
+                            color: #e2e8f0;
+                            vertical-alignment: TextVerticalAlignment.center;
+                            horizontal-alignment: TextHorizontalAlignment.left;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            overflow: TextOverflow.elide;
+                        }
+
+                        Rectangle {
+                            background: #25282e;
+                            border-radius: 3px;
+                            height: 22px;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                Text {
+                                    text: "×" + missing-counts[i];
+                                    font-size: 11px;
+                                    color: #94a3b8;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
                             }
-                            Button {
-                                text: "📋";
-                                horizontal-stretch: 0;
-                                min-width: 34px;
-                                clicked => { copy-to-clipboard(asset); }
-                            }
-                            Button {
-                                text: "Заменить...";
-                                horizontal-stretch: 0;
-                                min-width: 90px;
-                                clicked => { replace-missing(i); }
-                            }
+                        }
+
+                        Button {
+                            text: "📋";
+                            horizontal-stretch: 0;
+                            min-width: 32px;
+                            preferred-height: 24px;
+                            clicked => { copy-to-clipboard(asset); }
+                        }
+
+                        Button {
+                            text: "Тайлы";
+                            min-width: 60px;
+                            preferred-height: 24px;
+                            clicked => { inspect-tiles(i); }
+                        }
+                    }
+                }
+            }
+        }
+        if active-tile-list.length > 0 : Rectangle {
+            background: #141414;
+            border-color: #333333;
+            border-width: 1px;
+            border-radius: 4px;
+            preferred-height: 140px;
+            max-height: 160px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+                HorizontalLayout {
+                    Text {
+                        text: "Использование на тайлах для: " + active-tile-asset;
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #cbd5e1;
+                        horizontal-stretch: 1;
+                        overflow: TextOverflow.elide;
+                    }
+                    Button {
+                        text: "X";
+                        preferred-height: 20px;
+                        clicked => { active-tile-list = []; }
+                    }
+                }
+                ListView {
+                    for tile in active-tile-list: HorizontalLayout {
+                        padding: 2px;
+                        Text {
+                            text: tile;
+                            font-size: 11px;
+                            color: #94a3b8;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "📋";
+                            min-width: 28px;
+                            preferred-height: 20px;
+                            clicked => { copy-to-clipboard(tile); }
                         }
                     }
                 }
@@ -770,18 +854,121 @@ export component MissingAssetsWindow inherits Window {
                 clicked => { copy-all-to-clipboard(); }
             }
             Rectangle { horizontal-stretch: 1; }
-            Button {
-                text: "Заменить выбранный...";
-                enabled: selected-asset >= 0;
-                clicked => {
-                    if (selected-asset >= 0) {
-                        replace-missing(selected-asset);
+            Rectangle {
+                min-width: 190px;
+                preferred-width: 190px;
+                preferred-height: 32px;
+                border-radius: 4px;
+                background: selected-asset < 0 ? #262626 : (replace_touch.pressed ? #047857 : (replace_touch.has-hover ? #10b981 : #059669));
+
+                replace_touch := TouchArea {
+                    enabled: selected-asset >= 0;
+                    clicked => {
+                        if (selected-asset >= 0) {
+                            replace-missing(selected-asset);
+                        }
                     }
+                }
+
+                Text {
+                    text: "Заменить выбранный...";
+                    color: selected-asset < 0 ? #666666 : #ffffff;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
             Button {
                 text: "Закрыть";
                 clicked => { close-missing(); }
+            }
+        }
+    }
+}
+
+export component ApAssetPickerWindow inherits Window {
+    title: "Выбор ассета из архива";
+    min-width: 620px;
+    min-height: 420px;
+
+    in property <string> archive-name: "";
+    in-out property <string> search-query: "";
+    in property <[string]> entries: [];
+    in property <[string]> filtered-entries: [];
+    in-out property <int> selected-index: -1;
+
+    callback search-changed(string);
+    callback select-entry(int);
+    callback confirm-selection();
+    callback cancel();
+
+    VerticalBox {
+        padding: 6px;
+        spacing: 6px;
+        Text {
+            text: "Выбор ассета из архива: " + archive-name;
+            font-size: 16px;
+            font-weight: 700;
+        }
+        LineEdit {
+            placeholder-text: "Поиск...";
+            text <=> search-query;
+            edited => { search-changed(search-query); }
+        }
+        Rectangle {
+            background: #181818;
+            border-color: #333333;
+            border-width: 1px;
+            border-radius: 4px;
+            clip: true;
+            vertical-stretch: 1;
+            ListView {
+                for entry[i] in filtered-entries: Rectangle {
+                    background: i == selected-index ? #2c2d30 : (row_touch.has-hover ? #222326 : transparent);
+                    row_touch := TouchArea {
+                        clicked => { select-entry(i); }
+                        double-clicked => { select-entry(i); confirm-selection(); }
+                        HorizontalLayout {
+                            padding: 4px;
+                            spacing: 6px;
+                            Text {
+                                text: entry;
+                                font-size: 12px;
+                                horizontal-stretch: 1;
+                                overflow: TextOverflow.elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            min-height: 36px;
+            padding: 4px;
+            spacing: 6px;
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Отмена";
+                clicked => { cancel(); }
+            }
+            Rectangle {
+                min-width: 100px;
+                preferred-width: 120px;
+                preferred-height: 32px;
+                border-radius: 4px;
+                background: pick_touch.pressed ? #047857 : (pick_touch.has-hover ? #10b981 : #059669);
+                pick_touch := TouchArea {
+                    clicked => { confirm-selection(); }
+                }
+                Text {
+                    text: "Выбрать";
+                    color: #ffffff;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
     }

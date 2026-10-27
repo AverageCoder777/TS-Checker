@@ -15,6 +15,40 @@ thread_local! {
 static AP_ARCHIVE_INDEX: LazyLock<Mutex<HashMap<PathBuf, Option<HashSet<String>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static AP_ARCHIVE_ENTRIES: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn ap_archive_entries(path: &Path) -> Vec<String> {
+    if let Ok(cache) = AP_ARCHIVE_ENTRIES.lock() {
+        if let Some(cached) = cache.get(path) {
+            return cached.clone();
+        }
+    }
+    let mut entries = Vec::new();
+    if let Ok(file) = fs::File::open(path) {
+        if let Ok(mut zip) = zip::ZipArchive::new(file) {
+            for name_result in zip.file_names() {
+                let Ok(name) = name_result else { continue; };
+                let name = name.to_string();
+                let ext = Path::new(&name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ext == "bin" || ext == "xml" {
+                    entries.push(name);
+                }
+            }
+        }
+    }
+    entries.sort();
+    entries.dedup();
+    if let Ok(mut cache) = AP_ARCHIVE_ENTRIES.lock() {
+        cache.insert(path.to_path_buf(), entries.clone());
+    }
+    entries
+}
+
 pub(crate) fn ap_archive_member_stems(path: &Path) -> Option<HashSet<String>> {
     if let Ok(cache) = AP_ARCHIVE_INDEX.lock() {
         if let Some(cached) = cache.get(path) {

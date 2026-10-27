@@ -630,6 +630,16 @@ fn main() {
     let app_clone7 = app.clone();
     let missing_win = MissingAssetsWindow::new().unwrap();
     let missing_handle = missing_win.as_weak();
+    #[derive(Clone)]
+    struct ApPickerState {
+        archive_path: PathBuf,
+        missing: MissingAsset,
+        rw_path: String,
+        entries: Vec<String>,
+    }
+    let ap_picker_win = ApAssetPickerWindow::new().unwrap();
+    let ap_picker_handle = ap_picker_win.as_weak();
+    let ap_picker_state = std::sync::Arc::new(std::sync::Mutex::new(None::<ApPickerState>));
     missing_win.on_copy_to_clipboard({
         let clipboard = clipboard.clone();
         move |text| {
@@ -666,6 +676,129 @@ fn main() {
             }
         }
     });
+    missing_win.on_inspect_tiles({
+        let app = app_clone7.clone();
+        let handle = missing_handle.clone();
+        move |idx| {
+            let (asset, tiles) = if let Ok(app) = app.lock() {
+                if let Some(result) = app.result.as_ref() {
+                    if let Some(missing) = result.missing_assets.get(idx as usize) {
+                        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                        for usage in &missing.uses {
+                            *counts.entry(usage.tile.clone()).or_insert(0) += 1;
+                        }
+                        let tiles: Vec<slint::SharedString> = counts
+                            .into_iter()
+                            .map(|(tile, count)| format!("{} ({})", tile, count).into())
+                            .collect();
+                        (missing.path.clone(), tiles)
+                    } else {
+                        (String::new(), Vec::new())
+                    }
+                } else {
+                    (String::new(), Vec::new())
+                }
+            } else {
+                (String::new(), Vec::new())
+            };
+            if let Some(mw) = handle.upgrade() {
+                mw.set_active_tile_asset(asset.into());
+                mw.set_active_tile_list(slint::ModelRc::new(slint::VecModel::from(tiles)));
+            }
+        }
+    });
+    ap_picker_win.on_search_changed({
+        let state = ap_picker_state.clone();
+        let handle = ap_picker_handle.clone();
+        move |query| {
+            let entries = state.lock().ok().and_then(|s| s.as_ref().map(|s| s.entries.clone())).unwrap_or_default();
+            let q = query.to_lowercase();
+            let filtered: Vec<slint::SharedString> = entries
+                .iter()
+                .filter(|e| q.is_empty() || e.to_lowercase().contains(&q))
+                .map(|e| e.clone().into())
+                .collect();
+            if let Some(pw) = handle.upgrade() {
+                pw.set_filtered_entries(slint::ModelRc::new(slint::VecModel::from(filtered)));
+            }
+        }
+    });
+    ap_picker_win.on_select_entry({
+        let handle = ap_picker_handle.clone();
+        move |idx| {
+            if let Some(pw) = handle.upgrade() {
+                pw.set_selected_index(idx);
+            }
+        }
+    });
+    ap_picker_win.on_confirm_selection({
+        let state = ap_picker_state.clone();
+        let handle = ap_picker_handle.clone();
+        let app = app_clone7.clone();
+        move || {
+            let (archive_path, missing, rw_path, _selected_index, entry) = {
+                let guard = match state.lock() { Ok(g) => g, Err(_) => return };
+                let Some(s) = guard.as_ref() else { return };
+                let pw = match handle.upgrade() { Some(p) => p, None => return };
+                let idx = pw.get_selected_index() as usize;
+                let filtered = pw.get_filtered_entries();
+                let selected_entry = filtered.row_data(idx).map(|v| v.to_string()).or_else(|| s.entries.get(idx).cloned());
+                let Some(entry) = selected_entry else { return };
+                (s.archive_path.clone(), s.missing.clone(), s.rw_path.clone(), idx, entry)
+            };
+            // derive provider/product from archive parent dirs
+            let assets_path = PathBuf::from(rw_path.trim()).join("Assets");
+            let archive_rel = archive_path.strip_prefix(&assets_path).ok();
+            let mut parts: Vec<String> = archive_rel.map(|p| p.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect()).unwrap_or_default();
+            // remove archive file name
+            if !parts.is_empty() { parts.pop(); }
+            let provider = parts.first().cloned().unwrap_or_default();
+            let product = parts.get(1).cloned().unwrap_or_default();
+            // build a synthetic replacement relative path Provider/Product/...xml? Engine expects .bin file; extract entry to temp file.
+            // For minimal integration, call start_asset_replacement with archive path? Instead, create temp file under assets.
+            let temp_rel_dir = if provider.is_empty() || product.is_empty() {
+                PathBuf::from("TempAp")
+            } else {
+                PathBuf::from(&provider).join(&product)
+            };
+            let temp_dir = assets_path.join(&temp_rel_dir);
+            let _ = std::fs::create_dir_all(&temp_dir);
+            let entry_file_name = std::path::Path::new(&entry).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "asset.bin".to_owned());
+            let temp_file = temp_dir.join(&entry_file_name);
+            // extract from archive
+            if let Ok(file) = std::fs::File::open(&archive_path) {
+                if let Ok(mut zip) = zip::ZipArchive::new(file) {
+                    if let Ok(mut member) = zip.by_name(&entry) {
+                        if let Ok(mut out) = std::fs::File::create(&temp_file) {
+                            let _ = std::io::copy(&mut member, &mut out);
+                        }
+                    }
+                }
+            }
+            let replacement_relative = temp_file.strip_prefix(&assets_path).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| entry.clone());
+            if let Ok(mut app) = app.lock() {
+                app.start_asset_replacement(
+                    missing,
+                    temp_file,
+                    false,
+                    replacement_relative,
+                    std::collections::BTreeMap::new(),
+                );
+            }
+            if let Some(pw) = handle.upgrade() {
+                let _ = pw.hide();
+            }
+        }
+    });
+    ap_picker_win.on_cancel({
+        let handle = ap_picker_handle.clone();
+        move || {
+            if let Some(pw) = handle.upgrade() {
+                let _ = pw.hide();
+            }
+        }
+    });
+
     missing_win.on_replace_missing(move |idx| {
         let (missing, rw_path) = {
             if let Ok(app) = app_clone7.lock() {
@@ -688,28 +821,61 @@ fn main() {
                 existing_directory_upwards(&asset_directory(&assets_path, &missing.path))
                     .unwrap_or_else(|| assets_path.clone());
             let selected = rfd::FileDialog::new()
-                .set_title("Выберите BIN нового объекта")
-                .add_filter("RailWorks BIN", &["bin"])
+                .set_title("Выберите BIN/AP нового объекта")
+                .add_filter("RailWorks Assets (*.bin, *.ap)", &["bin", "ap"])
+                .add_filter("RailWorks Blueprint (*.bin)", &["bin"])
+                .add_filter("AP Archive (*.ap)", &["ap"])
                 .set_directory(&start_dir)
                 .pick_file();
             if let Some(replacement) = selected {
-                if let Ok(mut app) = app_clone7.lock() {
-                    let replacement_relative = replacement
-                        .strip_prefix(&assets_path)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| {
-                            replacement
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default()
+                let ext = replacement
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ext == "ap" {
+                    let entries = crate::blueprint::ap_archive_entries(&replacement);
+                    let archive_name = replacement
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if let Ok(mut state) = ap_picker_state.lock() {
+                        *state = Some(ApPickerState {
+                            archive_path: replacement.clone(),
+                            missing: missing.clone(),
+                            rw_path: rw_path.clone(),
+                            entries: entries.clone(),
                         });
-                    app.start_asset_replacement(
-                        missing,
-                        replacement,
-                        false,
-                        replacement_relative,
-                        std::collections::BTreeMap::new(),
-                    );
+                    }
+                    if let Some(pw) = ap_picker_handle.upgrade() {
+                        pw.set_archive_name(archive_name.into());
+                        let all: Vec<slint::SharedString> =
+                            entries.iter().map(|e| e.clone().into()).collect();
+                        pw.set_entries(slint::ModelRc::new(slint::VecModel::from(all.clone())));
+                        pw.set_filtered_entries(slint::ModelRc::new(slint::VecModel::from(all)));
+                        pw.set_search_query("".into());
+                        pw.set_selected_index(-1);
+                        let _ = pw.show();
+                    }
+                } else {
+                    if let Ok(mut app) = app_clone7.lock() {
+                        let replacement_relative = replacement
+                            .strip_prefix(&assets_path)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| {
+                                replacement
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default()
+                            });
+                        app.start_asset_replacement(
+                            missing,
+                            replacement,
+                            false,
+                            replacement_relative,
+                            std::collections::BTreeMap::new(),
+                        );
+                    }
                 }
             }
         }
@@ -749,15 +915,14 @@ fn main() {
                     && app.missing_assets_popup.is_some()
                     && !app.missing_assets_shown
                 {
-                    let paths: Vec<slint::SharedString> = app
-                        .missing_assets_popup
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .map(|p| p.as_str().into())
-                        .collect();
+                    let missing_assets = app.result.as_ref().map(|r| r.missing_assets.clone()).unwrap_or_default();
+                    let paths: Vec<slint::SharedString> = missing_assets.iter().map(|m| m.path.clone().into()).collect();
+                    let counts: Vec<i32> = missing_assets.iter().map(|m| m.uses.len() as i32).collect();
                     if let Some(mw) = missing_handle.upgrade() {
                         mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(paths)));
+                        mw.set_missing_counts(slint::ModelRc::new(slint::VecModel::from(counts)));
+                        mw.set_active_tile_list(slint::ModelRc::new(slint::VecModel::<slint::SharedString>::default()));
+                        mw.set_active_tile_asset("".into());
                         let _ = mw.show();
                         app.missing_assets_shown = true;
                     }
