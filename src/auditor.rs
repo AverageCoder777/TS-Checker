@@ -46,15 +46,15 @@ impl ApArchiveCache {
     }
 
     pub fn contains(&self, product_dir: &Path, relative: &str) -> bool {
-        self.contains_path(product_dir, relative)
+        self.lookup(product_dir, relative)
     }
 
     pub fn contains_path(&self, product_dir: &Path, relative: &str) -> bool {
-        self.exists(product_dir, relative)
+        self.lookup(product_dir, relative)
     }
 
     pub fn exists(&self, product_dir: &Path, relative: &str) -> bool {
-        self.has(product_dir, relative)
+        self.lookup(product_dir, relative)
     }
 
     pub fn has(&self, product_dir: &Path, relative: &str) -> bool {
@@ -67,13 +67,18 @@ impl ApArchiveCache {
             Err(_) => return false,
         };
         let normalized = relative.replace('\\', "/").to_lowercase();
+        let normalized = normalized.trim_start_matches('/').to_string();
+
         if let Some(set) = guard.get(product_dir) {
             if set.contains(&normalized) {
                 return true;
             }
         }
         for (key, set) in guard.iter() {
-            if key.to_string_lossy().eq_ignore_ascii_case(&product_dir.to_string_lossy()) {
+            if key
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&product_dir.to_string_lossy())
+            {
                 if set.contains(&normalized) {
                     return true;
                 }
@@ -88,7 +93,10 @@ impl ApArchiveCache {
             return Some(set.clone());
         }
         for (key, set) in guard.iter() {
-            if key.to_string_lossy().eq_ignore_ascii_case(&product_dir.to_string_lossy()) {
+            if key
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&product_dir.to_string_lossy())
+            {
                 return Some(set.clone());
             }
         }
@@ -140,7 +148,10 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
             }
         }
     }
-    for tag in ["AnimationID", "AnimationName", "AnimName"] {
+
+    // ВАЖНО: AnimationID — это лишь внутренний идентификатор (тег / алиас).
+    // Реальный путь к файлу анимации ВСЕГДА лежит ТОЛЬКО в AnimationName или AnimName!
+    for tag in ["AnimationName", "AnimName"] {
         for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
             let raw = value.as_str().trim().to_string();
             if !raw.is_empty() {
@@ -148,17 +159,23 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
             }
         }
     }
-    for value in regex_tag("ScriptComponent").captures_iter(xml).filter_map(|c| c.get(1)) {
+
+    for value in regex_tag("ScriptComponent")
+        .captures_iter(xml)
+        .filter_map(|c| c.get(1))
+    {
         let raw = strip_tags(value.as_str()).trim().to_string();
         if !raw.is_empty() {
             out.push((maybe_sound(&raw, AssetResourceKind::Script), raw));
         }
     }
-    for tag in ["SoundComponent", "cSoundComponentBlueprint"] {
+    for tag in ["SoundName", "ProxyName", "SoundFile", "SampleName"] {
         for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
             let raw = strip_tags(value.as_str()).trim().to_string();
-            if !raw.is_empty() {
-                out.push((AssetResourceKind::Sound, raw));
+            // Очищаем от случайных переводов строк и пробелов внутри строки
+            let clean = raw.lines().next().unwrap_or("").trim().to_string();
+            if !clean.is_empty() {
+                out.push((AssetResourceKind::Sound, clean));
             }
         }
     }
@@ -254,6 +271,24 @@ pub fn normalize_texture_reference(raw: &str) -> String {
     }
 }
 
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = Vec::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if let Some(std::path::Component::Normal(_)) = out.last() {
+                    out.pop();
+                } else {
+                    out.push(comp);
+                }
+            }
+            _ => out.push(comp),
+        }
+    }
+    out.iter().collect()
+}
+
 fn product_root_for(file: &Path, assets_root: &Path) -> PathBuf {
     if let Ok(rel) = file.strip_prefix(assets_root) {
         let comps: Vec<_> = rel.components().collect();
@@ -271,6 +306,10 @@ fn ensure_extension(raw: &str, kind: AssetResourceKind) -> String {
         || lower.ends_with(".bin")
         || lower.ends_with(".xsec")
         || lower.ends_with(".lua")
+        || lower.ends_with(".out")
+        || lower.ends_with(".outz")
+        || lower.ends_with(".ia")
+        || lower.ends_with(".ban")
         || lower.ends_with(".xml")
         || lower.ends_with(".dav")
         || lower.ends_with(".proxybin")
@@ -281,6 +320,7 @@ fn ensure_extension(raw: &str, kind: AssetResourceKind) -> String {
         match kind {
             AssetResourceKind::Texture => format!("{}.TgPcDx", raw),
             AssetResourceKind::Geometry => format!("{}.GeoPcDx", raw),
+            AssetResourceKind::Animation => format!("{}.ia", raw),
             AssetResourceKind::ChildBlueprint => {
                 if raw.to_lowercase().ends_with(".xml") {
                     raw.to_string()
@@ -298,33 +338,28 @@ fn candidate_relatives(raw: &str, kind: AssetResourceKind) -> Vec<String> {
     match kind {
         AssetResourceKind::Script => {
             let lower = cleaned.to_lowercase();
-            let stripped = if lower.ends_with(".lua") || lower.ends_with(".out") || lower.ends_with(".outz") {
-                // remove last extension
-                match cleaned.rfind('.') {
-                    Some(i) => cleaned[..i].to_string(),
-                    None => cleaned.clone(),
-                }
-            } else {
-                cleaned.clone()
-            };
-            let mut v = Vec::new();
-            v.push(format!("{}.out", stripped));
-            v.push(format!("{}.lua", stripped));
-            v.push(format!("{}.outz", stripped));
-            if lower.ends_with(".lua") {
-                v.push(stripped.clone());
-                v.push(format!("{}.out", stripped));
-            }
-            if lower.ends_with(".out") {
-                v.push(cleaned.clone());
-                v.push(format!("{}.lua", stripped));
-            }
-            v
+            let stripped =
+                if lower.ends_with(".lua") || lower.ends_with(".out") || lower.ends_with(".outz") {
+                    match cleaned.rfind('.') {
+                        Some(i) => cleaned[..i].to_string(),
+                        None => cleaned.clone(),
+                    }
+                } else {
+                    cleaned.clone()
+                };
+            vec![
+                format!("{}.out", stripped),
+                format!("{}.lua", stripped),
+                format!("{}.outz", stripped),
+                cleaned.clone(),
+            ]
         }
         AssetResourceKind::Texture => {
             let with_ext = ensure_extension(&cleaned, kind);
             let mut v = vec![with_ext.clone()];
-            v.push(format!("textures\\{}", with_ext));
+            if !with_ext.to_lowercase().starts_with("textures\\") {
+                v.push(format!("textures\\{}", with_ext));
+            }
             v
         }
         AssetResourceKind::Animation => {
@@ -337,40 +372,99 @@ fn candidate_relatives(raw: &str, kind: AssetResourceKind) -> Vec<String> {
             } else {
                 cleaned.clone()
             };
-            let mut v = Vec::new();
-            v.push(format!("{}.ia", stripped));
-            v.push(format!("{}.ban", stripped));
-            if lower.ends_with(".ia") || lower.ends_with(".ban") {
-                v.push(cleaned.clone());
-            }
-            v
+            vec![
+                format!("{}.ia", stripped),
+                format!("{}.ban", stripped),
+                cleaned.clone(),
+            ]
         }
-        AssetResourceKind::ChildBlueprint | AssetResourceKind::Sound => {
+        AssetResourceKind::ChildBlueprint => {
             let lower = cleaned.to_lowercase();
-            if lower.ends_with(".bin") || lower.ends_with(".xml") || lower.ends_with(".geopcdx") || lower.ends_with(".tgpcdx") {
+            if lower.ends_with(".bin")
+                || lower.ends_with(".xml")
+                || lower.ends_with(".geopcdx")
+                || lower.ends_with(".tgpcdx")
+            {
                 vec![cleaned]
             } else {
                 vec![format!("{}.bin", cleaned), format!("{}.xml", cleaned)]
+            }
+        }
+        AssetResourceKind::Sound => {
+            let lower = cleaned.to_lowercase();
+            if lower.ends_with(".proxybin")
+                || lower.ends_with(".proxyxml")
+                || lower.ends_with(".bin")
+                || lower.ends_with(".xml")
+                || lower.ends_with(".dav")
+            {
+                vec![cleaned]
+            } else {
+                // Если расширение не указано, проверяем все звуковые форматы TSC
+                vec![
+                    format!("{}.proxybin", cleaned),
+                    format!("{}.bin", cleaned),
+                    format!("{}.proxyxml", cleaned),
+                    format!("{}.xml", cleaned),
+                    format!("{}.dav", cleaned),
+                ]
             }
         }
         _ => vec![ensure_extension(&cleaned, kind)],
     }
 }
 
-fn is_absolute_ref(norm: &str, assets_root: &Path) -> bool {
-    let norm = norm.trim_start_matches('/').replace('\\', "/");
-    let lower = norm.to_lowercase();
+/// Определяет, является ли ссылка глобальной (от корня Assets)
+/// Определяет, является ли ссылка глобальной (от корня Assets)
+fn is_global_asset_ref(norm: &str, kind: AssetResourceKind, assets_root: &Path) -> bool {
+    // Текстуры в GeoPcDx НИКОГДА не бывают глобальными от корня Assets
+    if kind == AssetResourceKind::Texture {
+        return false;
+    }
+
+    let clean = norm.trim_start_matches('/').replace('\\', "/");
+    let lower = clean.to_lowercase();
+
+    // Относительные переходы never global
+    if lower.starts_with('.') || lower.starts_with("..") {
+        return false;
+    }
     if lower.starts_with("assets/") {
         return true;
     }
-    let parts: Vec<&str> = norm.split('/').filter(|p| !p.is_empty()).collect();
+
+    let parts: Vec<&str> = lower.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() >= 2 {
         let p1 = parts[0];
         let p2 = parts[1];
-        if assets_root.join(p1).join(p2).exists() {
+        // Защита от .. и .
+        if p1 == ".." || p1 == "." {
+            return false;
+        }
+
+        const KNOWN_PROVIDERS: &[&str] = &[
+            "kuju",
+            "dtg",
+            "rsc",
+            "3dzug",
+            "virtualtracks",
+            "justtrains",
+            "rsslo",
+            "railstudio",
+            "shg",
+            "vizzart",
+            "tsg",
+            "rw-0381",
+            "ted",
+            "kal000px",
+        ];
+        if KNOWN_PROVIDERS.contains(&p1) {
             return true;
         }
-        if assets_root.join(p1).is_dir() && assets_root.join(p1).join(p2).is_dir() {
+
+        // Проверяем реальную папку провайдера внутри Assets
+        let prov_dir = assets_root.join(p1);
+        if prov_dir.is_dir() && !p1.starts_with('.') {
             return true;
         }
     }
@@ -390,19 +484,22 @@ fn candidate_paths(
     }
     let norm = strip_shader_prefix(&norm).replace('/', "\\");
     let rels = candidate_relatives(&norm, kind);
-    let norm_slash = norm.replace('\\', "/");
-    let absolute = is_absolute_ref(&norm_slash, assets_root);
+    let is_global = is_global_asset_ref(&norm, kind, assets_root);
+
     let mut cands = Vec::new();
-    let dirs: Vec<&Path> = if absolute {
-        vec![assets_root, parent, product_root]
-    } else {
-        vec![parent, product_root, assets_root]
-    };
-    for dir in dirs {
+    if is_global {
         for rel in &rels {
-            cands.push(dir.join(rel));
+            cands.push(normalize_path(&assets_root.join(rel)));
+        }
+    } else {
+        for rel in &rels {
+            // 1. Ищем относительно папки текущего файла (с нормализацией ..)
+            cands.push(normalize_path(&parent.join(rel)));
+            // 2. Ищем относительно корня продукта
+            cands.push(normalize_path(&product_root.join(rel)));
         }
     }
+
     let mut seen = HashSet::new();
     cands.retain(|p| seen.insert(p.clone()));
     cands
@@ -413,27 +510,46 @@ fn loose_exists(candidates: &[PathBuf]) -> bool {
 }
 
 fn ap_exists(
-    _candidates: &[PathBuf],
     raw: &str,
-    _parent: &Path,
+    parent: &Path,
     product_root: &Path,
     assets_root: &Path,
     ap_cache: &ApArchiveCache,
     kind: AssetResourceKind,
 ) -> bool {
-    for rel in candidate_relatives(raw, kind) {
+    let mut norm = raw.replace('\\', "/");
+    if norm.to_lowercase().starts_with("assets/") {
+        norm = norm["assets/".len()..].to_string();
+    }
+    let norm = strip_shader_prefix(&norm).replace('/', "\\");
+    let is_global = is_global_asset_ref(&norm, kind, assets_root);
+
+    for rel in candidate_relatives(&norm, kind) {
         let cleaned = rel.replace('/', "\\");
-        let parts: Vec<&str> = cleaned.split('\\').filter(|p| !p.is_empty()).collect();
-        let (product_dir, inner) = if parts.len() >= 3 {
-            (assets_root.join(parts[0]).join(parts[1]), parts[2..].join("/"))
+
+        if is_global {
+            let parts: Vec<&str> = cleaned.split('\\').filter(|p| !p.is_empty()).collect();
+            if parts.len() >= 3 {
+                let product_dir = assets_root.join(parts[0]).join(parts[1]);
+                let inner = parts[2..].join("/");
+                if ap_cache.lookup(&product_dir, &inner) {
+                    return true;
+                }
+            }
         } else {
-            (product_root.to_path_buf(), cleaned.replace('\\', "/"))
-        };
-        if ap_cache.lookup(&product_dir, &inner) {
-            return true;
-        }
-        if ap_cache.lookup(&product_root, &inner) {
-            return true;
+            // Нормализуем путь относительно parent и смотрим, попадает ли он в product_root
+            let target_loose = normalize_path(&parent.join(&cleaned));
+            if let Ok(rel_from_prod) = target_loose.strip_prefix(product_root) {
+                let inner = rel_from_prod.to_string_lossy().replace('\\', "/");
+                if ap_cache.lookup(product_root, &inner) {
+                    return true;
+                }
+            }
+            // Также проверяем напрямую от product_root
+            let inner_direct = cleaned.trim_start_matches(".\\").replace('\\', "/");
+            if ap_cache.lookup(product_root, &inner_direct) {
+                return true;
+            }
         }
     }
     false
@@ -467,9 +583,12 @@ fn audit_one_file(
     if ext == "bin" {
         for (kind, raw) in extract_bin_references(&xml) {
             let cands = candidate_paths(&raw, parent, &product_root, assets_root, kind);
-            let expected = cands.first().cloned().unwrap_or_else(|| parent.join(&raw));
+            let expected = cands
+                .first()
+                .cloned()
+                .unwrap_or_else(|| assets_root.join(&raw));
             let exists = loose_exists(&cands)
-                || ap_exists(&cands, &raw, parent, &product_root, assets_root, ap_cache, kind);
+                || ap_exists(&raw, parent, &product_root, assets_root, ap_cache, kind);
             if !exists {
                 out.push(BrokenResourceRef {
                     parent_file: file.to_path_buf(),
@@ -481,10 +600,23 @@ fn audit_one_file(
         }
     } else if ext == "geopcdx" {
         for raw in extract_geo_texture_references(&xml) {
-            let cands = candidate_paths(&raw, parent, &product_root, assets_root, AssetResourceKind::Texture);
+            let cands = candidate_paths(
+                &raw,
+                parent,
+                &product_root,
+                assets_root,
+                AssetResourceKind::Texture,
+            );
             let expected = cands.first().cloned().unwrap_or_else(|| parent.join(&raw));
             let exists = loose_exists(&cands)
-                || ap_exists(&cands, &raw, parent, &product_root, assets_root, ap_cache, AssetResourceKind::Texture);
+                || ap_exists(
+                    &raw,
+                    parent,
+                    &product_root,
+                    assets_root,
+                    ap_cache,
+                    AssetResourceKind::Texture,
+                );
             if !exists {
                 out.push(BrokenResourceRef {
                     parent_file: file.to_path_buf(),
@@ -506,7 +638,14 @@ pub fn audit_folder(
     max_concurrent: usize,
     ap_cache: &ApArchiveCache,
 ) -> AuditReport {
-    audit_folder_with_progress(folder_path, assets_root, serz_path, max_concurrent, ap_cache, None)
+    audit_folder_with_progress(
+        folder_path,
+        assets_root,
+        serz_path,
+        max_concurrent,
+        ap_cache,
+        None,
+    )
 }
 
 pub fn audit_folder_with_progress(
@@ -521,20 +660,30 @@ pub fn audit_folder_with_progress(
     if let Ok(entries) = walkdir::WalkDir::new(folder_path)
         .into_iter()
         .filter_entry(|e| {
-            !e.path()
-                .components()
-                .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("preload"))
+            !e.path().components().any(|c| {
+                c.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("preload")
+            })
         })
         .collect::<Result<Vec<_>, _>>()
     {
         for entry in entries {
             let path = entry.path();
             if path.is_file() {
-                let is_preload = path.components().any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("preload"));
+                let is_preload = path.components().any(|c| {
+                    c.as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("preload")
+                });
                 if is_preload {
                     continue;
                 }
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
                 if ext == "bin" || ext == "geopcdx" {
                     files.push(path.to_path_buf());
                 }
@@ -585,13 +734,21 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.components().any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("preload")) {
+            if path.components().any(|c| {
+                c.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("preload")
+            }) {
                 continue;
             }
             if path.is_dir() {
                 collect_files(&path, out);
             } else if path.is_file() {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
                 if ext == "bin" || ext == "geopcdx" {
                     out.push(path);
                 }
@@ -607,7 +764,10 @@ mod tests {
     #[test]
     fn strips_shader_prefix() {
         assert_eq!(strip_shader_prefix(r"textures\[00]body"), r"textures\body");
-        assert_eq!(strip_texture_shader_prefix(r"textures\[00]body"), r"textures\body");
+        assert_eq!(
+            strip_texture_shader_prefix(r"textures\[00]body"),
+            r"textures\body"
+        );
         assert_eq!(strip_texture_prefix(r"textures\[00]body"), r"textures\body");
         assert_eq!(strip_prefix_00(r"[00]x"), "x");
         assert_eq!(strip_prefix(r"[00]x"), "x");
@@ -615,8 +775,14 @@ mod tests {
 
     #[test]
     fn normalizes_texture_reference() {
-        assert_eq!(normalize_texture_reference(r"textures\[00]body"), r"textures\body.TgPcDx");
-        assert_eq!(normalize_texture_reference(r"textures\body.TgPcDx"), r"textures\body.TgPcDx");
+        assert_eq!(
+            normalize_texture_reference(r"textures\[00]body"),
+            r"textures\body.TgPcDx"
+        );
+        assert_eq!(
+            normalize_texture_reference(r"textures\body.TgPcDx"),
+            r"textures\body.TgPcDx"
+        );
     }
 
     #[test]
@@ -624,7 +790,8 @@ mod tests {
         let xml = r#"
             <GeometryID>x\[00]mesh</GeometryID>
             <ShadowGeometryID>y\[01]shadow</ShadowGeometryID>
-            <AnimationID>anim\walk</AnimationID>
+            <AnimationID>do01_l</AnimationID>
+            <AnimationName>3DZUG\3dz_ICE4\RailVehicles\Electric\mg_bremse</AnimationName>
             <ScriptComponent>scripts\foo.lua</ScriptComponent>
             <iBlueprintLibrary-cAbsoluteBlueprintID>
                 <BlueprintSetID><iBlueprintLibrary-cBlueprintSetID>
@@ -635,11 +802,20 @@ mod tests {
             </iBlueprintLibrary-cAbsoluteBlueprintID>
         "#;
         let refs = extract_bin_references(xml);
-        assert!(refs.iter().any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh")));
-        assert!(refs.iter().any(|(k, r)| *k == AssetResourceKind::Animation));
+        assert!(refs
+            .iter()
+            .any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh")));
+        assert!(refs
+            .iter()
+            .any(|(k, r)| *k == AssetResourceKind::Animation && r.contains("mg_bremse")));
+        // Убеждаемся, что псевдо-путь AnimationID "do01_l" НЕ попал в ссылки:
+        assert!(!refs.iter().any(|(_, r)| r == "do01_l"));
         assert!(refs.iter().any(|(k, r)| *k == AssetResourceKind::Script));
-        assert!(refs.iter().any(|(k, r)| *k == AssetResourceKind::ChildBlueprint && r.contains("Kuju") && r.contains("bar.bin")));
-        assert!(refs.iter().any(|(k, _)| *k == AssetResourceKind::ChildBlueprint));
+        assert!(refs
+            .iter()
+            .any(|(k, r)| *k == AssetResourceKind::ChildBlueprint
+                && r.contains("Kuju")
+                && r.contains("bar.bin")));
     }
 
     #[test]
