@@ -1187,12 +1187,14 @@ export component FolderAuditorWindow inherits Window {
     in-out property <bool> sort-ascending: true;
     in property <float> audit-progress: 0.0;
     in property <string> audit-status: "";
+    in property <string> editor-status: "";
     in property <[ [StandardListViewItem] ]> broken-rows;
 
     callback pick-folder();
     callback start-audit(string);
     callback open-source-file(int);
     callback open-missing-target-folder(int);
+    callback edit-in-vscode(int);
     callback filter-changed(string);
     callback sort-column(int);
 
@@ -1272,43 +1274,280 @@ export component FolderAuditorWindow inherits Window {
                 enabled: root.selected-row >= 0;
                 clicked => { root.open-missing-target-folder(root.selected-row); }
             }
+            Button {
+                text: "Открыть в VS Code";
+                enabled: root.selected-row >= 0;
+                clicked => { root.edit-in-vscode(root.selected-row); }
+            }
         }
+        Text { text: root.editor-status; color: #a1a1aa; font-size: 12px; }
     }
 }
-export component AssetEditorWindow inherits Window {
-    title: "Редактор BIN/GeoPcDx";
-    min-width: 900px;
-    maximized: false;
-    min-height: 600px;
+import { Button, LineEdit, TextEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
 
-    accessible-role: AccessibleRole.none;
-    always-on-top: false;
-    default-font-family: @tr("");
-    default-font-size: 16px;
-    default-font-weight: 0;
+export component AssetEditorWindow inherits Window {
+    title: is-dirty ? "Редактор BIN/GeoPcDx • [Изменено]" : "Редактор BIN/GeoPcDx";
+    min-width: 900px;
+    min-height: 600px;
+    preferred-width: 1100px;
+    preferred-height: 750px;
+
     in-out property <string> editor-text: "";
-    full-screen: false;
-    in property <string> status: "";
+    in-out property <bool> is-dirty: false;
+    in property <bool> is-xml-valid: true;
+    in property <string> xml-status: "";
     in property <bool> loading: false;
+    in-out property <bool> find-panel-open: false;
+    in-out property <bool> replace-row-open: false;
+    in-out property <string> find-query: "";
+    in-out property <string> replace-query: "";
+    in-out property <string> match-counter: "";
+    in-out property <bool> match-case: false;
+    in property <string> cursor-position: "Ln 1, Col 1";
+    in property <int> total-lines: 1;
+    in property <length> editor-line-height: 18px;
+    in property <string> line-numbers-text: "";
+    in-out property <length> target-scroll-y: 0px;
+    in property <string> status: "";
 
     callback save();
-    callback search-changed(string);
+    callback text-changed(string);
+    callback find-next();
+    callback find-prev();
+    callback replace-current();
+    callback replace-all();
+    callback find-query-changed(string);
+    callback replace-query-changed(string);
+    callback toggle-match-case();
 
-    VerticalBox {
-        HorizontalBox {
-            LineEdit {
-                placeholder-text: "Поиск...";
-                edited(text) => { root.search-changed(text); }
-            }
+    // Перехват горячих клавиш на уровне всего окна (с поддержкой русской раскладки)
+    forward-focus: editor;
+    
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        // 1. Верхний тулбар управления
+        HorizontalLayout {
+            height: 32px;
+            spacing: 8px;
+
             Button {
-                text: "Сохранить";
-                enabled: !loading;
+                text: find-panel-open ? "✕ Скрыть поиск" : "🔍 Поиск (Ctrl+F)";
+                clicked => {
+                    root.find-panel-open = !root.find-panel-open;
+                }
+            }
+
+            Button {
+                text: (find-panel-open && replace-row-open) ? "Скрыть замену" : "Замена (Ctrl+H)";
+                clicked => {
+                    if (!root.find-panel-open) {
+                        root.find-panel-open = true;
+                        root.replace-row-open = true;
+                    } else {
+                        root.replace-row-open = !root.replace-row-open;
+                    }
+                }
+            }
+
+            if is-dirty : Rectangle {
+                border-radius: 4px;
+                background: #7c2d12;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    Text {
+                        text: "● Есть несохраненные изменения";
+                        color: #fdba74;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Button {
+                text: "💾 Сохранить (Ctrl+S)";
+                primary: true;
+                enabled: is-dirty && is-xml-valid && !loading;
                 clicked => { root.save(); }
             }
         }
-        TextEdit {
-            text <=> editor-text;
+
+        // 2. Раскрывающаяся панель поиска и замены
+        if find-panel-open : Rectangle {
+            background: #18181b;
+            border-width: 1px;
+            border-color: #3f3f46;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 6px;
+
+                // Строка поиска
+                HorizontalLayout {
+                    spacing: 6px;
+                    height: 30px;
+
+                    find-input := LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "Найти...";
+                        text <=> find-query;
+                        edited(text) => { root.find-query-changed(text); }
+                        accepted => { root.find-next(); }
+                    }
+
+                    Button { 
+                        text: "↓ Далее"; 
+                        clicked => { root.find-next(); } 
+                    }
+                    Button { 
+                        text: "↑ Назад"; 
+                        clicked => { root.find-prev(); } 
+                    }
+
+                    if match-counter != "" : Rectangle {
+                        background: #27272a;
+                        border-radius: 4px;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: match-counter;
+                                color: #a1a1aa;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Button {
+                        text: match-case ? "[Aa]" : "Aa";
+                        clicked => { root.toggle-match-case(); }
+                    }
+                }
+
+                // Строка замены
+                if replace-row-open : HorizontalLayout {
+                    spacing: 6px;
+                    height: 30px;
+
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "Заменить на...";
+                        text <=> replace-query;
+                        edited(text) => { root.replace-query-changed(text); }
+                        accepted => { root.replace-current(); }
+                    }
+
+                    Button { 
+                        text: "Заменить"; 
+                        clicked => { root.replace-current(); } 
+                    }
+                    Button { 
+                        text: "Заменить все"; 
+                        clicked => { root.replace-all(); } 
+                    }
+                }
+            }
         }
-        Text { text: status; }
+
+        // 3. Главная область редактора
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
+
+            // Line Numbers Gutter (Static or scrolled by active line offset)
+            Rectangle {
+                width: 54px;
+                background: #141416;
+                border-width: 1px;
+                border-color: #27272a;
+                clip: true;
+
+                VerticalLayout {
+                    padding-top: 4px;
+                    padding-right: 8px;
+                    alignment: LayoutAlignment.start;
+
+                    Text {
+                        text: root.line-numbers-text;
+                        font-family: "Consolas";
+                        font-size: 13px;
+                        color: #52525b;
+                        horizontal-alignment: TextHorizontalAlignment.right;
+                    }
+                }
+            }
+
+            // Main Editor - Direct placement, NO Flickable wrapper!
+            editor := TextEdit {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                text <=> root.editor-text;
+                font-family: "Consolas";
+                font-size: 13px;
+                edited(text) => { root.text-changed(text); }
+
+                key-pressed(event) => {
+                    if (event.modifiers.control && (event.text == "f" || event.text == "а" || event.text == "А")) {
+                        root.find-panel-open = !root.find-panel-open;
+                        return accept;
+                    }
+                    if (event.modifiers.control && (event.text == "h" || event.text == "р" || event.text == "Р")) {
+                        root.find-panel-open = true;
+                        root.replace-row-open = !root.replace-row-open;
+                        return accept;
+                    }
+                    if (event.modifiers.control && (event.text == "s" || event.text == "ы" || event.text == "Ы")) {
+                        if (root.is-dirty && root.is-xml-valid && !root.loading) {
+                            root.save();
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+
+        // 4. Нижний статус-бар
+        HorizontalLayout {
+            height: 24px;
+            spacing: 12px;
+
+            Rectangle {
+                border-radius: 4px;
+                background: is-xml-valid ? #14532d : #7f1d1d;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    Text {
+                        text: is-xml-valid ? "✓ XML синтаксис корректен" : ("✕ " + xml-status);
+                        color: #ffffff;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Text {
+                text: cursor-position;
+                font-size: 12px;
+                color: #a1a1aa;
+                vertical-alignment: center;
+            }
+
+            if status != "" : Text {
+                text: status;
+                font-size: 12px;
+                color: #71717a;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+        }
     }
 }

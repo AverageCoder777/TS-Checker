@@ -1,6 +1,7 @@
 //! XML editor for RailWorks binary assets.
 
 use super::*;
+use std::ops::Range;
 
 pub(crate) fn validate_xml_document(xml: &str) -> Result<(), String> {
     for event in xml::reader::EventReader::new(xml.as_bytes()) {
@@ -9,31 +10,215 @@ pub(crate) fn validate_xml_document(xml: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn validate_xml_syntax(xml: &str) -> Result<(), String> {
+    use xml::common::Position;
+    use xml::reader::{ErrorKind, EventReader, XmlEvent};
+
+    let parser = EventReader::new(xml.as_bytes());
+    let mut depth = 0usize;
+    let mut root: Option<String> = None;
+    let allowed_roots = ["cSceneryRenderBlueprint", "cHcGeometry"];
+
+    for event in parser {
+        match event {
+            Ok(XmlEvent::StartElement { name, .. }) => {
+                if depth == 0 {
+                    let tag = name.local_name.to_string();
+                    if !allowed_roots.contains(&tag.as_str()) {
+                        return Err(format!(
+                            "Ошибка синтаксиса: корневой тег должен быть <cSceneryRenderBlueprint> или <cHcGeometry>, найден <{tag}>"
+                        ));
+                    }
+                    root = Some(tag);
+                }
+                depth += 1;
+            }
+            Ok(XmlEvent::EndElement { .. }) => {
+                if depth == 0 {
+                    return Err("Ошибка синтаксиса: лишний закрывающий тег".to_owned());
+                }
+                depth -= 1;
+            }
+            Ok(XmlEvent::EndDocument) => {}
+            Ok(_) => {}
+            Err(error) => {
+                let pos = error.position();
+                let message = match error.kind() {
+                    ErrorKind::Syntax(msg) => msg.to_string(),
+                    other => format!("{other:?}"),
+                };
+                return Err(format!(
+                    "Ошибка синтаксиса: строка {}: {}",
+                    pos.row() + 1,
+                    message
+                ));
+            }
+        }
+    }
+    if root.is_none() {
+        return Err("Ошибка синтаксиса: корневой тег отсутствует".to_owned());
+    }
+    if depth != 0 {
+        return Err("Ошибка синтаксиса: незакрытый тег".to_owned());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SearchState {
+    pub(crate) query: String,
+    pub(crate) match_case: bool,
+    pub(crate) matches: Vec<Range<usize>>,
+    pub(crate) current_index: Option<usize>,
+}
+
 #[derive(Clone)]
 pub(crate) struct EditorDocument {
     pub(crate) source_path: PathBuf,
     pub(crate) source: String,
-    pub(crate) saved_xml: String,
+    pub(crate) original_text: String,
     pub(crate) xml: String,
     pub(crate) xml_validation: Option<Result<(), String>>,
+    pub(crate) find_query: String,
+    pub(crate) replace_query: String,
+    pub(crate) match_case: bool,
+    pub(crate) matches: Vec<Range<usize>>,
+    pub(crate) current_match_idx: usize,
+    pub(crate) search_state: SearchState,
 }
 
 impl EditorDocument {
     pub(crate) fn is_dirty(&self) -> bool {
-        self.xml != self.saved_xml
+        self.xml != self.original_text
     }
 
     pub(crate) fn validate_xml(&mut self) -> bool {
-        let result = validate_xml_document(&self.xml);
+        let result = validate_xml_syntax(&self.xml);
         self.xml_validation = Some(result.clone());
         result.is_ok()
     }
+
+    pub(crate) fn search(&mut self, query: &str, case_sensitive: bool) {
+        self.find_query = query.to_owned();
+        self.match_case = case_sensitive;
+        self.matches = find_matches(&self.xml, query, case_sensitive);
+        self.current_match_idx = if self.matches.is_empty() { 0 } else { 0 };
+        self.search_state = SearchState {
+            query: query.to_owned(),
+            match_case: case_sensitive,
+            matches: self.matches.clone(),
+            current_index: if self.matches.is_empty() {
+                None
+            } else {
+                Some(0)
+            },
+        };
+    }
+
+    pub(crate) fn find_next(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        self.current_match_idx = (self.current_match_idx + 1) % self.matches.len();
+        self.search_state.current_index = Some(self.current_match_idx);
+    }
+
+    pub(crate) fn find_prev(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        if self.current_match_idx == 0 {
+            self.current_match_idx = self.matches.len() - 1;
+        } else {
+            self.current_match_idx -= 1;
+        }
+        self.search_state.current_index = Some(self.current_match_idx);
+    }
+
+    pub(crate) fn replace_current(&mut self, replacement: &str) {
+        if self.matches.is_empty() || self.current_match_idx >= self.matches.len() {
+            return;
+        }
+        let range = self.matches[self.current_match_idx].clone();
+        self.xml.replace_range(range, replacement);
+        self.replace_query = replacement.to_owned();
+        let query = self.find_query.clone();
+        let case_sensitive = self.match_case;
+        self.search(&query, case_sensitive);
+        if !self.matches.is_empty() {
+            if self.current_match_idx + 1 < self.matches.len() {
+                self.current_match_idx += 1;
+            } else {
+                self.current_match_idx = 0;
+            }
+            self.search_state.current_index = Some(self.current_match_idx);
+        }
+    }
+
+    pub(crate) fn replace_all(&mut self, replacement: &str) {
+        if self.find_query.is_empty() || self.matches.is_empty() {
+            return;
+        }
+        self.xml = replace_all_text(&self.xml, &self.find_query, replacement, self.match_case);
+        self.replace_query = replacement.to_owned();
+        let query = self.find_query.clone();
+        let case_sensitive = self.match_case;
+        self.search(&query, case_sensitive);
+    }
+}
+
+fn find_matches(text: &str, query: &str, case_sensitive: bool) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let pattern = regex::escape(query);
+    let re = match regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+    {
+        Ok(re) => re,
+        Err(_) => return Vec::new(),
+    };
+    re.find_iter(text).map(|m| m.start()..m.end()).collect()
+}
+
+fn replace_all_text(text: &str, query: &str, replacement: &str, case_sensitive: bool) -> String {
+    if query.is_empty() {
+        return text.to_owned();
+    }
+    let pattern = regex::escape(query);
+    let re = match regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+    {
+        Ok(re) => re,
+        Err(_) => return text.to_owned(),
+    };
+    re.replace_all(text, |_caps: &regex::Captures| replacement.to_owned())
+        .to_string()
 }
 
 pub(crate) fn is_viewable_asset_name(name: &str) -> bool {
     Path::new(name).extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("geopcdx")
     })
+}
+
+pub(crate) fn line_col_at(text: &str, byte_index: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (i, ch) in text.char_indices() {
+        if i >= byte_index {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 pub(crate) fn load_asset_as_xml(
@@ -64,9 +249,15 @@ pub(crate) fn load_asset_as_xml(
     Ok(EditorDocument {
         source_path: source_path.to_path_buf(),
         source: source_path.display().to_string(),
-        saved_xml: xml.clone(),
+        original_text: xml.clone(),
         xml,
         xml_validation: None,
+        find_query: String::new(),
+        replace_query: String::new(),
+        match_case: false,
+        matches: Vec::new(),
+        current_match_idx: 0,
+        search_state: SearchState::default(),
     })
 }
 
@@ -75,7 +266,7 @@ pub(crate) fn save_asset_xml(
     source_path: &Path,
     xml: &str,
 ) -> Result<Option<PathBuf>, String> {
-    validate_xml_document(xml)?;
+    validate_xml_syntax(xml)?;
     if !is_viewable_asset_name(&source_path.to_string_lossy()) {
         return Err(format!(
             "Сохранять можно только .bin и .GeoPcDx: {}",
@@ -163,7 +354,9 @@ pub(crate) fn next_backup_path(source_path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_converted_asset, is_viewable_asset_name, next_backup_path, validate_xml_document,};
+        install_converted_asset, is_viewable_asset_name, next_backup_path, validate_xml_document,
+        validate_xml_syntax,
+    };
 
     #[test]
     fn supports_bin_and_geopcdx_names_case_insensitively() {
@@ -222,5 +415,14 @@ mod tests {
         );
         let error = validate_xml_document("<root><node></root>").unwrap_err();
         assert!(error.contains("Некорректный XML"));
+    }
+
+    #[test]
+    fn validates_xml_syntax_root_and_balance() {
+        assert!(validate_xml_syntax("<?xml version=\"1.0\"?><cSceneryRenderBlueprint><a/></cSceneryRenderBlueprint>").is_ok());
+        assert!(validate_xml_syntax("<cHcGeometry/>").is_ok());
+        assert!(validate_xml_syntax("<root/>").is_err());
+        let err = validate_xml_syntax("<cSceneryRenderBlueprint><a></cSceneryRenderBlueprint>").unwrap_err();
+        assert!(err.contains("Ошибка синтаксиса"));
     }
 }

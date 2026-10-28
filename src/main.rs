@@ -335,6 +335,7 @@ mod assets;
 mod auditor;
 mod blueprint;
 mod editor;
+mod external_editor;
 mod inventory_ui;
 mod reference;
 mod routes;
@@ -648,6 +649,41 @@ fn build_inventory_rows(
 }
 
 fn main() {
+    // Headless CLI / "Open With" support
+    let cli_args: Vec<String> = std::env::args().collect();
+    if cli_args.iter().any(|a| a == "--register-shell") {
+        if let Ok(exe) = std::env::current_exe() {
+            println!("Windows registry entry (save as .reg and import):");
+            println!("Windows Registry Editor Version 5.00");
+            println!();
+            println!("[HKEY_CLASSES_ROOT\\.bin\\shell\\Open with TS-Checker\\command]");
+            println!("@=\"\\\"{}\\\" \\\"%1\\\"\"", exe.display());
+            println!();
+            println!("[HKEY_CLASSES_ROOT\\.GeoPcDx\\shell\\Open with TS-Checker\\command]");
+            println!("@=\"\\\"{}\\\" \\\"%1\\\"\"", exe.display());
+        }
+        std::process::exit(0);
+    }
+    if let Some(target) = cli_args.get(1) {
+        let path = std::path::PathBuf::from(target);
+        let is_asset = path.is_file()
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("bin") || e.eq_ignore_ascii_case("geopcdx"))
+                .unwrap_or(false);
+        if is_asset {
+            println!("[ExternalEditor] Запуск синхронизации для: {:?}", path);
+            match crate::external_editor::run_headless(&path) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     // Handle file association launch: TS-Checker opened with a .bin/.GeoPcDx file.
     let startup_asset = parse_asset_launch_args(std::env::args_os().skip(1));
     if let Ok(Some(_)) | Err(_) = startup_asset {
@@ -673,6 +709,204 @@ fn main() {
                 }
             }
         });
+        let editor_handle3 = editor_win.as_weak();
+        let app_clone3 = app.clone();
+        editor_win.on_text_changed(move |text| {
+            if let Ok(mut app) = app_clone3.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    doc.xml = text.to_string();
+                    doc.validate_xml();
+                    if !doc.find_query.is_empty() {
+                        let q = doc.find_query.clone();
+                        let mc = doc.match_case;
+                        doc.search(&q, mc);
+                    }
+                    let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                    let message = doc
+                        .xml_validation
+                        .as_ref()
+                        .and_then(|r| r.as_ref().err().cloned())
+                        .unwrap_or_default();
+                    let dirty = doc.is_dirty();
+                    let counter = if doc.find_query.is_empty() {
+                        String::new()
+                    } else if doc.matches.is_empty() {
+                        "0 из 0".to_string()
+                    } else {
+                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                    };
+                    let line_count = text.lines().count().max(1);
+                    let line_numbers_text: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+                    if let Some(ew) = editor_handle3.upgrade() {
+                        ew.set_is_dirty(dirty);
+                        ew.set_is_xml_valid(valid);
+                        ew.set_xml_status(message.into());
+                        ew.set_match_counter(counter.into());
+                        ew.set_line_numbers_text(line_numbers_text.into());
+                    }
+                }
+            }
+        });
+
+        // Find & replace callbacks
+        let eh = editor_win.as_weak();
+        let appc = app.clone();
+        editor_win.on_find_query_changed(move |text| {
+            if let Ok(mut app) = appc.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    doc.search(&text.to_string(), doc.match_case);
+                    let counter = if text.is_empty() {
+                        String::new()
+                    } else if doc.matches.is_empty() {
+                        "0 из 0".to_string()
+                    } else {
+                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                    };
+                    let cursor = if !doc.matches.is_empty() {
+                        let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                        format!("Ln {}, Col {}", l, c)
+                    } else {
+                        String::new()
+                    };
+                        if let Some(ew) = eh.upgrade() {
+                            ew.set_match_counter(counter.into());
+                            ew.set_cursor_position(cursor.into());
+                            if !doc.matches.is_empty() {
+                                let (l, _) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                                ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
+                            }
+                        }
+                }
+            }
+        });
+
+        let eh = editor_win.as_weak();
+        let appc = app.clone();
+        editor_win.on_replace_query_changed(move |text| {
+            if let Ok(mut app) = appc.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    doc.replace_query = text.to_string();
+                }
+            }
+        });
+
+        let eh = editor_win.as_weak();
+        let appc = app.clone();
+        editor_win.on_find_next(move || {
+            if let Ok(mut app) = appc.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    doc.find_next();
+                    if !doc.matches.is_empty() {
+                        let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
+                        let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                        let cursor = format!("Ln {}, Col {}", l, c);
+                        if let Some(ew) = eh.upgrade() {
+                            ew.set_match_counter(counter.into());
+                            ew.set_cursor_position(cursor.into());
+                        }
+                    }
+                }
+            }
+        });
+
+        let eh = editor_win.as_weak();
+        let appc = app.clone();
+        editor_win.on_find_prev(move || {
+            if let Ok(mut app) = appc.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    doc.find_prev();
+                    if !doc.matches.is_empty() {
+                        let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
+                        let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                        let cursor = format!("Ln {}, Col {}", l, c);
+                        if let Some(ew) = eh.upgrade() {
+                            ew.set_match_counter(counter.into());
+                            ew.set_cursor_position(cursor.into());
+                            if !doc.matches.is_empty() {
+                                let (l, _) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                                ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let eh = editor_win.as_weak();
+        let appc = app.clone();
+        editor_win.on_toggle_match_case(move || {
+            if let Ok(mut app) = appc.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    doc.match_case = !doc.match_case;
+                    let q = doc.find_query.clone();
+                    doc.search(&q, doc.match_case);
+                    let counter = if q.is_empty() {
+                        String::new()
+                    } else if doc.matches.is_empty() {
+                        "0 из 0".to_string()
+                    } else {
+                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                    };
+                    if let Some(ew) = eh.upgrade() {
+                        ew.set_match_counter(counter.into());
+                        ew.set_match_case(doc.match_case);
+                    }
+                }
+            }
+        });
+
+        let eh = editor_win.as_weak();
+        let appc = app.clone();
+        editor_win.on_replace_current(move || {
+            if let Ok(mut app) = appc.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    let replacement = doc.replace_query.clone();
+                    doc.replace_current(&replacement);
+                    doc.validate_xml();
+                    let xml = doc.xml.clone().replace('\t', "    ");
+                    let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                    let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
+                    let dirty = doc.is_dirty();
+                    let counter = if doc.find_query.is_empty() {
+                        String::new()
+                    } else if doc.matches.is_empty() {
+                        "0 из 0".to_string()
+                    } else {
+                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                    };
+                    if let Some(ew) = eh.upgrade() {
+                        ew.set_editor_text(xml.into());
+                        ew.set_is_dirty(dirty);
+                        ew.set_is_xml_valid(valid);
+                        ew.set_xml_status(message.into());
+                        ew.set_match_counter(counter.into());
+                    }
+                }
+            }
+        });
+
+        let eh = editor_win.as_weak();
+        let appc = app.clone();
+        editor_win.on_replace_all(move || {
+            if let Ok(mut app) = appc.lock() {
+                if let Some(doc) = app.asset_viewer_document.as_mut() {
+                    let replacement = doc.replace_query.clone();
+                    doc.replace_all(&replacement);
+                    doc.validate_xml();
+                    let xml = doc.xml.clone().replace('\t', "    ");
+                    let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                    let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
+                    let dirty = doc.is_dirty();
+                    if let Some(ew) = eh.upgrade() {
+                        ew.set_editor_text(xml.into());
+                        ew.set_is_dirty(dirty);
+                        ew.set_is_xml_valid(valid);
+                        ew.set_xml_status(message.into());
+                        ew.set_match_counter("0 из 0".into());
+                    }
+                }
+            }
+        });
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -684,11 +918,29 @@ fn main() {
                         if let Some(doc) = app.asset_viewer_document.as_ref() {
                             let xml = doc.xml.clone().replace('\t', "    ");
                             let status = app.status.clone();
+                            let line_count = doc.xml.lines().count().max(1);
+                            let nums: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
                             app.editor_sync_pending = false;
                             if let Some(ew) = editor_handle2.upgrade() {
                                 ew.set_editor_text(xml.into());
                                 ew.set_status(status.into());
+                                ew.set_line_numbers_text(nums.into());
                                 let _ = ew.show();
+                            }
+                        }
+                    }
+                    if app.asset_viewer_open {
+                        if let Some(doc) = app.asset_viewer_document.as_ref() {
+                            if let Some(ew) = editor_handle2.upgrade() {
+                                ew.set_is_dirty(doc.is_dirty());
+                                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                                ew.set_is_xml_valid(valid);
+                                let msg = doc
+                                    .xml_validation
+                                    .as_ref()
+                                    .and_then(|r| r.as_ref().err().cloned())
+                                    .unwrap_or_default();
+                                ew.set_xml_status(msg.into());
                             }
                         }
                     }
@@ -1055,6 +1307,198 @@ fn main() {
             }
         }
     });
+    let editor_handle3 = editor_win.as_weak();
+    let app_clone21 = app.clone();
+    editor_win.on_text_changed(move |text| {
+        if let Ok(mut app) = app_clone21.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                doc.xml = text.to_string();
+                doc.validate_xml();
+                if !doc.find_query.is_empty() {
+                    let q = doc.find_query.clone();
+                    let mc = doc.match_case;
+                    doc.search(&q, mc);
+                }
+                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                let message = doc
+                    .xml_validation
+                    .as_ref()
+                    .and_then(|r| r.as_ref().err().cloned())
+                    .unwrap_or_default();
+                let dirty = doc.is_dirty();
+                let counter = if doc.find_query.is_empty() {
+                    String::new()
+                } else if doc.matches.is_empty() {
+                    "0 из 0".to_string()
+                } else {
+                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                };
+                let line_count = text.lines().count().max(1);
+                let line_numbers_text: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+                if let Some(ew) = editor_handle3.upgrade() {
+                    ew.set_is_dirty(dirty);
+                    ew.set_is_xml_valid(valid);
+                    ew.set_xml_status(message.into());
+                    ew.set_match_counter(counter.into());
+                    ew.set_line_numbers_text(line_numbers_text.into());
+                }
+            }
+        }
+    });
+
+    // Find & replace callbacks
+    let eh = editor_win.as_weak();
+    let appc = app.clone();
+    editor_win.on_find_query_changed(move |text| {
+        if let Ok(mut app) = appc.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                doc.search(&text.to_string(), doc.match_case);
+                let counter = if text.is_empty() {
+                    String::new()
+                } else if doc.matches.is_empty() {
+                    "0 из 0".to_string()
+                } else {
+                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                };
+                let cursor = if !doc.matches.is_empty() {
+                    let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                    format!("Ln {}, Col {}", l, c)
+                } else {
+                    String::new()
+                };
+                if let Some(ew) = eh.upgrade() {
+                    ew.set_match_counter(counter.into());
+                    if !cursor.is_empty() { ew.set_cursor_position(cursor.into()); }
+                }
+            }
+        }
+    });
+
+    let eh = editor_win.as_weak();
+    let appc = app.clone();
+    editor_win.on_replace_query_changed(move |text| {
+        if let Ok(mut app) = appc.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                doc.replace_query = text.to_string();
+            }
+        }
+    });
+
+    let eh = editor_win.as_weak();
+    let appc = app.clone();
+    editor_win.on_find_next(move || {
+        if let Ok(mut app) = appc.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                doc.find_next();
+                if !doc.matches.is_empty() {
+                    let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
+                    let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                    let cursor = format!("Ln {}, Col {}", l, c);
+                    if let Some(ew) = eh.upgrade() {
+                        ew.set_match_counter(counter.into());
+                        ew.set_cursor_position(cursor.into());
+                        ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
+                    }
+                }
+            }
+        }
+    });
+
+    let eh = editor_win.as_weak();
+    let appc = app.clone();
+    editor_win.on_find_prev(move || {
+        if let Ok(mut app) = appc.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                doc.find_prev();
+                if !doc.matches.is_empty() {
+                    let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
+                    let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
+                    let cursor = format!("Ln {}, Col {}", l, c);
+                    if let Some(ew) = eh.upgrade() {
+                        ew.set_match_counter(counter.into());
+                        ew.set_cursor_position(cursor.into());
+                        ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
+                    }
+                }
+            }
+        }
+    });
+
+    let eh = editor_win.as_weak();
+    let appc = app.clone();
+    editor_win.on_toggle_match_case(move || {
+        if let Ok(mut app) = appc.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                doc.match_case = !doc.match_case;
+                let q = doc.find_query.clone();
+                doc.search(&q, doc.match_case);
+                let counter = if q.is_empty() {
+                    String::new()
+                } else if doc.matches.is_empty() {
+                    "0 из 0".to_string()
+                } else {
+                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                };
+                if let Some(ew) = eh.upgrade() {
+                    ew.set_match_counter(counter.into());
+                    ew.set_match_case(doc.match_case);
+                }
+            }
+        }
+    });
+
+    let eh = editor_win.as_weak();
+    let appc = app.clone();
+    editor_win.on_replace_current(move || {
+        if let Ok(mut app) = appc.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                let replacement = doc.replace_query.clone();
+                doc.replace_current(&replacement);
+                doc.validate_xml();
+                let xml = doc.xml.clone().replace('\t', "    ");
+                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
+                let dirty = doc.is_dirty();
+                let counter = if doc.find_query.is_empty() {
+                    String::new()
+                } else if doc.matches.is_empty() {
+                    "0 из 0".to_string()
+                } else {
+                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
+                };
+                if let Some(ew) = eh.upgrade() {
+                    ew.set_editor_text(xml.into());
+                    ew.set_is_dirty(dirty);
+                    ew.set_is_xml_valid(valid);
+                    ew.set_xml_status(message.into());
+                    ew.set_match_counter(counter.into());
+                }
+            }
+        }
+    });
+
+    let eh = editor_win.as_weak();
+    let appc = app.clone();
+    editor_win.on_replace_all(move || {
+        if let Ok(mut app) = appc.lock() {
+            if let Some(doc) = app.asset_viewer_document.as_mut() {
+                let replacement = doc.replace_query.clone();
+                doc.replace_all(&replacement);
+                doc.validate_xml();
+                let xml = doc.xml.clone().replace('\t', "    ");
+                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
+                let dirty = doc.is_dirty();
+                if let Some(ew) = eh.upgrade() {
+                    ew.set_editor_text(xml.into());
+                    ew.set_is_dirty(dirty);
+                    ew.set_is_xml_valid(valid);
+                    ew.set_xml_status(message.into());
+                    ew.set_match_counter("0 из 0".into());
+                }
+            }
+        }
+    });
     // Show editor window when asset_viewer_open becomes true
     // (handled in timer below)
 
@@ -1113,11 +1557,29 @@ fn main() {
                     if let Some(doc) = app.asset_viewer_document.as_ref() {
                         let xml = doc.xml.clone().replace('\t', "    ");
                         let status = app.status.clone();
+                        let line_count = doc.xml.lines().count().max(1);
+                        let nums: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
                         app.editor_sync_pending = false;
                         if let Some(ew) = editor_handle2.upgrade() {
                             ew.set_editor_text(xml.into());
                             ew.set_status(status.into());
+                            ew.set_line_numbers_text(nums.into());
                             let _ = ew.show();
+                        }
+                    }
+                }
+                if app.asset_viewer_open {
+                    if let Some(doc) = app.asset_viewer_document.as_ref() {
+                        if let Some(ew) = editor_handle2.upgrade() {
+                            ew.set_is_dirty(doc.is_dirty());
+                            let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
+                            ew.set_is_xml_valid(valid);
+                            let msg = doc
+                                .xml_validation
+                                .as_ref()
+                                .and_then(|r| r.as_ref().err().cloned())
+                                .unwrap_or_default();
+                            ew.set_xml_status(msg.into());
                         }
                     }
                 }
@@ -2442,13 +2904,9 @@ fn main() {
         if row < 0 || row as usize >= items.len() {
             return;
         }
-        let parent = items[row as usize].parent_file.clone();
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("explorer")
-                .arg(format!("/select,{}", parent.display()))
-                .spawn();
-        }
+        let target_path = items[row as usize].parent_file.clone();
+        println!("[Auditor] Opening path: {:?}", target_path);
+        let _ = open_in_explorer(&target_path);
         let _ = auditor_weak_for_open;
     });
     let auditor_weak_for_missing = auditor_win.as_weak();
@@ -2458,19 +2916,9 @@ fn main() {
         if row < 0 || row as usize >= items.len() {
             return;
         }
-        let expected = items[row as usize].expected_path.clone();
-        let mut dir = expected.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| expected.clone());
-        while !dir.exists() && dir.parent().is_some() {
-            if let Some(p) = dir.parent() {
-                dir = p.to_path_buf();
-            } else {
-                break;
-            }
-        }
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
-        }
+        let target_path = items[row as usize].expected_path.clone();
+        println!("[Auditor] Opening path: {:?}", target_path);
+        let _ = open_in_explorer(&target_path);
         let _ = auditor_weak_for_missing;
     });
     let auditor_weak_for_sort = auditor_win.as_weak();
@@ -2529,6 +2977,69 @@ fn main() {
         })
         .ok();
     });
+    let auditor_weak_for_edit = auditor_win.as_weak();
+    let current_display_for_edit = current_display_items.clone();
+    let app_clone_edit = app.clone();
+    auditor_win.on_edit_in_vscode(move |row| {
+        let items = current_display_for_edit
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if row < 0 || row as usize >= items.len() {
+            return;
+        }
+        let item = &items[row as usize];
+        let asset_path = if item.parent_file.extension().map(|e| e.eq_ignore_ascii_case("bin") || e.eq_ignore_ascii_case("geopcdx")).unwrap_or(false) {
+            item.parent_file.clone()
+        } else if item.expected_path.extension().map(|e| e.eq_ignore_ascii_case("bin") || e.eq_ignore_ascii_case("geopcdx")).unwrap_or(false) {
+            item.expected_path.clone()
+        } else {
+            let w = auditor_weak_for_edit.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(win) = w.upgrade() {
+                    win.set_editor_status("Выбранный элемент не является .bin/.GeoPcDx".into());
+                }
+            });
+            return;
+        };
+    let rw_path = app_clone_edit.lock().map(|a| a.rw_path.clone()).unwrap_or_default();
+    let serz_path = crate::external_editor::find_serz_path(&asset_path)
+        .or_else(|| {
+            let p = crate::preferred_serz_path(std::path::Path::new(&rw_path));
+            if p.is_file() {
+                Some(p)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("serz.exe"));
+        let weak = auditor_weak_for_edit.clone();
+        std::thread::spawn(move || {
+            let cb_weak = weak.clone();
+            let callback = move |res: Result<String, String>| {
+                let msg = match res {
+                    Ok(s) => s,
+                    Err(e) => format!("✗ {}", e),
+                };
+                let w = cb_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_editor_status(msg.into());
+                    }
+                });
+            };
+            if let Err(e) = crate::external_editor::open_and_sync_with_vscode(&asset_path, &serz_path, callback) {
+                let w = weak.clone();
+                let msg = format!("✗ {}", e);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.set_editor_status(msg.into());
+                    }
+                });
+            }
+        });
+    });
+
     ui.run().unwrap();
 }
 

@@ -3,23 +3,50 @@
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+pub(crate) fn open_in_explorer(target_path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if target_path.is_file() {
+            Command::new("explorer")
+                .raw_arg(format!("/select,\"{}\"", target_path.to_string_lossy()))
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| {
+                    format!(
+                        "Не удалось открыть {} в Проводнике: {error}",
+                        target_path.display()
+                    )
+                })
+        } else {
+            let mut current = target_path.to_path_buf();
+            while !current.exists() {
+                match current.parent() {
+                    Some(parent) => current = parent.to_path_buf(),
+                    None => break,
+                }
+            }
+            Command::new("explorer")
+                .raw_arg(format!("\"{}\"", current.to_string_lossy()))
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| {
+                    format!(
+                        "Не удалось открыть {} в Проводнике: {error}",
+                        current.display()
+                    )
+                })
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = target_path;
+        open::that(target_path).map(|_| ()).map_err(|error| error.to_string())
+    }
+}
+
 pub(crate) fn open_in_file_explorer(path: &Path) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        Command::new("explorer.exe")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| {
-                format!(
-                    "Не удалось открыть {} в Проводнике: {error}",
-                    path.display()
-                )
-            })
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        Err("Открытие Проводника поддерживается только в Windows.".to_owned())
-    }
+    open_in_explorer(path)
 }

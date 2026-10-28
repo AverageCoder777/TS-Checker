@@ -2901,23 +2901,20 @@ pub(crate) fn convert_xml_to_bin(
     xml_path: &Path,
     bin_path: &Path,
 ) -> Result<(), String> {
-    if bin_path.exists() {
-        fs::remove_file(bin_path).map_err(|error| {
-            format!(
-                "не удалось удалить предыдущий временный бинарный файл {}: {error}",
-                bin_path.display()
-            )
-        })?;
-    }
     let mut args = vec![legacy_windows_path(xml_path).display().to_string()];
     args.push(format!(
         "/bin:{}",
         legacy_windows_path(bin_path).display()
     ));
+    println!(
+        "[Serz Exec] Serz: {:?}, XML: {:?}, Target BIN: {:?}",
+        serz_path, xml_path, bin_path
+    );
     let output = serz_output(serz_path, &args)?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("[Serz Output] stdout: {}, stderr: {}", stdout, stderr);
     validate_serz_process(output.status.success(), &stdout, &stderr)
         .map_err(|error| format!("{error} (код выхода {})", output.status))?;
     let metadata = fs::metadata(bin_path).map_err(|error| {

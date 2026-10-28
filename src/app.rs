@@ -613,7 +613,7 @@ impl CheckerApp {
                         .as_mut()
                         .filter(|document| document.source_path == source_path)
                     {
-                        document.saved_xml = saved_xml;
+                        document.original_text = saved_xml;
                     }
                     let mut entry = AssetReplacementLogEntry {
                         timestamp_unix_seconds: 0,
