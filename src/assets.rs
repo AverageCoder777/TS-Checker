@@ -4,6 +4,21 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 use walkdir::WalkDir;
 
+pub fn is_safe_for_global_replacement(relative_path: &str, uses: &[AssetUse]) -> bool {
+    // Never replace assets referenced in track network databases.
+    if uses.iter().any(|u| {
+        let path_lower = u.source_file.display().to_lowercase();
+        path_lower.contains("tracks.bin")
+            || path_lower.contains("/networks/")
+            || path_lower.contains("\\networks\\")
+    }) {
+        return false;
+    }
+
+    let _ = relative_path;
+    true
+}
+
 pub(crate) fn is_skipped_route_scan_directory(name: &str, ignore_scenarios: bool) -> bool {
     ignore_scenarios && name.eq_ignore_ascii_case("Scenarios")
 }

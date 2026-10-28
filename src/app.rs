@@ -74,6 +74,8 @@ pub(crate) struct CheckerApp {
     inventory_scan: Option<Receiver<Result<InventoryScanOutcome, String>>>,
     pub(crate) missing_assets_popup: Option<Vec<String>>,
     pub(crate) missing_assets_shown: bool,
+    pub(crate) inventory_refresh_pending: bool,
+    pub(crate) inventory_replacement_pending_check: bool,
 }
 
 impl Default for CheckerApp {
@@ -166,6 +168,8 @@ impl Default for CheckerApp {
             inventory_scan: None,
             missing_assets_popup: None,
             missing_assets_shown: false,
+            inventory_refresh_pending: false,
+            inventory_replacement_pending_check: false,
         }
     }
 }
@@ -708,6 +712,7 @@ impl CheckerApp {
                         "Заменено размещений: {}; изменено файлов тайлов: {}. {log_message}",
                         report.replaced_instances, report.replaced_files,
                     )));
+                    self.inventory_refresh_pending = true;
                     if !report.backups.is_empty() {
                         self.status = format!("Создано резервных копий: {}.", report.backups.len());
                     }
@@ -726,7 +731,12 @@ impl CheckerApp {
                 }
             }
         }
-        self.start_next_asset_replacement();
+            let was_last_inventory_replacement = self.asset_replacement_queue.is_empty();
+            self.start_next_asset_replacement();
+            if was_last_inventory_replacement && self.inventory_replacement_pending_check {
+                self.inventory_replacement_pending_check = false;
+                self.start_check();
+            }
 
         let route_result = self.route_scan.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
@@ -827,7 +837,14 @@ impl CheckerApp {
                                 self.check_log
                                     .push_str(&format!("Ошибка Serz/XML: {error}\n"));
                             }
+                            let inventory = result.asset_inventory.clone();
                             self.result = Some(result);
+                            if let Ok(mut state) = self.asset_inventory_state.lock() {
+                                if state.open {
+                                    state.assets = inventory;
+                                }
+                            }
+                            self.inventory_refresh_pending = true;
                         }
                         Err(error) => self.status = error,
                     }

@@ -305,14 +305,17 @@ export component AssetInventoryWindow inherits Window {
     min-height: 700px;
 
     in property <[ [StandardListViewItem] ]> inventory-rows;
+    in property <[bool]> inventory-is-safe: [];
     in property <bool> show-missing-only: false;
     in-out property <string> search-query: "";
     in-out property <int> current-row: -1;
+    in-out property <int> selected-asset: -1;
 
     callback toggle-missing-only();
     callback search-changed(string);
     callback row-selected(int);
     callback open-in-editor();
+    callback replace-inventory-asset(int);
     callback scan-umlauts();
     callback sort-ascending(int);
     callback sort-descending(int);
@@ -332,10 +335,36 @@ export component AssetInventoryWindow inherits Window {
                 text: "Открыть в редакторе";
                 clicked => { root.open-in-editor(); }
             }
+            Rectangle {
+                property <bool> can_replace: selected-asset >= 0 && selected-asset < inventory-is-safe.length && inventory-is-safe[selected-asset];
+                min-width: 190px;
+                preferred-height: 32px;
+                border-radius: 4px;
+                background: !can_replace ? #262626 : (replace_touch.pressed ? #047857 : (replace_touch.has-hover ? #10b981 : #059669));
+
+                replace_touch := TouchArea {
+                    enabled: can_replace;
+                    clicked => { root.replace-inventory-asset(selected-asset); }
+                }
+
+                Text {
+                    text: "Заменить в маршруте...";
+                    color: !can_replace ? #666666 : #ffffff;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
             Button {
                 text: "Проверить на умляуты";
                 clicked => { root.scan-umlauts(); }
             }
+        }
+        if selected-asset >= 0 && selected-asset < inventory-is-safe.length && !inventory-is-safe[selected-asset] : Text {
+            text: "⚠ Путевые объекты и сигналы (Tracks.bin) заменяются только в редакторе TSC во избежание сбоя линков.";
+            color: #f59e0b;
+            font-size: 12px;
         }
         StandardTableView {
             current-row-changed(row) => {

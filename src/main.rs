@@ -487,7 +487,7 @@ fn load_vehicle_preview_image(
 fn build_inventory_rows(
     state: &app::AssetInventoryWindowState,
     show_missing: bool,
-) -> Vec<slint::ModelRc<slint::StandardListViewItem>> {
+) -> (Vec<slint::ModelRc<slint::StandardListViewItem>>, Vec<bool>) {
     let mut assets: Vec<&ReferencedAsset> = state.assets.iter().collect();
     match state.sort.column {
         inventory_ui::InventorySortColumn::Path => {
@@ -507,6 +507,7 @@ fn build_inventory_rows(
     }
     let search = state.search.to_lowercase();
     let mut rows = Vec::new();
+    let mut safe_flags = Vec::new();
     for a in assets {
         if show_missing && !a.missing {
             continue;
@@ -543,8 +544,12 @@ fn build_inventory_rows(
         let row: slint::ModelRc<slint::StandardListViewItem> =
             slint::ModelRc::new(slint::VecModel::from(row_items));
         rows.push(row);
+        safe_flags.push(crate::assets::is_safe_for_global_replacement(
+            &a.path,
+            &a.uses,
+        ));
     }
-    rows
+    (rows, safe_flags)
 }
 
 fn main() {
@@ -960,6 +965,8 @@ fn main() {
 
     let timer = slint::Timer::default();
     let ui_handle_timer = ui_handle.clone();
+    let inv_handle_timer_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<slint::Weak<AssetInventoryWindow>>));
+    let inv_handle_timer_slot_clone = inv_handle_timer_slot.clone();
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(50),
@@ -970,6 +977,20 @@ fn main() {
             };
             if let Ok(mut app) = app_clone.lock() {
                 app.receive_background_results();
+                if app.inventory_refresh_pending {
+                    let inv_weak = inv_handle_timer_slot_clone.lock().ok().and_then(|g| g.clone());
+                    if let Some(inv) = inv_weak.and_then(|w| w.upgrade()) {
+                        let show_missing = inv.get_show_missing_only();
+                        let (rows, safe) = if let Ok(state) = app.asset_inventory_state.lock() {
+                            build_inventory_rows(&state, show_missing)
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
+                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                        app.inventory_refresh_pending = false;
+                    }
+                }
                 // Show missing-assets popup after route check finishes
                 if !app.is_checking()
                     && app.result.is_some()
@@ -1160,6 +1181,10 @@ fn main() {
     let inv_handle5 = inventory_win.as_weak();
     let inv_handle9 = inventory_win.as_weak();
     let inv_handle10 = inventory_win.as_weak();
+    let inv_handle11 = inventory_win.as_weak();
+    if let Ok(mut slot) = inv_handle_timer_slot.lock() {
+        *slot = Some(inventory_win.as_weak());
+    }
     let settings_win = SettingsWindow::new().unwrap();
     let settings_handle = settings_win.as_weak();
     let settings_handle2 = settings_win.as_weak();
@@ -1859,10 +1884,11 @@ fn main() {
             inv.set_show_missing_only(!cur);
             let show_missing = !cur;
             if let Ok(app) = app_clone6.lock() {
-                if let Ok(state) = app.asset_inventory_state.lock() {
-                    let rows = build_inventory_rows(&state, show_missing);
-                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                }
+                    if let Ok(state) = app.asset_inventory_state.lock() {
+                        let (rows, safe) = build_inventory_rows(&state, show_missing);
+                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                    }
             }
         }
     });
@@ -1883,10 +1909,11 @@ fn main() {
                         _ => {}
                     }
                 }
-                if let Ok(state) = app.asset_inventory_state.lock() {
-                    let rows = build_inventory_rows(&state, show_missing);
-                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                }
+                    if let Ok(state) = app.asset_inventory_state.lock() {
+                        let (rows, safe) = build_inventory_rows(&state, show_missing);
+                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                    }
             }
         }
     });
@@ -1907,10 +1934,11 @@ fn main() {
                         _ => {}
                     }
                 }
-                if let Ok(state) = app.asset_inventory_state.lock() {
-                    let rows = build_inventory_rows(&state, show_missing);
-                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                }
+                    if let Ok(state) = app.asset_inventory_state.lock() {
+                        let (rows, safe) = build_inventory_rows(&state, show_missing);
+                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                    }
             }
         }
     });
@@ -1921,10 +1949,11 @@ fn main() {
                 if let Ok(mut state) = app.asset_inventory_state.lock() {
                     state.search = text.to_string();
                 }
-                if let Ok(state) = app.asset_inventory_state.lock() {
-                    let rows = build_inventory_rows(&state, show_missing);
-                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                }
+                    if let Ok(state) = app.asset_inventory_state.lock() {
+                        let (rows, safe) = build_inventory_rows(&state, show_missing);
+                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                    }
             }
         }
     });
@@ -1932,6 +1961,9 @@ fn main() {
     let mut inv_last_click = Instant::now();
     const INV_DOUBLE_CLICK_MS: u64 = 400;
     inventory_win.on_row_selected(move |row| {
+        if let Some(inv) = inv_handle9.upgrade() {
+            inv.set_selected_asset(row);
+        }
         let now = Instant::now();
         let is_double = row == inv_last_row
             && now.saturating_duration_since(inv_last_click)
@@ -2017,6 +2049,89 @@ fn main() {
             }
         }
     });
+    let app_clone_replace = app.clone();
+    inventory_win.on_replace_inventory_asset(move |selected| {
+        if selected < 0 {
+            return;
+        }
+        let Some(inv) = inv_handle11.upgrade() else {
+            return;
+        };
+        let rows = inv.get_inventory_rows();
+        if (selected as usize) >= rows.row_count() {
+            return;
+        }
+        let first_cell = rows.row_data(selected as usize).and_then(|rm| rm.row_data(0));
+        let asset_path = first_cell.map(|c| c.text.to_string()).unwrap_or_default();
+        if asset_path.is_empty() {
+            return;
+        }
+        let rw_path = if let Ok(app) = app_clone_replace.lock() {
+            app.rw_path.clone()
+        } else {
+            return;
+        };
+        if rw_path.trim().is_empty() {
+            return;
+        }
+        let asset = if let Ok(app) = app_clone_replace.lock() {
+            if let Ok(state) = app.asset_inventory_state.lock() {
+                state.assets.iter().find(|a| a.path == asset_path).cloned()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(asset) = asset else {
+            return;
+        };
+        if !crate::assets::is_safe_for_global_replacement(&asset.path, &asset.uses) {
+            if let Ok(mut app) = app_clone_replace.lock() {
+                app.status = "Замена этого ассета запрещена (путевая инфраструктура).".to_owned();
+            }
+            return;
+        }
+
+        let assets_dir = std::path::PathBuf::from(rw_path.trim()).join("Assets");
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Заменить в маршруте...")
+            .set_directory(&assets_dir);
+        dialog = dialog.add_filter("BIN", &["bin"]);
+        let Some(picked) = dialog.pick_file() else {
+            return;
+        };
+        let replacement_relative = picked
+            .strip_prefix(&assets_dir)
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| picked.to_string_lossy().replace('\\', "/"));
+
+        let uses: Vec<_> = asset
+            .uses
+            .into_iter()
+            .filter(|u| {
+                let p = u.source_file.display().to_lowercase();
+                !p.contains("tracks.bin")
+                    && !p.contains("/networks/")
+                    && !p.contains("\\networks\\")
+            })
+            .collect();
+        if uses.is_empty() {
+            return;
+        }
+        let missing = MissingAsset {
+            path: asset.path.clone(),
+            uses,
+            suggested_repair: None,
+            is_corrupted_link: false,
+        };
+        if let Ok(mut app) = app_clone_replace.lock() {
+            app.inventory_replacement_pending_check = true;
+            app.asset_replacement_queue
+                .push((missing, picked, replacement_relative));
+            app.start_next_asset_replacement();
+        }
+    });
     inventory_win.on_scan_umlauts(move || {
         if let Ok(app) = app_clone19.lock() {
             let _ = app
@@ -2036,9 +2151,12 @@ fn main() {
             if let Some(inv) = inv_handle.upgrade() {
                 if let Ok(state) = app.asset_inventory_state.lock() {
                     inv.set_show_missing_only(false);
+                    inv.set_selected_asset(-1);
                     inv.set_search_query(state.search.clone().as_str().into());
-                    let rows = build_inventory_rows(&state, false);
+                    let (rows, safe) = build_inventory_rows(&state, false);
                     inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                    inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                    inv.set_search_query(state.search.clone().as_str().into());
                 }
                 inv.show().unwrap();
             }
