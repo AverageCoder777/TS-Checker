@@ -106,6 +106,90 @@ pub(crate) fn resolve_blueprint_file_cached_free(
 /// расширениями RailWorks. Если указаны провайдер и продукт, сначала
 /// пробуется полный путь Assets\{provider}\{product}\{blueprint}.
 /// При неудаче обходится только папка провайдера/продукта (не всё Assets).
+/// Strict existence check for a scenario vehicle blueprint.
+///
+/// Only the exact `Assets/<Provider>/<Product>/<BlueprintID>` path (with `.xml`
+/// resolved to `.bin`) is accepted, either as a loose file or as a member of a
+/// `.ap` archive located in that same Product folder. No cross-product or
+/// filename-only fallback is performed.
+pub(crate) fn vehicle_blueprint_exists(
+    rw_path: &Path,
+    provider: &str,
+    product: &str,
+    blueprint: &str,
+) -> bool {
+    let assets_path = rw_path.join("Assets");
+    let product_dir = assets_path
+        .join(provider.replace('/', "\\"))
+        .join(product.replace('/', "\\"));
+    let normalized = blueprint.trim().replace('/', "\\");
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let mut candidates = Vec::new();
+    let extension = Path::new(&normalized)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if extension == "xml" {
+        candidates.push(format!(
+            "{}.bin",
+            normalized.trim_end_matches(".xml")
+        ));
+        candidates.push(normalized.clone());
+    } else if extension == "bin" {
+        candidates.push(normalized.clone());
+        candidates.push(format!(
+            "{}.xml",
+            normalized.trim_end_matches(".bin")
+        ));
+    } else {
+        candidates.push(format!("{}.bin", normalized));
+        candidates.push(format!("{}.xml", normalized));
+    }
+
+    for candidate in &candidates {
+        if product_dir.join(candidate).is_file() {
+            return true;
+        }
+    }
+
+    let Ok(entries) = fs::read_dir(&product_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let archive_path = entry.path();
+        if archive_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("ap"))
+            != Some(true)
+        {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&archive_path) else {
+            continue;
+        };
+        let Ok(mut zip) = zip::ZipArchive::new(file) else {
+            continue;
+        };
+        for member_result in zip.file_names() {
+            let Ok(member_name) = member_result else {
+                continue;
+            };
+            let member = member_name.replace('/', "\\");
+            for candidate in &candidates {
+                if member.eq_ignore_ascii_case(candidate) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn resolve_blueprint_file(
     rw_path: &Path,
     route_path: &Path,

@@ -1344,16 +1344,14 @@ fn main() {
                             .map(|c| {
                                 let mut all_ok = true;
                                 let mut flags = Vec::with_capacity(c.vehicles.len());
-                                for veh in &c.vehicles {
-                                    let exists = crate::blueprint::resolve_blueprint_file_cached_free(
-                                        std::path::Path::new(&rw_path),
-                                        std::path::Path::new(&route_path),
-                                        &veh.blueprint,
-                                        &veh.provider,
-                                        &veh.product,
-                                    )
-                                    .is_some();
-                                    flags.push(!exists);
+                                 for veh in &c.vehicles {
+                                     let exists = crate::blueprint::vehicle_blueprint_exists(
+                                         std::path::Path::new(&rw_path),
+                                         &veh.provider,
+                                         &veh.product,
+                                         &veh.blueprint,
+                                     );
+                                     flags.push(!exists);
                                     if !exists {
                                         all_ok = false;
                                     }
@@ -1691,10 +1689,26 @@ fn main() {
                 &vehicle.provider,
                 &vehicle.product,
             );
-            let path_text = resolved
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| vehicle.blueprint.clone());
+            let exists = crate::blueprint::vehicle_blueprint_exists(
+                &rw_path,
+                &vehicle.provider,
+                &vehicle.product,
+                &vehicle.blueprint,
+            );
+            let path_text = if exists {
+                if vehicle.provider.trim().is_empty() || vehicle.product.trim().is_empty() {
+                    vehicle.blueprint.clone()
+                } else {
+                    format!(
+                        "Assets\\{}\\{}\\{}",
+                        vehicle.provider.trim(),
+                        vehicle.product.trim(),
+                        vehicle.blueprint.trim().replace('/', "\\")
+                    )
+                }
+            } else {
+                String::new()
+            };
             let image = load_vehicle_preview_image(&rw_path, &route_path, &vehicle, resolved.as_ref());
             if let Some(sw) = scenario_handle_preview.upgrade() {
                 if let Some(idx) = path_text.find("Assets"){
