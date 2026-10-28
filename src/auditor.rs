@@ -18,7 +18,6 @@ pub enum AssetResourceKind {
 #[derive(Debug, Clone)]
 pub struct BrokenResourceRef {
     pub parent_file: PathBuf,
-    pub raw_reference: String,
     pub expected_path: PathBuf,
     pub kind: AssetResourceKind,
 }
@@ -26,7 +25,6 @@ pub struct BrokenResourceRef {
 #[derive(Debug, Default)]
 pub struct AuditReport {
     pub broken_references: Vec<BrokenResourceRef>,
-    pub scanned_files: usize,
 }
 
 #[derive(Default)]
@@ -37,28 +35,6 @@ pub struct ApArchiveCache {
 impl ApArchiveCache {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn insert(&self, product_dir: PathBuf, members: HashSet<String>) {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.insert(product_dir, members);
-        }
-    }
-
-    pub fn contains(&self, product_dir: &Path, relative: &str) -> bool {
-        self.lookup(product_dir, relative)
-    }
-
-    pub fn contains_path(&self, product_dir: &Path, relative: &str) -> bool {
-        self.lookup(product_dir, relative)
-    }
-
-    pub fn exists(&self, product_dir: &Path, relative: &str) -> bool {
-        self.lookup(product_dir, relative)
-    }
-
-    pub fn has(&self, product_dir: &Path, relative: &str) -> bool {
-        self.lookup(product_dir, relative)
     }
 
     pub fn lookup(&self, product_dir: &Path, relative: &str) -> bool {
@@ -85,22 +61,6 @@ impl ApArchiveCache {
             }
         }
         false
-    }
-
-    pub fn get(&self, product_dir: &Path) -> Option<HashSet<String>> {
-        let guard = self.inner.lock().ok()?;
-        if let Some(set) = guard.get(product_dir) {
-            return Some(set.clone());
-        }
-        for (key, set) in guard.iter() {
-            if key
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&product_dir.to_string_lossy())
-            {
-                return Some(set.clone());
-            }
-        }
-        None
     }
 }
 
@@ -205,8 +165,10 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
     out
 }
 
-pub fn extract_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
-    extract_bin_references(xml)
+pub fn strip_shader_prefix(raw: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\[\d{2,3}\]").unwrap());
+    re.replace_all(raw, "").to_string()
 }
 
 pub fn extract_geo_texture_references(xml: &str) -> Vec<String> {
@@ -229,36 +191,6 @@ pub fn extract_geo_texture_references(xml: &str) -> Vec<String> {
         }
     }
     out
-}
-
-pub fn extract_texture_references(xml: &str) -> Vec<String> {
-    extract_geo_texture_references(xml)
-}
-
-pub fn extract_geo_references(xml: &str) -> Vec<String> {
-    extract_geo_texture_references(xml)
-}
-
-pub fn strip_texture_shader_prefix(raw: &str) -> String {
-    strip_shader_prefix(raw)
-}
-
-pub fn strip_texture_prefix(raw: &str) -> String {
-    strip_shader_prefix(raw)
-}
-
-pub fn strip_shader_prefix(raw: &str) -> String {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\[\d{2,3}\]").unwrap());
-    re.replace_all(raw, "").to_string()
-}
-
-pub fn strip_prefix_00(raw: &str) -> String {
-    strip_shader_prefix(raw)
-}
-
-pub fn strip_prefix(raw: &str) -> String {
-    strip_shader_prefix(raw)
 }
 
 pub fn normalize_texture_reference(raw: &str) -> String {
@@ -436,7 +368,6 @@ fn is_global_asset_ref(norm: &str, kind: AssetResourceKind, assets_root: &Path) 
     let parts: Vec<&str> = lower.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() >= 2 {
         let p1 = parts[0];
-        let p2 = parts[1];
         // Защита от .. и .
         if p1 == ".." || p1 == "." {
             return false;
@@ -592,7 +523,6 @@ fn audit_one_file(
             if !exists {
                 out.push(BrokenResourceRef {
                     parent_file: file.to_path_buf(),
-                    raw_reference: raw,
                     expected_path: expected,
                     kind,
                 });
@@ -620,7 +550,6 @@ fn audit_one_file(
             if !exists {
                 out.push(BrokenResourceRef {
                     parent_file: file.to_path_buf(),
-                    raw_reference: raw,
                     expected_path: expected,
                     kind: AssetResourceKind::Texture,
                 });
@@ -629,23 +558,6 @@ fn audit_one_file(
     }
 
     out
-}
-
-pub fn audit_folder(
-    folder_path: &Path,
-    assets_root: &Path,
-    serz_path: &Path,
-    max_concurrent: usize,
-    ap_cache: &ApArchiveCache,
-) -> AuditReport {
-    audit_folder_with_progress(
-        folder_path,
-        assets_root,
-        serz_path,
-        max_concurrent,
-        ap_cache,
-        None,
-    )
 }
 
 pub fn audit_folder_with_progress(
@@ -726,7 +638,6 @@ pub fn audit_folder_with_progress(
 
     AuditReport {
         broken_references: broken,
-        scanned_files: files.len(),
     }
 }
 
@@ -764,13 +675,6 @@ mod tests {
     #[test]
     fn strips_shader_prefix() {
         assert_eq!(strip_shader_prefix(r"textures\[00]body"), r"textures\body");
-        assert_eq!(
-            strip_texture_shader_prefix(r"textures\[00]body"),
-            r"textures\body"
-        );
-        assert_eq!(strip_texture_prefix(r"textures\[00]body"), r"textures\body");
-        assert_eq!(strip_prefix_00(r"[00]x"), "x");
-        assert_eq!(strip_prefix(r"[00]x"), "x");
     }
 
     #[test]
@@ -810,7 +714,7 @@ mod tests {
             .any(|(k, r)| *k == AssetResourceKind::Animation && r.contains("mg_bremse")));
         // Убеждаемся, что псевдо-путь AnimationID "do01_l" НЕ попал в ссылки:
         assert!(!refs.iter().any(|(_, r)| r == "do01_l"));
-        assert!(refs.iter().any(|(k, r)| *k == AssetResourceKind::Script));
+        assert!(refs.iter().any(|(k, _)| *k == AssetResourceKind::Script));
         assert!(refs
             .iter()
             .any(|(k, r)| *k == AssetResourceKind::ChildBlueprint

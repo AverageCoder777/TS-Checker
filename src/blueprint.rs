@@ -26,7 +26,7 @@ pub(crate) fn ap_archive_entries(path: &Path) -> Vec<String> {
     }
     let mut entries = Vec::new();
     if let Ok(file) = fs::File::open(path) {
-        if let Ok(mut zip) = zip::ZipArchive::new(file) {
+        if let Ok(zip) = zip::ZipArchive::new(file) {
             for name_result in zip.file_names() {
                 let Ok(name) = name_result else { continue; };
                 let name = name.to_string();
@@ -172,7 +172,7 @@ pub(crate) fn vehicle_blueprint_exists(
         let Ok(file) = fs::File::open(&archive_path) else {
             continue;
         };
-        let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        let Ok(zip) = zip::ZipArchive::new(file) else {
             continue;
         };
         for member_result in zip.file_names() {

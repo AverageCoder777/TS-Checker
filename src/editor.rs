@@ -64,14 +64,6 @@ pub(crate) fn validate_xml_syntax(xml: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct SearchState {
-    pub(crate) query: String,
-    pub(crate) match_case: bool,
-    pub(crate) matches: Vec<Range<usize>>,
-    pub(crate) current_index: Option<usize>,
-}
-
 #[derive(Clone)]
 pub(crate) struct EditorDocument {
     pub(crate) source_path: PathBuf,
@@ -84,7 +76,6 @@ pub(crate) struct EditorDocument {
     pub(crate) match_case: bool,
     pub(crate) matches: Vec<Range<usize>>,
     pub(crate) current_match_idx: usize,
-    pub(crate) search_state: SearchState,
 }
 
 impl EditorDocument {
@@ -103,16 +94,6 @@ impl EditorDocument {
         self.match_case = case_sensitive;
         self.matches = find_matches(&self.xml, query, case_sensitive);
         self.current_match_idx = if self.matches.is_empty() { 0 } else { 0 };
-        self.search_state = SearchState {
-            query: query.to_owned(),
-            match_case: case_sensitive,
-            matches: self.matches.clone(),
-            current_index: if self.matches.is_empty() {
-                None
-            } else {
-                Some(0)
-            },
-        };
     }
 
     pub(crate) fn find_next(&mut self) {
@@ -120,7 +101,6 @@ impl EditorDocument {
             return;
         }
         self.current_match_idx = (self.current_match_idx + 1) % self.matches.len();
-        self.search_state.current_index = Some(self.current_match_idx);
     }
 
     pub(crate) fn find_prev(&mut self) {
@@ -132,7 +112,6 @@ impl EditorDocument {
         } else {
             self.current_match_idx -= 1;
         }
-        self.search_state.current_index = Some(self.current_match_idx);
     }
 
     pub(crate) fn replace_current(&mut self, replacement: &str) {
@@ -151,7 +130,6 @@ impl EditorDocument {
             } else {
                 self.current_match_idx = 0;
             }
-            self.search_state.current_index = Some(self.current_match_idx);
         }
     }
 
@@ -257,7 +235,6 @@ pub(crate) fn load_asset_as_xml(
         match_case: false,
         matches: Vec::new(),
         current_match_idx: 0,
-        search_state: SearchState::default(),
     })
 }
 

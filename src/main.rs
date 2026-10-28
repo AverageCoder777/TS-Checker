@@ -487,30 +487,6 @@ fn load_vehicle_preview_image(
     slint::Image::default()
 }
 
-fn audit_filter_matches(kind: &str, filter: &str) -> bool {
-    let f = filter.to_lowercase();
-    if f.is_empty() || f == "all" || f == "все" {
-        return true;
-    }
-    let k = kind.to_lowercase();
-    if f == "geometry" || f.contains("геометр") {
-        return k.contains("геометр");
-    }
-    if f == "texture" || f.contains("текстур") {
-        return k.contains("текстур");
-    }
-    if f == "script" || f.contains("скрипт") {
-        return k.contains("скрипт");
-    }
-    if f == "sound" || f.contains("звук") || f.contains("аудио") {
-        return k.contains("звук") || k.contains("аудио");
-    }
-    if f == "child" || f.contains("дочер") {
-        return k.contains("дочер") || k.contains("child");
-    }
-    k.contains(&f)
-}
-
 fn filter_items(items: &mut Vec<BrokenResourceRef>, filter: &str) {
     let f = filter.to_lowercase();
     if f.is_empty() || f == "all" || f == "все" {
@@ -780,7 +756,6 @@ fn main() {
             }
         });
 
-        let eh = editor_win.as_weak();
         let appc = app.clone();
         editor_win.on_replace_query_changed(move |text| {
             if let Ok(mut app) = appc.lock() {
@@ -1374,7 +1349,6 @@ fn main() {
         }
     });
 
-    let eh = editor_win.as_weak();
     let appc = app.clone();
     editor_win.on_replace_query_changed(move |text| {
         if let Ok(mut app) = appc.lock() {
@@ -2740,7 +2714,6 @@ fn main() {
     let current_display_items_for_sort = current_display_items.clone();
     let audit_sort_col_for_sort = audit_sort_col.clone();
     let audit_sort_asc_for_sort = audit_sort_asc.clone();
-    let all_audit_items_for_open = all_audit_items.clone(); // not used, keep current_display
     let current_display_items_for_open = current_display_items.clone();
     let app_clone_auditor = app.clone();
     ui.on_open_folder_auditor(move || {
