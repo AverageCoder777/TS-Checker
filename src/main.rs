@@ -332,6 +332,7 @@ struct RouteScanCache {
 mod analysis_cache;
 mod app;
 mod assets;
+mod auditor;
 mod blueprint;
 mod editor;
 mod inventory_ui;
@@ -343,6 +344,7 @@ mod translit;
 mod windows;
 
 pub(crate) use assets::*;
+pub(crate) use auditor::*;
 pub(crate) use editor::*;
 pub(crate) use inventory_ui::*;
 pub(crate) use reference::*;
@@ -482,6 +484,99 @@ fn load_vehicle_preview_image(
         }
     }
     slint::Image::default()
+}
+
+fn audit_filter_matches(kind: &str, filter: &str) -> bool {
+    let f = filter.to_lowercase();
+    if f.is_empty() || f == "all" || f == "все" {
+        return true;
+    }
+    let k = kind.to_lowercase();
+    if f == "geometry" || f.contains("геометр") {
+        return k.contains("геометр");
+    }
+    if f == "texture" || f.contains("текстур") {
+        return k.contains("текстур");
+    }
+    if f == "script" || f.contains("скрипт") {
+        return k.contains("скрипт");
+    }
+    if f == "sound" || f.contains("звук") || f.contains("аудио") {
+        return k.contains("звук") || k.contains("аудио");
+    }
+    if f == "child" || f.contains("дочер") {
+        return k.contains("дочер") || k.contains("child");
+    }
+    k.contains(&f)
+}
+
+fn filter_items(items: &mut Vec<BrokenResourceRef>, filter: &str) {
+    let f = filter.to_lowercase();
+    if f.is_empty() || f == "all" || f == "все" {
+        return;
+    }
+    items.retain(|b| {
+        let kind = match b.kind {
+            AssetResourceKind::Geometry => "геометрия",
+            AssetResourceKind::Texture => "текстура",
+            AssetResourceKind::Animation => "анимация",
+            AssetResourceKind::Script => "скрипт",
+            AssetResourceKind::Sound => "звуки",
+            AssetResourceKind::ChildBlueprint => "дочерние",
+        };
+        if f.contains("геометр") {
+            return kind.contains("геометр");
+        }
+        if f.contains("текстур") {
+            return kind.contains("текстур");
+        }
+        if f.contains("скрипт") {
+            return kind.contains("скрипт");
+        }
+        if f.contains("звук") || f.contains("аудио") {
+            return kind.contains("звук");
+        }
+        if f.contains("дочер") || f.contains("child") {
+            return kind.contains("дочер");
+        }
+        kind.contains(&f)
+    });
+}
+
+fn sort_items(items: &mut Vec<BrokenResourceRef>, col: usize, asc: bool) {
+    items.sort_by(|a, b| {
+        let va = match col {
+            0 => match a.kind {
+                AssetResourceKind::Geometry => "Геометрия",
+                AssetResourceKind::Texture => "Текстура",
+                AssetResourceKind::Animation => "Анимация",
+                AssetResourceKind::Script => "Скрипт",
+                AssetResourceKind::Sound => "Звуки",
+                AssetResourceKind::ChildBlueprint => "Дочерние объекты",
+            }
+            .to_string(),
+            1 => a.expected_path.to_string_lossy().to_string(),
+            _ => a.parent_file.to_string_lossy().to_string(),
+        };
+        let vb = match col {
+            0 => match b.kind {
+                AssetResourceKind::Geometry => "Геометрия",
+                AssetResourceKind::Texture => "Текстура",
+                AssetResourceKind::Animation => "Анимация",
+                AssetResourceKind::Script => "Скрипт",
+                AssetResourceKind::Sound => "Звуки",
+                AssetResourceKind::ChildBlueprint => "Дочерние объекты",
+            }
+            .to_string(),
+            1 => b.expected_path.to_string_lossy().to_string(),
+            _ => b.parent_file.to_string_lossy().to_string(),
+        };
+        if asc {
+            va.cmp(&vb)
+        } else {
+            vb.cmp(&va)
+        }
+    });
 }
 
 fn build_inventory_rows(
@@ -2161,6 +2256,278 @@ fn main() {
                 inv.show().unwrap();
             }
         }
+    });
+    let auditor_win = FolderAuditorWindow::new().unwrap();
+    let auditor_handle = auditor_win.as_weak();
+    let auditor_handle2 = auditor_win.as_weak();
+    let all_audit_items: std::sync::Arc<std::sync::Mutex<Vec<BrokenResourceRef>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let current_display_items: std::sync::Arc<std::sync::Mutex<Vec<BrokenResourceRef>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let audit_sort_col: std::sync::Arc<std::sync::Mutex<usize>> = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let audit_sort_asc: std::sync::Arc<std::sync::Mutex<bool>> = std::sync::Arc::new(std::sync::Mutex::new(true));
+    let all_audit_items_for_start = all_audit_items.clone();
+    let current_display_items_for_start = current_display_items.clone();
+    let audit_sort_col_for_start = audit_sort_col.clone();
+    let audit_sort_asc_for_start = audit_sort_asc.clone();
+    let all_audit_items_for_filter = all_audit_items.clone();
+    let current_display_items_for_filter = current_display_items.clone();
+    let audit_sort_col_for_filter = audit_sort_col.clone();
+    let audit_sort_asc_for_filter = audit_sort_asc.clone();
+    let all_audit_items_for_sort = all_audit_items.clone();
+    let current_display_items_for_sort = current_display_items.clone();
+    let audit_sort_col_for_sort = audit_sort_col.clone();
+    let audit_sort_asc_for_sort = audit_sort_asc.clone();
+    let all_audit_items_for_open = all_audit_items.clone(); // not used, keep current_display
+    let current_display_items_for_open = current_display_items.clone();
+    let app_clone_auditor = app.clone();
+    ui.on_open_folder_auditor(move || {
+        if let Some(w) = auditor_handle.upgrade() {
+            let _ = w.show();
+        }
+    });
+    auditor_win.on_pick_folder(move || {
+        if let Some(w) = auditor_handle2.upgrade() {
+            let current = w.get_folder_path().to_string();
+            let mut dialog = rfd::FileDialog::new().set_title("Выберите папку для аудита");
+            if !current.is_empty() {
+                let p = std::path::PathBuf::from(&current);
+                if p.is_dir() {
+                    dialog = dialog.set_directory(&p);
+                }
+            }
+            if let Some(path) = dialog.pick_folder() {
+                w.set_folder_path(path.to_string_lossy().to_string().into());
+            }
+        }
+    });
+    let auditor_weak_for_start = auditor_win.as_weak();
+    auditor_win.on_start_audit(move |folder_path| {
+        println!("[Auditor] start-audit callback: {}", folder_path);
+        let window_weak = auditor_weak_for_start.clone();
+        let path = std::path::PathBuf::from(folder_path.as_str());
+        if !path.exists() || !path.is_dir() {
+            eprintln!("[Auditor] Invalid folder path: {:?}", path);
+            return;
+        }
+        let rw_path = app_clone_auditor
+            .lock()
+            .map(|a| a.rw_path.clone())
+            .unwrap_or_default();
+        let max_threads = app_clone_auditor
+            .lock()
+            .map(|a| a.serz_process_limit)
+            .unwrap_or(8)
+            .max(1);
+        let serz_path = crate::preferred_serz_path(std::path::Path::new(&rw_path));
+        let assets_root = path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| path.clone());
+        let ap_cache = ApArchiveCache::new();
+        let path_for_thread = path.clone();
+        let window_weak_thread = window_weak.clone();
+            let all_store = all_audit_items_for_start.clone();
+            let current_store = current_display_items_for_start.clone();
+            let sort_col_store = audit_sort_col_for_start.clone();
+            let sort_asc_store = audit_sort_asc_for_start.clone();
+            let results_store = all_store.clone();
+            std::thread::spawn(move || {
+                println!("[Auditor] Starting audit for: {:?}", path_for_thread);
+                let progress_cb: std::sync::Arc<dyn Fn(usize, usize) + Send + Sync> = {
+                    let ww = window_weak_thread.clone();
+                    std::sync::Arc::new(move |done, total| {
+                        let ww = ww.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(w) = ww.upgrade() {
+                                w.set_audit_progress(done as f32 / total as f32);
+                                w.set_audit_status(format!("Сканирование: {} / {} файлов...", done, total).into());
+                            }
+                        });
+                    })
+                };
+                let report = crate::audit_folder_with_progress(&path_for_thread, &assets_root, &serz_path, max_threads, &ap_cache, Some(progress_cb));
+                println!("[Auditor] Audit done, broken: {}", report.broken_references.len());
+                if let Ok(mut store) = results_store.lock() {
+                    *store = report.broken_references.clone();
+                }
+                let col = *sort_col_store.lock().unwrap();
+                let asc = *sort_asc_store.lock().unwrap();
+                let filter = window_weak_thread.upgrade().map(|w| w.get_active_filter().to_string()).unwrap_or_else(|| "all".to_string());
+                let mut items: Vec<BrokenResourceRef> = report.broken_references.clone();
+                filter_items(&mut items, &filter);
+                sort_items(&mut items, col, asc);
+                if let Ok(mut store) = current_store.lock() {
+                    *store = items.clone();
+                }
+                let ww = window_weak_thread.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(w) = ww.upgrade() {
+                        let mut rows: Vec<slint::ModelRc<slint::StandardListViewItem>> = Vec::new();
+                        for b in &items {
+                            let kind = match b.kind {
+                                AssetResourceKind::Geometry => "Геометрия",
+                                AssetResourceKind::Texture => "Текстура",
+                                AssetResourceKind::Animation => "Анимация",
+                                AssetResourceKind::Script => "Скрипт",
+                                AssetResourceKind::Sound => "Звуки",
+                                AssetResourceKind::ChildBlueprint => "Дочерние объекты",
+                            };
+                            let mut item0 = slint::StandardListViewItem::default();
+                            item0.text = kind.into();
+                            let mut item1 = slint::StandardListViewItem::default();
+                            item1.text = b.expected_path.to_string_lossy().to_string().into();
+                            let mut item2 = slint::StandardListViewItem::default();
+                            item2.text = b.parent_file.to_string_lossy().to_string().into();
+                            rows.push(slint::ModelRc::new(slint::VecModel::from(vec![item0, item1, item2])));
+                        }
+                        w.set_broken_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                        w.set_audit_progress(1.0);
+                        w.set_audit_status(format!("Готово: {} проблем", items.len()).into());
+                        w.set_selected_row(-1);
+                    }
+                })
+                .ok();
+            });
+    });
+    let auditor_weak_for_filter = auditor_win.as_weak();
+    auditor_win.on_filter_changed(move |filter| {
+        println!("[Auditor] filter-changed: {}", filter);
+        let ww = auditor_weak_for_filter.clone();
+        let all_store = all_audit_items_for_filter.clone();
+        let current_store = current_display_items_for_filter.clone();
+        let sort_col_store = audit_sort_col_for_filter.clone();
+        let sort_asc_store = audit_sort_asc_for_filter.clone();
+        let all_items = all_store.lock().map(|g| g.clone()).unwrap_or_default();
+        let col = *sort_col_store.lock().unwrap();
+        let asc = *sort_asc_store.lock().unwrap();
+        let mut items = all_items;
+        filter_items(&mut items, filter.as_str());
+        sort_items(&mut items, col, asc);
+        if let Ok(mut store) = current_store.lock() {
+            *store = items.clone();
+        }
+        slint::invoke_from_event_loop(move || {
+            if let Some(w) = ww.upgrade() {
+                w.set_active_filter(filter.clone().into());
+                let mut rows: Vec<slint::ModelRc<slint::StandardListViewItem>> = Vec::new();
+                for b in &items {
+                    let kind = match b.kind {
+                        AssetResourceKind::Geometry => "Геометрия",
+                        AssetResourceKind::Texture => "Текстура",
+                        AssetResourceKind::Animation => "Анимация",
+                        AssetResourceKind::Script => "Скрипт",
+                        AssetResourceKind::Sound => "Звуки",
+                        AssetResourceKind::ChildBlueprint => "Дочерние объекты",
+                    };
+                    let mut item0 = slint::StandardListViewItem::default();
+                    item0.text = kind.into();
+                    let mut item1 = slint::StandardListViewItem::default();
+                    item1.text = b.expected_path.to_string_lossy().to_string().into();
+                    let mut item2 = slint::StandardListViewItem::default();
+                    item2.text = b.parent_file.to_string_lossy().to_string().into();
+                    rows.push(slint::ModelRc::new(slint::VecModel::from(vec![item0, item1, item2])));
+                }
+                w.set_broken_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                w.set_selected_row(-1);
+            }
+        })
+        .ok();
+    });
+    let auditor_weak_for_open = auditor_win.as_weak();
+    let current_display_for_open = current_display_items_for_open.clone();
+    auditor_win.on_open_source_file(move |row| {
+        let items = current_display_for_open.lock().map(|g| g.clone()).unwrap_or_default();
+        if row < 0 || row as usize >= items.len() {
+            return;
+        }
+        let parent = items[row as usize].parent_file.clone();
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", parent.display()))
+                .spawn();
+        }
+        let _ = auditor_weak_for_open;
+    });
+    let auditor_weak_for_missing = auditor_win.as_weak();
+    let current_display_for_missing = current_display_items_for_open.clone();
+    auditor_win.on_open_missing_target_folder(move |row| {
+        let items = current_display_for_missing.lock().map(|g| g.clone()).unwrap_or_default();
+        if row < 0 || row as usize >= items.len() {
+            return;
+        }
+        let expected = items[row as usize].expected_path.clone();
+        let mut dir = expected.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| expected.clone());
+        while !dir.exists() && dir.parent().is_some() {
+            if let Some(p) = dir.parent() {
+                dir = p.to_path_buf();
+            } else {
+                break;
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+        }
+        let _ = auditor_weak_for_missing;
+    });
+    let auditor_weak_for_sort = auditor_win.as_weak();
+    let all_for_sort = all_audit_items_for_sort.clone();
+    let current_for_sort = current_display_items_for_sort.clone();
+    let sort_col_for_sort = audit_sort_col_for_sort.clone();
+    let sort_asc_for_sort = audit_sort_asc_for_sort.clone();
+    auditor_win.on_sort_column(move |col| {
+        let col = col as usize;
+        let mut c = sort_col_for_sort.lock().unwrap();
+        let mut a = sort_asc_for_sort.lock().unwrap();
+        if *c == col {
+            *a = !*a;
+        } else {
+            *c = col;
+            *a = true;
+        }
+        let col_now = *c;
+        let asc_now = *a;
+        drop(c);
+        drop(a);
+        let filter = auditor_weak_for_sort.upgrade().map(|w| w.get_active_filter().to_string()).unwrap_or_else(|| "all".to_string());
+        let all_items = all_for_sort.lock().map(|g| g.clone()).unwrap_or_default();
+        let mut items = all_items;
+        filter_items(&mut items, &filter);
+        sort_items(&mut items, col_now, asc_now);
+        if let Ok(mut store) = current_for_sort.lock() {
+            *store = items.clone();
+        }
+        let ww = auditor_weak_for_sort.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(w) = ww.upgrade() {
+                w.set_sort_col(col_now as i32);
+                w.set_sort_ascending(asc_now);
+                let mut rows: Vec<slint::ModelRc<slint::StandardListViewItem>> = Vec::new();
+                for b in &items {
+                    let kind = match b.kind {
+                        AssetResourceKind::Geometry => "Геометрия",
+                        AssetResourceKind::Texture => "Текстура",
+                        AssetResourceKind::Animation => "Анимация",
+                        AssetResourceKind::Script => "Скрипт",
+                        AssetResourceKind::Sound => "Звуки",
+                        AssetResourceKind::ChildBlueprint => "Дочерние объекты",
+                    };
+                    let mut item0 = slint::StandardListViewItem::default();
+                    item0.text = kind.into();
+                    let mut item1 = slint::StandardListViewItem::default();
+                    item1.text = b.expected_path.to_string_lossy().to_string().into();
+                    let mut item2 = slint::StandardListViewItem::default();
+                    item2.text = b.parent_file.to_string_lossy().to_string().into();
+                    rows.push(slint::ModelRc::new(slint::VecModel::from(vec![item0, item1, item2])));
+                }
+                w.set_broken_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                w.set_selected_row(-1);
+            }
+        })
+        .ok();
     });
     ui.run().unwrap();
 }

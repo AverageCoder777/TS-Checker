@@ -40,6 +40,7 @@ export component MainWindow inherits Window {
     callback reset-log();
     callback open-route-folder();
     callback show-inventory();
+    callback open-folder-auditor();
     callback open-settings();
     callback scenario-selected(int);
 
@@ -57,11 +58,15 @@ export component MainWindow inherits Window {
                     placeholder-text: "Поиск маршрутов...";
                     text <=> search-query;
                 }
-                Button {
-                    text: "⚙";
-                    min-width: 32px;
-                    clicked => { open-settings(); }
-                }
+                 Button {
+                     text: "⚙";
+                     min-width: 32px;
+                     clicked => { open-settings(); }
+                 }
+                 Button {
+                     text: "Аудит...";
+                     clicked => { open-folder-auditor(); }
+                 }
             }
             ListView {
                 vertical-stretch: 1;
@@ -1170,6 +1175,106 @@ export component SettingsWindow inherits Window {
     }
 }
 
+export component FolderAuditorWindow inherits Window {
+    title: "Аудит ресурсов папки";
+    min-width: 860px;
+    min-height: 560px;
+
+    in-out property <string> folder-path: "";
+    in-out property <string> active-filter: "all";
+    in-out property <int> selected-row: -1;
+    in-out property <int> sort-col: 0;
+    in-out property <bool> sort-ascending: true;
+    in property <float> audit-progress: 0.0;
+    in property <string> audit-status: "";
+    in property <[ [StandardListViewItem] ]> broken-rows;
+
+    callback pick-folder();
+    callback start-audit(string);
+    callback open-source-file(int);
+    callback open-missing-target-folder(int);
+    callback filter-changed(string);
+    callback sort-column(int);
+
+    VerticalBox {
+        HorizontalBox {
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> folder-path;
+                placeholder-text: "Папка для проверки...";
+            }
+            Button {
+                text: "Обзор...";
+                clicked => { root.pick-folder(); }
+            }
+            Button {
+                text: "Начать проверку";
+                clicked => { root.start-audit(root.folder-path); }
+            }
+        }
+        Rectangle {
+            height: 8px;
+            background: #333333;
+            Rectangle {
+                width: parent.width * audit-progress;
+                height: 100%;
+                background: #3b82f6;
+            }
+        }
+        Text { text: audit-status; }
+        HorizontalBox {
+            Rectangle { property <string> f: "all"; background: root.active-filter == f ? #059669 : #333333; border-radius: 4px; min-width: 70px; height: 28px;
+                TouchArea { clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
+                Text { text: "Все"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Rectangle { background: root.active-filter == "geometry" ? #059669 : #333333; border-radius: 4px; min-width: 90px; height: 28px;
+                TouchArea { clicked => { root.active-filter = "geometry"; root.filter-changed("geometry"); } }
+                Text { text: "Геометрия"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Rectangle { background: root.active-filter == "texture" ? #059669 : #333333; border-radius: 4px; min-width: 90px; height: 28px;
+                TouchArea { clicked => { root.active-filter = "texture"; root.filter-changed("texture"); } }
+                Text { text: "Текстуры"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Rectangle { background: root.active-filter == "script" ? #059669 : #333333; border-radius: 4px; min-width: 80px; height: 28px;
+                TouchArea { clicked => { root.active-filter = "script"; root.filter-changed("script"); } }
+                Text { text: "Скрипты"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Rectangle { background: root.active-filter == "sound" ? #059669 : #333333; border-radius: 4px; min-width: 70px; height: 28px;
+                TouchArea { clicked => { root.active-filter = "sound"; root.filter-changed("sound"); } }
+                Text { text: "Звуки"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Rectangle { background: root.active-filter == "child" ? #059669 : #333333; border-radius: 4px; min-width: 120px; height: 28px;
+                TouchArea { clicked => { root.active-filter = "child"; root.filter-changed("child"); } }
+                Text { text: "Дочерние объекты"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+        StandardTableView {
+            columns: [
+                { title: sort-col == 0 ? (sort-ascending ? "Тип ↑" : "Тип ↓") : "Тип", min-width: 120px },
+                { title: sort-col == 1 ? (sort-ascending ? "Отсутствующий файл ↑" : "Отсутствующий файл ↓") : "Отсутствующий файл", min-width: 300px, horizontal-stretch: 2 },
+                { title: sort-col == 2 ? (sort-ascending ? "Файл-источник ↑" : "Файл-источник ↓") : "Файл-источник", min-width: 300px, horizontal-stretch: 2 },
+            ];
+            rows: broken-rows;
+            current-row-changed(row) => {
+                root.selected-row = row;
+            }
+            sort-ascending(col) => { root.sort-column(col); }
+            sort-descending(col) => { root.sort-column(col); }
+        }
+        HorizontalBox {
+            Button {
+                text: "Открыть файл-источник";
+                enabled: root.selected-row >= 0;
+                clicked => { root.open-source-file(root.selected-row); }
+            }
+            Button {
+                text: "Открыть папку отсутствующего файла";
+                enabled: root.selected-row >= 0;
+                clicked => { root.open-missing-target-folder(root.selected-row); }
+            }
+        }
+    }
+}
 export component AssetEditorWindow inherits Window {
     title: "Редактор BIN/GeoPcDx";
     min-width: 900px;
