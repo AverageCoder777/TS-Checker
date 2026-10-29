@@ -76,16 +76,12 @@ fn tag_text(xml: &str, tag: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[allow(dead_code)]
 fn maybe_sound(raw: &str, fallback: AssetResourceKind) -> AssetResourceKind {
+    // Tag-based classification wins over path heuristics: only explicit
+    // sound-container extensions may promote a reference to Sound here.
     let lower = raw.to_lowercase();
-    if lower.contains("/audio/")
-        || lower.contains("\\audio\\")
-        || lower.contains("audio")
-        || lower.contains("sound")
-        || lower.contains(".proxybin")
-        || lower.contains(".proxyxml")
-        || lower.contains(".dav")
-    {
+    if lower.contains(".proxybin") || lower.contains(".proxyxml") || lower.contains(".dav") {
         AssetResourceKind::Sound
     } else {
         fallback
@@ -98,24 +94,65 @@ fn strip_tags(s: &str) -> String {
     re.replace_all(s, "").to_string()
 }
 
+fn is_numeric_token(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.parse::<f64>().is_ok()
+}
+
+fn is_blacklisted_sound_tag(tag: &str) -> bool {
+    let lower = tag.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "innervisualsoundradius"
+            | "outervisualsoundradius"
+            | "highestlevel_1ishighest"
+            | "lowestlevel_10islowest"
+            | "volume"
+            | "pitch"
+            | "mindistance"
+            | "maxdistance"
+            | "loop"
+            | "priority"
+    ) || lower.contains("editorrenderdata")
+}
 pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
     let mut out = Vec::new();
     for tag in ["GeometryID", "ShadowGeometryID"] {
         for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
             let raw = value.as_str().trim().to_string();
-            if !raw.is_empty() {
-                out.push((maybe_sound(&raw, AssetResourceKind::Geometry), raw));
+            if !raw.is_empty() && !is_numeric_token(&raw) {
+                out.push((AssetResourceKind::Geometry, raw));
             }
         }
     }
 
     // ВАЖНО: AnimationID — это лишь внутренний идентификатор (тег / алиас).
-    // Реальный путь к файлу анимации ВСЕГДА лежит ТОЛЬКО в AnimationName или AnimName!
-    for tag in ["AnimationName", "AnimName"] {
-        for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
-            let raw = value.as_str().trim().to_string();
-            if !raw.is_empty() {
-                out.push((maybe_sound(&raw, AssetResourceKind::Animation), raw));
+    // Реальный путь к файлу анимации ВСЕГДА лежит ТОЛЬКО в *AnimName!
+    // Tag-based classification: any tag ending in "AnimName" resolves to .ban.
+    {
+        static TAG_RE: OnceLock<Regex> = OnceLock::new();
+        let re = TAG_RE.get_or_init(|| Regex::new(r"(?is)<([A-Za-z0-9_]+)[^>]*>(.*?)</([A-Za-z0-9_]+)>").unwrap());
+        for cap in re.captures_iter(xml) {
+            let tag = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            let close = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+            if !tag.eq_ignore_ascii_case(close) {
+                continue;
+            }
+            if is_blacklisted_sound_tag(tag) {
+                continue;
+            }
+            if !tag.to_lowercase().ends_with("animname")
+                && !tag.to_lowercase().ends_with("animationname") {
+                continue;
+            }
+            let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            if inner.contains('<') {
+                continue;
+            }
+            let raw = strip_tags(inner).trim().to_string();
+            let clean = raw.lines().next().unwrap_or("").trim().to_string();
+            if !clean.is_empty() && !is_numeric_token(&clean) {
+                out.push((AssetResourceKind::Animation, clean));
             }
         }
     }
@@ -125,20 +162,44 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
         .filter_map(|c| c.get(1))
     {
         let raw = strip_tags(value.as_str()).trim().to_string();
-        if !raw.is_empty() {
-            out.push((maybe_sound(&raw, AssetResourceKind::Script), raw));
+        if !raw.is_empty() && !is_numeric_token(&raw) {
+            out.push((AssetResourceKind::Script, raw));
         }
     }
-    for tag in ["SoundName", "ProxyName", "SoundFile", "SampleName"] {
-        for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
-            let raw = strip_tags(value.as_str()).trim().to_string();
-            // Очищаем от случайных переводов строк и пробелов внутри строки
+
+    // Sound references: only from sound-related tags, never from path substrings.
+    {
+        static TAG_RE: OnceLock<Regex> = OnceLock::new();
+        let re = TAG_RE.get_or_init(|| Regex::new(r"(?is)<([A-Za-z0-9_]+)[^>]*>(.*?)</([A-Za-z0-9_]+)>").unwrap());
+        for cap in re.captures_iter(xml) {
+            let tag = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            let close = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+            if !tag.eq_ignore_ascii_case(close) {
+                continue;
+            }
+            if is_blacklisted_sound_tag(tag) {
+                continue;
+            }
+            let lower_tag = tag.to_lowercase();
+            let is_sound_tag = lower_tag.contains("sound")
+                || lower_tag.contains("audio")
+                || lower_tag.contains("proxy");
+            if !is_sound_tag {
+                continue;
+            }
+            let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            if inner.contains('<') {
+                continue;
+            }
+            let raw = strip_tags(inner).trim().to_string();
             let clean = raw.lines().next().unwrap_or("").trim().to_string();
-            if !clean.is_empty() {
+            if !clean.is_empty() && !is_numeric_token(&clean) {
                 out.push((AssetResourceKind::Sound, clean));
             }
         }
     }
+    // Preserve explicit handling for known sound tags already covered above.
+
     for block in regex_tag("iBlueprintLibrary-cAbsoluteBlueprintID")
         .captures_iter(xml)
         .filter_map(|c| c.get(1))
@@ -160,7 +221,9 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
             blueprint = format!("{}.bin", blueprint);
         }
         let raw = format!("{}\\{}\\{}", provider, product, blueprint);
-        out.push((maybe_sound(&raw, AssetResourceKind::ChildBlueprint), raw));
+        if !raw.is_empty() && !is_numeric_token(&blueprint) {
+            out.push((AssetResourceKind::ChildBlueprint, raw));
+        }
     }
     out
 }
@@ -724,7 +787,7 @@ mod tests {
 
     #[test]
     fn sound_classification() {
-        let xml = r#"<GeometryID>audio\horn.wav</GeometryID>"#;
+        let xml = r#"<SoundName>audio\horn.wav</SoundName>"#;
         let refs = extract_bin_references(xml);
         assert!(refs.iter().any(|(k, _)| *k == AssetResourceKind::Sound));
     }
