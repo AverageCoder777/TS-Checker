@@ -467,6 +467,14 @@ fn load_vehicle_preview_image(
 
 fn filter_items(items: &mut Vec<BrokenResourceRef>, filter: &str) {
     let f = filter.to_lowercase();
+    let f = match f.as_str() {
+        "geometry" => "геометрия".to_string(),
+        "texture" => "текстура".to_string(),
+        "script" => "скрипт".to_string(),
+        "sound" | "audio" => "звук".to_string(),
+        "child" | "children" => "дочер".to_string(),
+        other => other.to_string(),
+    };
     if f.is_empty() || f == "all" || f == "все" {
         return;
     }
