@@ -2248,10 +2248,19 @@ fn main() {
             .max(1);
         let serz_path = crate::preferred_serz_path(std::path::Path::new(&rw_path));
         let assets_root = path
-            .parent()
-            .and_then(|p| p.parent())
+            .ancestors()
+            .find(|p| {
+                p.file_name()
+                    .map(|name| name.to_string_lossy().eq_ignore_ascii_case("Assets"))
+                    .unwrap_or(false)
+            })
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| path.clone());
+            .unwrap_or_else(|| {
+                path.parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| path.clone())
+            });
         let ap_cache = ApArchiveCache::new();
         let path_for_thread = path.clone();
         let window_weak_thread = window_weak.clone();

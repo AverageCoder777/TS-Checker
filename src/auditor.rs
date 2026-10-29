@@ -65,7 +65,7 @@ impl ApArchiveCache {
 }
 
 fn regex_tag(tag: &str) -> Regex {
-    Regex::new(&format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>")).unwrap()
+    Regex::new(&format!(r"(?is)<{tag}(?:\s[^>]*)?>(.*?)</{tag}>")).unwrap()
 }
 
 fn tag_text(xml: &str, tag: &str) -> Option<String> {
@@ -230,29 +230,116 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
 
 pub fn strip_shader_prefix(raw: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\[\d{2,3}\]").unwrap());
-    re.replace_all(raw, "").to_string()
+    let re = RE.get_or_init(|| Regex::new(r"^\[[0-9a-zA-Z]+\]").unwrap());
+    if let Some(idx) = raw.rfind(['\\', '/']) {
+        let (head, tail) = raw.split_at(idx + 1);
+        format!("{}{}", head, re.replace(tail, ""))
+    } else {
+        re.replace(raw, "").to_string()
+    }
 }
 
-pub fn extract_geo_texture_references(xml: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for tag in ["TextureName", "TextureByName"] {
-        for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
-            let text = value.as_str();
-            for item in regex_tag("e").captures_iter(text).filter_map(|c| c.get(1)) {
-                let raw = item.as_str().trim().to_string();
-                if !raw.is_empty() {
-                    out.push(normalize_texture_reference(&raw));
-                }
+fn is_valid_texture_path(raw: &str) -> bool {
+    !raw.is_empty()
+        && !raw.contains('<')
+        && !raw.contains('>')
+        && !raw.contains('\n')
+        && !raw.contains('\r')
+        && !raw.contains('\t')
+}
+
+fn has_valid_texture_stem(raw: &str) -> bool {
+    let file = raw.rsplit(['\\', '/']).next().unwrap_or(raw);
+    let stripped = strip_shader_prefix(file);
+    let stem = stripped.trim();
+    let stem = match stem.rfind('.') {
+        Some(i) => &stem[..i],
+        None => stem,
+    };
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return false;
+    }
+    !stem
+        .chars()
+        .all(|c| c.is_whitespace() || c.is_ascii_digit() || c == '[' || c == ']')
+}
+
+fn material_has_valid_texture(inner: &str) -> bool {
+    for cap in regex_tag("TextureByName").captures_iter(inner) {
+        let block_inner = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        for ecap in regex_tag("e").captures_iter(block_inner) {
+            let raw = ecap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+                return true;
             }
-            if !text.contains("<e") {
-                let raw = text.trim().to_string();
-                if !raw.is_empty() {
-                    out.push(normalize_texture_reference(&raw));
-                }
+        }
+        let raw = block_inner.trim();
+        if !raw.contains('<') && is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+            return true;
+        }
+    }
+    for tag in ["TextureName", "Texture"] {
+        for cap in regex_tag(tag).captures_iter(inner) {
+            let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+                return true;
             }
         }
     }
+    false
+}
+
+fn filter_material_blocks(xml: &str) -> String {
+    let mut result = xml.to_string();
+    for tag in ["cHcExplicitStateMaterial", "cEffectMaterialDx"] {
+        let re = regex_tag(tag);
+        result = re
+            .replace_all(&result, |caps: &regex::Captures| {
+                let full = caps.get(0).map(|m| m.as_str()).unwrap_or("");
+                let inner = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                let shader = tag_text(inner, "ShaderName").unwrap_or_default();
+                if shader.eq_ignore_ascii_case("Invisible") {
+                    return String::new();
+                }
+                let visible = tag_text(inner, "Visible").unwrap_or_default();
+                let visible_false = visible.eq_ignore_ascii_case("0")
+                    || visible.eq_ignore_ascii_case("false");
+                if visible_false && !material_has_valid_texture(inner) {
+                    return String::new();
+                }
+                full.to_string()
+            })
+            .to_string();
+    }
+    result
+}
+
+pub fn extract_geo_texture_references(xml: &str) -> Vec<String> {
+    let filtered = filter_material_blocks(xml);
+    let mut out = Vec::new();
+
+    for cap in regex_tag("TextureByName").captures_iter(&filtered) {
+        let inner = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        for ecap in regex_tag("e").captures_iter(inner) {
+            let raw = ecap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+                out.push(normalize_texture_reference(raw));
+            }
+        }
+    }
+
+    for tag in ["TextureName", "Texture"] {
+        for cap in regex_tag(tag).captures_iter(&filtered) {
+            let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+                out.push(normalize_texture_reference(raw));
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
     out
 }
 
@@ -478,19 +565,41 @@ fn candidate_paths(
     }
     let norm = strip_shader_prefix(&norm).replace('/', "\\");
     let rels = candidate_relatives(&norm, kind);
-    let is_global = is_global_asset_ref(&norm, kind, assets_root);
 
     let mut cands = Vec::new();
-    if is_global {
+    if kind == AssetResourceKind::Texture {
         for rel in &rels {
-            cands.push(normalize_path(&assets_root.join(rel)));
+            let rel_norm = rel.replace('/', "\\");
+            cands.push(normalize_path(&parent.join(&rel_norm)));
+            cands.push(normalize_path(&product_root.join(&rel_norm)));
         }
     } else {
         for rel in &rels {
-            // 1. Ищем относительно папки текущего файла (с нормализацией ..)
-            cands.push(normalize_path(&parent.join(rel)));
-            // 2. Ищем относительно корня продукта
-            cands.push(normalize_path(&product_root.join(rel)));
+            let rel_norm = rel.replace('/', "\\");
+            let is_relative = rel_norm.starts_with(".\\")
+                || rel_norm.starts_with("..\\")
+                || rel_norm.starts_with("./")
+                || rel_norm.starts_with("../");
+            let first_component = rel_norm
+                .split(['\\', '/'])
+                .find(|s| !s.is_empty())
+                .unwrap_or("");
+            let provider_under_assets = !first_component.is_empty()
+                && !first_component.starts_with('.')
+                && assets_root.join(first_component).is_dir();
+            let assets_candidate_exists = assets_root.join(&rel_norm).exists();
+
+            if is_relative {
+                cands.push(normalize_path(&parent.join(&rel_norm)));
+            } else if provider_under_assets || assets_candidate_exists {
+                // Assets-root relative reference: resolve strictly under Assets root.
+                cands.push(normalize_path(&assets_root.join(&rel_norm)));
+            } else {
+                // Fallback: try Assets root, then source folder, then product root.
+                cands.push(normalize_path(&assets_root.join(&rel_norm)));
+                cands.push(normalize_path(&parent.join(&rel_norm)));
+                cands.push(normalize_path(&product_root.join(&rel_norm)));
+            }
         }
     }
 
@@ -499,8 +608,56 @@ fn candidate_paths(
     cands
 }
 
+fn loose_path_exists(path: &Path) -> bool {
+    if path.is_file() {
+        return true;
+    }
+    // Slot prefixes like [0d] may differ between reference and disk; scan the
+    // same directory for a file whose prefix-stripped name matches.
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    let target = strip_shader_prefix(&name.to_string_lossy()).to_lowercase();
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if !entry_path.is_file() {
+                continue;
+            }
+            let entry_name = entry.file_name();
+            if strip_shader_prefix(&entry_name.to_string_lossy())
+                .to_lowercase()
+                .eq_ignore_ascii_case(&target)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn loose_exists(candidates: &[PathBuf]) -> bool {
-    candidates.iter().any(|p| p.is_file())
+    candidates.iter().any(|p| loose_path_exists(p))
+}
+
+fn ap_member_matches(product_dir: &Path, relative: &str, ap_cache: &ApArchiveCache) -> bool {
+    let target = strip_shader_prefix(&relative.replace('\\', "/")).to_lowercase();
+    let target = target.trim_start_matches('/').to_string();
+    if let Ok(guard) = ap_cache.inner.lock() {
+        for (key, set) in guard.iter() {
+            if !key.to_string_lossy().eq_ignore_ascii_case(&product_dir.to_string_lossy()) {
+                continue;
+            }
+            for member in set {
+                let member_stripped = strip_shader_prefix(member).to_lowercase();
+                let member_stripped = member_stripped.trim_start_matches('/').to_string();
+                if member_stripped == target {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn ap_exists(
@@ -516,7 +673,16 @@ fn ap_exists(
         norm = norm["assets/".len()..].to_string();
     }
     let norm = strip_shader_prefix(&norm).replace('/', "\\");
-    let is_global = is_global_asset_ref(&norm, kind, assets_root);
+    let mut is_global = is_global_asset_ref(&norm, kind, assets_root);
+    if kind != AssetResourceKind::Texture {
+        let first = norm
+            .split(['\\', '/'])
+            .find(|s| !s.is_empty())
+            .unwrap_or("");
+        if !is_global && !first.is_empty() && !first.starts_with('.') && assets_root.join(first).is_dir() {
+            is_global = true;
+        }
+    }
 
     for rel in candidate_relatives(&norm, kind) {
         let cleaned = rel.replace('/', "\\");
@@ -526,22 +692,20 @@ fn ap_exists(
             if parts.len() >= 3 {
                 let product_dir = assets_root.join(parts[0]).join(parts[1]);
                 let inner = parts[2..].join("/");
-                if ap_cache.lookup(&product_dir, &inner) {
+                if ap_cache.lookup(&product_dir, &inner) || ap_member_matches(&product_dir, &inner, ap_cache) {
                     return true;
                 }
             }
         } else {
-            // Нормализуем путь относительно parent и смотрим, попадает ли он в product_root
             let target_loose = normalize_path(&parent.join(&cleaned));
             if let Ok(rel_from_prod) = target_loose.strip_prefix(product_root) {
                 let inner = rel_from_prod.to_string_lossy().replace('\\', "/");
-                if ap_cache.lookup(product_root, &inner) {
+                if ap_cache.lookup(product_root, &inner) || ap_member_matches(product_root, &inner, ap_cache) {
                     return true;
                 }
             }
-            // Также проверяем напрямую от product_root
             let inner_direct = cleaned.trim_start_matches(".\\").replace('\\', "/");
-            if ap_cache.lookup(product_root, &inner_direct) {
+            if ap_cache.lookup(product_root, &inner_direct) || ap_member_matches(product_root, &inner_direct, ap_cache) {
                 return true;
             }
         }
@@ -793,9 +957,67 @@ mod tests {
     }
 
     #[test]
-    fn extracts_geo_textures() {
+    fn extracts_geo_textures_strict() {
         let xml = r#"
-            <TextureName>textures\[00]wall</TextureName>
+            <cHcExplicitStateMaterial>
+                0.000000 0.000000
+                <EmissiveAsVec>1 2 3</EmissiveAsVec>
+                textures\[0d]farn.TgPcDx
+            </cHcExplicitStateMaterial>
+            <TextureByName>
+                <e d:type="cDeltaString">textures\[0d]farn.TgPcDx</e>
+            </TextureByName>
+            <TextureName>..\textures\[0d]vr_eiche.TgPcDx</TextureName>
+            <Texture>foo</Texture>
+        "#;
+        let refs = extract_geo_texture_references(xml);
+        assert_eq!(
+            refs,
+            vec![
+                r"textures\farn.TgPcDx".to_string(),
+                r"..\textures\vr_eiche.TgPcDx".to_string(),
+                r"foo.TgPcDx".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_provider_geometry_without_duplication() {
+        let temp = std::env::temp_dir().join("tsc_audit_test");
+        let assets = temp.join("Assets");
+        let provider = assets.join("RWAustria_2");
+        let source_dir = assets
+            .join("RWAustria_2")
+            .join("Austria_RailVehicles")
+            .join("Electric")
+            .join("GYSEV_470")
+            .join("GYSEV_470_501");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&provider).unwrap();
+        let raw = r"RWAustria_2\Austria_RailVehicles\Electric\GYSEV_470\GYSEV_470_501\[00]1116_Bleich";
+        let cands = candidate_paths(raw, &source_dir, &assets.join("RWAustria_2").join("Austria_RailVehicles"), &assets, AssetResourceKind::Geometry);
+        let expected = assets.join(r"RWAustria_2\Austria_RailVehicles\Electric\GYSEV_470\GYSEV_470_501\1116_Bleich.GeoPcDx");
+        assert_eq!(cands.first().unwrap(), &normalize_path(&expected));
+        // ensure no duplicated source_dir prefix
+        for c in &cands {
+            assert!(!c.to_string_lossy().contains("GYSEV_470_501\\RWAustria_2"));
+         }
+    }
+
+    #[test]
+    fn filters_invisible_and_bare_slots() {
+        let xml = r#"
+            <cHcExplicitStateMaterial>
+                <ShaderName d:type="cDeltaString">Invisible</ShaderName>
+                <TextureByName>
+                    <e d:type="cDeltaString">[00]</e>
+                </TextureByName>
+                <Visible d:type="bool">0</Visible>
+            </cHcExplicitStateMaterial>
+            <TextureByName>
+                <e d:type="cDeltaString">textures\[00]wall</e>
+                <e d:type="cDeltaString">[00]</e>
+            </TextureByName>
         "#;
         let refs = extract_geo_texture_references(xml);
         assert_eq!(refs, vec![r"textures\wall.TgPcDx".to_string()]);
