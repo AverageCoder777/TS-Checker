@@ -213,7 +213,6 @@ pub(crate) struct ScenarioVehicle {
 }
 
 /// Читает сценарии маршрута: папки в Scenarios и их файлы.
-#[allow(dead_code)]
 pub(crate) fn read_route_scenarios(route_path: &Path, serz_path: &Path) -> Vec<RouteScenario> {
     use rayon::prelude::*;
     let scenarios_path = route_path.join("Scenarios");

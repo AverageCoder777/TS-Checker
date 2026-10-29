@@ -137,41 +137,6 @@ pub fn launch_editor(xml_path: &Path, wait: bool) -> Result<std::process::Child,
     }
 }
 
-pub fn find_serz_path(target: &Path) -> Option<PathBuf> {
-    for ancestor in target.ancestors() {
-        if ancestor
-            .file_name()
-            .map(|n| n.eq_ignore_ascii_case("Assets"))
-            .unwrap_or(false)
-        {
-            if let Some(root) = ancestor.parent() {
-                for name in ["serz64.exe", "serz.exe"] {
-                    let p = root.join(name);
-                    if p.is_file() {
-                        return Some(p);
-                    }
-                }
-            }
-        }
-    }
-    for start in [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(|x| x.to_path_buf()))] {
-        if let Some(mut dir) = start {
-            loop {
-                for name in ["serz64.exe", "serz.exe"] {
-                    let p = dir.join(name);
-                    if p.is_file() {
-                        return Some(p);
-                    }
-                }
-                if !dir.pop() {
-                    break;
-                }
-            }
-        }
-    }
-    None
-}
-
 pub fn create_backup_file(target_bin: &Path) -> Result<Option<PathBuf>, String> {
     if !target_bin.exists() {
         return Ok(None);
@@ -217,7 +182,7 @@ pub fn show_native_error(title: &str, message: &str) {
     }
 }
 pub fn run_headless(target: &Path) -> Result<(), String> {
-    let serz_path = match find_serz_path(target) {
+    let serz_path = match crate::assets::find_serz_path(target) {
         Some(p) => p,
         None => {
             let err = "serz.exe не найден".to_string();

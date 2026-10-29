@@ -241,6 +241,41 @@ pub(crate) fn fallback_serz_path(serz_path: &Path) -> Option<PathBuf> {
     fallback.is_file().then_some(fallback)
 }
 
+pub(crate) fn find_serz_path(target: &Path) -> Option<PathBuf> {
+    for ancestor in target.ancestors() {
+        if ancestor
+            .file_name()
+            .map(|n| n.eq_ignore_ascii_case("Assets"))
+            .unwrap_or(false)
+        {
+            if let Some(root) = ancestor.parent() {
+                for name in ["serz64.exe", "serz.exe"] {
+                    let p = root.join(name);
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    for start in [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(|x| x.to_path_buf()))] {
+        if let Some(mut dir) = start {
+            loop {
+                for name in ["serz64.exe", "serz.exe"] {
+                    let p = dir.join(name);
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
 struct FileAnalysis {
     /// Разбор взят из кэша: файл не менялся с прошлой проверки.
     from_cache: bool,
@@ -2354,9 +2389,6 @@ pub(crate) fn repair_umlaut_asset_chain(
                 renamed_tg_files
                     .insert(canonical_dependency.clone(), translated_dependency.clone());
             }
-            if transliterate_umlauts(&reference_text) != reference_text
-                && translated_dependency == canonical_dependency
-            {}
             if translated_dependency != canonical_dependency {
                 let replacement = translated_reference(
                     &translated_dependency,
@@ -2417,7 +2449,6 @@ pub(crate) fn repair_umlaut_asset_chain(
             let mut protected_references: Vec<std::ops::Range<usize>> = Vec::new();
             for (reference, range) in referenced_geometry_paths(&xml) {
                 let reference_text = reference.to_text();
-                if transliterate_umlauts(&reference_text) != reference_text {}
                 let Some((dependency, _)) =
                     resolve_product_reference(&assets_root, &product_root, &canonical, &reference)
                 else {

@@ -273,10 +273,6 @@ pub(crate) const MAX_REFERENCE_VARIANTS: usize = 2;
 /// Имя элемента, без которого в файле нет ни одной ссылки на ассет.
 pub(crate) const BLUEPRINT_ID_MARKER: &str = "BlueprintID";
 
-pub(crate) fn transliterate_umlauts(value: &str) -> String {
-    transliterate_text(value, &CharacterFixes::new())
-}
-
 /// Есть ли в строке символы, которые нужно перевести на английский.
 ///
 /// Это немецкие умляуты, французские буквы и прочие буквы с диакритикой, а

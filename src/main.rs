@@ -2049,7 +2049,7 @@ fn main() {
                 .join("Assets")
                 .join(path_text.replace('/', "\\"));
             if full.is_file() {
-                let serz_path = crate::external_editor::find_serz_path(&full)
+                let serz_path = crate::assets::find_serz_path(&full)
                     .unwrap_or_else(|| std::path::PathBuf::from("serz64.exe"));
                 let app_for_status = app_clone14.clone();
                 let _ = crate::external_editor::open_and_sync_with_vscode(
@@ -2460,7 +2460,7 @@ fn main() {
             return;
         };
     let rw_path = app_clone_edit.lock().map(|a| a.rw_path.clone()).unwrap_or_default();
-    let serz_path = crate::external_editor::find_serz_path(&asset_path)
+    let serz_path = crate::assets::find_serz_path(&asset_path)
         .or_else(|| {
             let p = crate::preferred_serz_path(std::path::Path::new(&rw_path));
             if p.is_file() {
