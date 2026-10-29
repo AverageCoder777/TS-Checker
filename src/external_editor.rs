@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,8 +50,9 @@ pub fn open_and_sync_with_vscode(
     let serz = serz_path.to_path_buf();
     let xml_path = temp_xml_path.clone();
     let cb = std::sync::Arc::new(status_callback);
+    let was_modified = Arc::new(AtomicBool::new(false));
     thread::spawn(move || {
-        run_watcher(&xml_path, &binary_path, &serz, cb);
+        run_watcher(&xml_path, &binary_path, &serz, cb, was_modified);
     });
 
     Ok(())
@@ -215,6 +218,7 @@ pub fn run_headless(target: &Path) -> Result<(), String> {
         show_native_error("Ошибка", &e);
         e
     })?;
+    let initial_xml = xml.clone();
     fs::write(&temp_xml_path, &xml).map_err(|e| {
         let err = format!("Не удалось записать {}: {e}", temp_xml_path.display());
         show_native_error("Ошибка", &err);
@@ -225,6 +229,8 @@ pub fn run_headless(target: &Path) -> Result<(), String> {
     let xml_w = temp_xml_path.clone();
     let bin_w = target.to_path_buf();
     let serz_w = serz_path.clone();
+    let was_modified = Arc::new(AtomicBool::new(false));
+    let was_modified_w = was_modified.clone();
     thread::spawn(move || {
         run_watcher(
             &xml_w,
@@ -234,6 +240,7 @@ pub fn run_headless(target: &Path) -> Result<(), String> {
                 Ok(s) => println!("{}", s),
                 Err(e) => eprintln!("{}", e),
             }),
+            was_modified_w,
         );
     });
 
@@ -248,12 +255,14 @@ pub fn run_headless(target: &Path) -> Result<(), String> {
     })?;
 
     // final compile
-    let final_xml = fs::read_to_string(&temp_xml_path).map_err(|e| {
-        let err = format!("Не удалось прочитать XML: {e}");
-        show_native_error("Ошибка", &err);
-        err
-    })?;
-    let _ = final_xml;
+    let final_xml = fs::read_to_string(&temp_xml_path).unwrap_or_default();
+    let has_changes = was_modified.load(Ordering::SeqCst) || (final_xml != initial_xml);
+    if !has_changes {
+        println!("[Headless] Файл закрыт без изменений. Компиляция пропущена.");
+        let _ = fs::remove_file(&temp_xml_path);
+        return Ok(());
+    }
+
     let conv = crate::assets::convert_xml_to_bin(&serz_path, &temp_xml_path, target).or_else(|err| {
         if let Some(fallback) = crate::assets::fallback_serz_path(&serz_path) {
             crate::assets::convert_xml_to_bin(&fallback, &temp_xml_path, target).map_err(|e| format!("{err}; {e}"))
@@ -275,6 +284,7 @@ fn run_watcher(
     binary_path: &Path,
     serz_path: &Path,
     cb: std::sync::Arc<dyn Fn(Result<String, String>) + Send + Sync>,
+    was_modified: Arc<AtomicBool>,
 ) {
     use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -358,6 +368,8 @@ fn run_watcher(
                 }
                 let Some(xml) = xml_data else { continue; };
                 let _ = xml;
+
+                was_modified.store(true, Ordering::SeqCst);
 
                 // rely on serz.exe for validation
                 if !backup_created {

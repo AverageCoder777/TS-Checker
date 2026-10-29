@@ -2930,16 +2930,22 @@ fn has_complete_xml_tail(xml_path: &Path) -> Result<bool, String> {
 pub(crate) fn convert_xml_to_bin(
     serz_path: &Path,
     xml_path: &Path,
-    bin_path: &Path,
+    target_asset_path: &Path,
 ) -> Result<(), String> {
+    let staging_output = xml_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("staging_output.bin");
+    let _ = fs::remove_file(&staging_output);
+
     let mut args = vec![legacy_windows_path(xml_path).display().to_string()];
     args.push(format!(
         "/bin:{}",
-        legacy_windows_path(bin_path).display()
+        legacy_windows_path(&staging_output).display()
     ));
     println!(
-        "[Serz Exec] Serz: {:?}, XML: {:?}, Target BIN: {:?}",
-        serz_path, xml_path, bin_path
+        "[Serz Exec] Serz: {:?}, XML: {:?}, Staging BIN: {:?}, Target: {:?}",
+        serz_path, xml_path, staging_output, target_asset_path
     );
     let output = serz_output(serz_path, &args)?;
 
@@ -2947,19 +2953,34 @@ pub(crate) fn convert_xml_to_bin(
     let stderr = String::from_utf8_lossy(&output.stderr);
     println!("[Serz Output] stdout: {}, stderr: {}", stdout, stderr);
     validate_serz_process(output.status.success(), &stdout, &stderr)
-        .map_err(|error| format!("{error} (код выхода {})", output.status))?;
-    let metadata = fs::metadata(bin_path).map_err(|error| {
+        .map_err(|error| {
+            let _ = fs::remove_file(&staging_output);
+            format!("{error} (код выхода {})", output.status)
+        })?;
+
+    let metadata = fs::metadata(&staging_output).map_err(|error| {
+        let _ = fs::remove_file(&staging_output);
         format!(
             "Serz завершился успешно, но выходной бинарный файл {} недоступен: {error}",
-            bin_path.display()
+            staging_output.display()
         )
     })?;
     if !metadata.is_file() || metadata.len() == 0 {
+        let _ = fs::remove_file(&staging_output);
         return Err(format!(
-            "Serz завершился успешно, но не создал непустой бинарный файл: {}",
-            bin_path.display()
+            "Serz не сгенерировал данные или вернул пустой файл: {}",
+            staging_output.display()
         ));
     }
+
+    fs::copy(&staging_output, target_asset_path).map_err(|error| {
+        let _ = fs::remove_file(&staging_output);
+        format!(
+            "Не удалось скопировать скомпилированный BIN в {}: {error}",
+            target_asset_path.display()
+        )
+    })?;
+    let _ = fs::remove_file(&staging_output);
     Ok(())
 }
 
