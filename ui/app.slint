@@ -1195,6 +1195,7 @@ export component FolderAuditorWindow inherits Window {
     callback open-source-file(int);
     callback open-missing-target-folder(int);
     callback edit-in-vscode(int);
+    callback preview-texture(int);
     callback filter-changed(string);
     callback sort-column(int);
 
@@ -1279,8 +1280,58 @@ export component FolderAuditorWindow inherits Window {
                 enabled: root.selected-row >= 0;
                 clicked => { root.edit-in-vscode(root.selected-row); }
             }
+            Button {
+                text: "Просмотр текстуры";
+                enabled: root.selected-row >= 0;
+                clicked => { root.preview-texture(root.selected-row); }
+            }
         }
         Text { text: root.editor-status; color: #a1a1aa; font-size: 12px; }
     }
 }
 
+
+export component TextureViewerWindow inherits Window {
+    title: "Просмотр текстуры";
+    min-width: 640px;
+    min-height: 480px;
+
+    in property <image> texture-image;
+    in property <string> info-text: "";
+    in-out property <float> zoom: 1.0;
+    in-out property <bool> show-alpha: true;
+
+    callback export-dds();
+    callback replace-from-dds();
+    callback toggle-alpha();
+
+    VerticalBox {
+        Text { text: info-text; }
+        HorizontalBox {
+            Button { text: "1x"; clicked => { zoom = 1.0; } }
+            Button { text: "2x"; clicked => { zoom = 2.0; } }
+            Button { text: "Fit"; clicked => { zoom = 1.0; } }
+            Button { text: show-alpha ? "Скрыть альфа" : "Показать альфа"; clicked => { show-alpha = !show-alpha; toggle-alpha(); } }
+            Button { text: "Экспорт в DDS"; clicked => { export-dds(); } }
+            Button { text: "Заменить из DDS"; clicked => { replace-from-dds(); } }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            horizontal-stretch: 1;
+            background: #1a1a1a;
+            clip: true;
+            Flickable {
+                width: 100%;
+                height: 100%;
+                content-width: texture-image.width * zoom * 1px;
+                content-height: texture-image.height * zoom * 1px;
+                Image {
+                    source: texture-image;
+                    width: texture-image.width * zoom * 1px;
+                    height: texture-image.height * zoom * 1px;
+                    image-fit: contain;
+                }
+            }
+        }
+    }
+}

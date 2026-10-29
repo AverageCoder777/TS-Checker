@@ -341,6 +341,7 @@ mod routes;
 mod scenario;
 mod settings;
 mod translit;
+mod texture;
 mod windows;
 
 pub(crate) use assets::*;
@@ -623,11 +624,64 @@ fn main() {
             println!();
             println!("[HKEY_CLASSES_ROOT\\.GeoPcDx\\shell\\Open with TS-Checker\\command]");
             println!("@=\"\\\"{}\\\" \\\"%1\\\"\"", exe.display());
+            println!();
+            println!("[HKEY_CLASSES_ROOT\\.TgPcDx\\shell\\Open with TS-Checker\\command]");
+            println!("@=\"\\\"{}\\\" \\\"%1\\\"\"", exe.display());
         }
         std::process::exit(0);
     }
     if let Some(target) = cli_args.get(1) {
         let path = std::path::PathBuf::from(target);
+        // view-texture CLI
+        if target.eq_ignore_ascii_case("view-texture") {
+            if let Some(p) = cli_args.get(2) {
+                let path = std::path::PathBuf::from(p);
+                if path.is_file() {
+                    match std::fs::read(&path) {
+                        Ok(data) => match crate::texture::decode_tgpcdx_to_rgba(&data) {
+                            Ok((w, h, rgba)) => {
+                                let viewer = TextureViewerWindow::new().unwrap();
+                                viewer.set_texture_image(crate::texture::rgba_to_slint_image(w, h, &rgba));
+                                viewer.set_info_text(format!("{} x {} px  {}", w, h, path.display()).into());
+                                let _ = viewer.run();
+                                std::process::exit(0);
+                            }
+                            Err(e) => {
+                                crate::external_editor::show_native_error("Ошибка", &e);
+                                std::process::exit(1);
+                            }
+                        },
+                        Err(e) => {
+                            crate::external_editor::show_native_error("Ошибка", &e.to_string());
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        // File association: open .TgPcDx directly in texture viewer
+        if path.is_file() && path.extension().map(|e| e.eq_ignore_ascii_case("tgpcdx")).unwrap_or(false) {
+            match std::fs::read(&path) {
+                Ok(data) => match crate::texture::decode_tgpcdx_to_rgba(&data) {
+                    Ok((w, h, rgba)) => {
+                        let viewer = TextureViewerWindow::new().unwrap();
+                        viewer.set_texture_image(crate::texture::rgba_to_slint_image(w, h, &rgba));
+                        viewer.set_info_text(format!("{} x {} px  {}", w, h, path.display()).into());
+                        let _ = viewer.run();
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        crate::external_editor::show_native_error("Ошибка", &e);
+                        std::process::exit(1);
+                    }
+                },
+                Err(e) => {
+                    crate::external_editor::show_native_error("Ошибка", &e.to_string());
+                    std::process::exit(1);
+                }
+            }
+        }
+
         let is_asset = path.is_file()
             && path
                 .extension()
@@ -2514,6 +2568,101 @@ fn main() {
         });
     });
 
+    // Texture viewer integration
+    let current_display_for_preview = current_display_items.clone();
+    let viewer_win = TextureViewerWindow::new().unwrap();
+    let viewer_weak = viewer_win.as_weak();
+    let tex_state: std::sync::Arc<std::sync::Mutex<Option<(u32,u32,Vec<u8>,std::path::PathBuf)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let tex_state_for_preview = tex_state.clone();
+    let tex_state_for_toggle = tex_state.clone();
+    let tex_state_for_export = tex_state.clone();
+    let tex_state_for_replace = tex_state.clone();
+    auditor_win.on_preview_texture(move |row| {
+        let items = current_display_for_preview.lock().map(|g| g.clone()).unwrap_or_default();
+        if row < 0 || row as usize >= items.len() { return; }
+        let item = &items[row as usize];
+        let path = if item.expected_path.extension().map(|e| e.eq_ignore_ascii_case("tgpcdx")).unwrap_or(false) {
+            item.expected_path.clone()
+        } else if item.parent_file.extension().map(|e| e.eq_ignore_ascii_case("tgpcdx")).unwrap_or(false) {
+            item.parent_file.clone()
+        } else {
+            return;
+        };
+        if !path.is_file() { return; }
+        let tex_state = tex_state_for_preview.clone();
+        let viewer_weak = viewer_weak.clone();
+        std::thread::spawn(move || {
+            if let Ok(data) = std::fs::read(&path) {
+                    if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
+                        if let Ok(mut st) = tex_state.lock() { *st = Some((w, h, rgba.clone(), path.clone())); }
+                        let info = format!("{} x {} px  {}", w, h, path.display());
+                        let vw = viewer_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(v) = vw.upgrade() {
+                                let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
+                                v.set_texture_image(img);
+                                v.set_info_text(info.into());
+                                let _ = v.show();
+                            }
+                        });
+                    }
+            }
+        });
+    });
+
+    let viewer_weak_toggle = viewer_win.as_weak();
+    viewer_win.on_toggle_alpha(move || {
+        let st = tex_state_for_toggle.lock().map(|g| g.clone()).unwrap_or(None);
+        if let Some((w, h, rgba, _)) = st {
+            let show = viewer_weak_toggle.upgrade().map(|v| v.get_show_alpha()).unwrap_or(true);
+            let mut data = rgba.clone();
+            if !show {
+                for i in (3..data.len()).step_by(4) { data[i] = 255; }
+            }
+            let img = crate::texture::rgba_to_slint_image(w, h, &data);
+            if let Some(v) = viewer_weak_toggle.upgrade() {
+                v.set_texture_image(img);
+            }
+        }
+    });
+
+    let viewer_weak_export = viewer_win.as_weak();
+    viewer_win.on_export_dds(move || {
+        let st = tex_state_for_export.lock().map(|g| g.clone()).unwrap_or(None);
+        if let Some((_, _, _, path)) = st {
+            let out = rfd::FileDialog::new().add_filter("DDS", &["dds"]).save_file();
+            if let Some(out) = out {
+                let _ = crate::texture::export_tgpcdx_to_dds(&path, &out);
+            }
+        }
+        let _ = viewer_weak_export;
+    });
+
+    let viewer_weak_replace = viewer_win.as_weak();
+    viewer_win.on_replace_from_dds(move || {
+        let st = tex_state_for_replace.lock().map(|g| g.clone()).unwrap_or(None);
+        if let Some((_, _, _, path)) = st {
+            let input = rfd::FileDialog::new().add_filter("DDS", &["dds"]).pick_file();
+            if let Some(input) = input {
+                let _ = crate::texture::convert_dds_to_tgpcdx(&input, &path);
+                if let Ok(data) = std::fs::read(&path) {
+                          if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
+                              if let Ok(mut s) = tex_state_for_replace.lock() { *s = Some((w, h, rgba.clone(), path.clone())); }
+                              let info = format!("{} x {} px  {}", w, h, path.display());
+                              let vw = viewer_weak_replace.clone();
+                              let _ = slint::invoke_from_event_loop(move || {
+                                  if let Some(v) = vw.upgrade() {
+                                      let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
+                                      v.set_texture_image(img);
+                                      v.set_info_text(info.into());
+                                  }
+                              });
+                          }
+                }
+            }
+        }
+    });
     ui.run().unwrap();
 }
 

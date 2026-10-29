@@ -15,6 +15,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slint = "1.18.1"
 xml = "1.4"
+ddsfile = "0.6"
+texture2ddecoder = "0.1.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+bytemuck = { version = "1.25", features = ["derive"] }
 notify = "8.2.1"
 open = "5.4.4"
 encoding_rs = "0.8"
