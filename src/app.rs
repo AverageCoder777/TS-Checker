@@ -26,8 +26,6 @@ pub(crate) struct AssetInventoryWindowState {
     pub(crate) sort: InventorySort,
 }
 
-type SavedAsset = (PathBuf, String, Option<PathBuf>);
-
 type InventoryScanOutcome = (Vec<UmlautAsset>, Vec<String>);
 
 pub(crate) struct CheckerApp {
@@ -58,11 +56,6 @@ pub(crate) struct CheckerApp {
     pub(crate) asset_replacement: Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
     pub(crate) asset_replacement_queue: Vec<(MissingAsset, PathBuf, String)>,
     asset_replacement_feedback: Option<Result<String, String>>,
-    pub(crate) asset_viewer_open: bool,
-    pub(crate) asset_viewer_document: Option<EditorDocument>,
-    pub(crate) editor_sync_pending: bool,
-    pub(crate) asset_viewer_load: Option<Receiver<Result<EditorDocument, String>>>,
-    pub(crate) asset_viewer_save: Option<Receiver<Result<SavedAsset, String>>>,
     pub(crate) route_thumbnails_enabled: bool,
     pub(crate) serz_process_limit: usize,
     pub(crate) route_scan_on_hdd: bool,
@@ -152,11 +145,6 @@ impl Default for CheckerApp {
             asset_replacement: None,
             asset_replacement_queue: Vec::new(),
             asset_replacement_feedback: None,
-            asset_viewer_open: false,
-            asset_viewer_document: None,
-            editor_sync_pending: false,
-            asset_viewer_load: None,
-            asset_viewer_save: None,
             route_thumbnails_enabled,
             serz_process_limit,
             route_scan_on_hdd,
@@ -322,63 +310,6 @@ impl CheckerApp {
         if let Some((missing, replacement, replacement_relative)) = self.asset_replacement_queue.pop() {
             self.start_asset_replacement(missing, replacement, false, replacement_relative, std::collections::BTreeMap::new());
         }
-    }
-
-    pub(crate) fn asset_only(path: PathBuf) -> Self {
-        let mut app = Self { ..Self::default() };
-        app.start_asset_view(path);
-        app
-    }
-
-    pub(crate) fn asset_only_error(error: String) -> Self {
-        Self {
-            asset_viewer_open: true,
-            status: error,
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn start_asset_view(&mut self, path: PathBuf) {
-        let serz_path = preferred_serz_path(Path::new(self.rw_path.trim()));
-        let source_path = path.clone();
-        let (tx, rx) = mpsc::channel();
-        self.asset_viewer_load = Some(rx);
-        self.asset_viewer_open = true;
-        self.asset_viewer_document = None;
-        self.status = format!("Конвертация для редактирования: {}...", path.display());
-        thread::spawn(move || {
-            let result = load_asset_as_xml(&serz_path, &source_path);
-            let _ = tx.send(result);
-        });
-    }
-
-    pub(crate) fn start_asset_save(&mut self) {
-        let Some(document) = self.asset_viewer_document.as_mut() else {
-            return;
-        };
-        if !document.is_dirty() || self.asset_viewer_save.is_some() {
-            return;
-        }
-        if !document.validate_xml() {
-            self.status = document
-                .xml_validation
-                .as_ref()
-                .and_then(|result| result.as_ref().err())
-                .cloned()
-                .unwrap_or_else(|| "XML не прошёл проверку.".to_owned());
-            return;
-        }
-        let source_path = document.source_path.clone();
-        let source_xml = document.xml.clone();
-        let serz_path = preferred_serz_path(Path::new(self.rw_path.trim()));
-        let (tx, rx) = mpsc::channel();
-        self.asset_viewer_save = Some(rx);
-        self.status = format!("Сохранение {}...", source_path.display());
-        thread::spawn(move || {
-            let result = save_asset_xml(&serz_path, &source_path, &source_xml)
-                .map(|backup| (source_path, source_xml, backup));
-            let _ = tx.send(result);
-        });
     }
 
     pub(crate) fn start_route_scan(&mut self) {
@@ -569,95 +500,6 @@ impl CheckerApp {
                     }
                     self.status = error;
                 }
-            }
-        }
-
-        let asset_view_result =
-            self.asset_viewer_load
-                .as_ref()
-                .and_then(|rx| match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(TryRecvError::Disconnected) => Some(Err(
-                        "Не удалось получить результат конвертации файла для просмотра.".to_owned(),
-                    )),
-                    Err(TryRecvError::Empty) => None,
-                });
-        if let Some(result) = asset_view_result {
-            self.asset_viewer_load = None;
-            match result {
-                Ok(document) => {
-                    self.status = format!("Открыт для редактирования: {}", document.source);
-                    self.asset_viewer_document = Some(document);
-                    self.editor_sync_pending = true;
-                }
-                Err(error) => self.status = error,
-            }
-        }
-
-        let asset_save_result =
-            self.asset_viewer_save
-                .as_ref()
-                .and_then(|rx| match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(TryRecvError::Disconnected) => Some(Err(
-                        "Не удалось получить результат сохранения BIN/GeoPcDx.".to_owned(),
-                    )),
-                    Err(TryRecvError::Empty) => None,
-                });
-        if let Some(result) = asset_save_result {
-            self.asset_viewer_save = None;
-            match result {
-                Ok((source_path, saved_xml, backup_path)) => {
-                    if let Some(document) = self
-                        .asset_viewer_document
-                        .as_mut()
-                        .filter(|document| document.source_path == source_path)
-                    {
-                        document.original_text = saved_xml;
-                    }
-                    let mut entry = AssetReplacementLogEntry {
-                        timestamp_unix_seconds: 0,
-                        operation: "Сохранение изменений BIN/GeoPcDx".to_owned(),
-                        route_id: None,
-                        route_name: None,
-                        route_path: None,
-                        original_files: vec![source_path.display().to_string()],
-                        missing_asset: None,
-                        replacement_asset: None,
-                        replaced_files: 1,
-                        replaced_instances: 0,
-                        uses: Vec::new(),
-                        backups: backup_path.iter().cloned().collect(),
-                    };
-                    let log_result = asset_replacement_log_file()
-                        .ok_or_else(|| {
-                            "Windows APPDATA не определена; журнал замен не сохранён.".to_owned()
-                        })
-                        .and_then(|path| {
-                            append_asset_replacement_log(&path, &mut entry).map(|()| path)
-                        });
-                    self.status = backup_path.map_or_else(
-                        || format!("Сохранено: {}", source_path.display()),
-                        |backup| {
-                            format!(
-                                "Сохранено: {}. Исходник сохранён в {}.",
-                                source_path.display(),
-                                backup.display()
-                            )
-                        },
-                    );
-                    match log_result {
-                        Ok(path) => {
-                            self.status
-                                .push_str(&format!(" Журнал: {}", path.display()));
-                        }
-                        Err(error) => {
-                            self.status
-                                .push_str(&format!(" Журнал не записан: {error}"));
-                        }
-                    }
-                }
-                Err(error) => self.status = error,
             }
         }
 

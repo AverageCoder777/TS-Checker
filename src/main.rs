@@ -334,7 +334,6 @@ mod app;
 mod assets;
 mod auditor;
 mod blueprint;
-mod editor;
 mod external_editor;
 mod inventory_ui;
 mod reference;
@@ -346,7 +345,6 @@ mod windows;
 
 pub(crate) use assets::*;
 pub(crate) use auditor::*;
-pub(crate) use editor::*;
 pub(crate) use inventory_ui::*;
 pub(crate) use reference::*;
 pub(crate) use routes::*;
@@ -354,26 +352,6 @@ pub(crate) use scenario::*;
 pub(crate) use settings::*;
 pub(crate) use translit::*;
 pub(crate) use windows::*;
-
-fn parse_asset_launch_args(
-    args: impl IntoIterator<Item = std::ffi::OsString>,
-) -> Result<Option<PathBuf>, String> {
-    let mut args = args.into_iter();
-    let Some(path) = args.next() else {
-        return Ok(None);
-    };
-    if args.next().is_some() {
-        return Err("Ожидался путь ровно к одному файлу BIN или GeoPcDx.".to_owned());
-    }
-    let path = PathBuf::from(path);
-    if !is_viewable_asset_name(&path.to_string_lossy()) {
-        return Err(format!(
-            "Поддерживаются только файлы .bin и .GeoPcDx: {}",
-            path.display()
-        ));
-    }
-    Ok(Some(path))
-}
 
 fn load_route_icon_image(icon_path: &std::path::Path) -> slint::Image {
     if let Ok(data) = std::fs::read(icon_path) {
@@ -661,270 +639,6 @@ fn main() {
     }
 
     // Handle file association launch: TS-Checker opened with a .bin/.GeoPcDx file.
-    let startup_asset = parse_asset_launch_args(std::env::args_os().skip(1));
-    if let Ok(Some(_)) | Err(_) = startup_asset {
-        // asset-only mode
-        let app = std::sync::Arc::new(std::sync::Mutex::new(match startup_asset {
-            Ok(Some(path)) => app::CheckerApp::asset_only(path),
-            Ok(None) => app::CheckerApp::default(),
-            Err(error) => app::CheckerApp::asset_only_error(error),
-        }));
-        let editor_win = AssetEditorWindow::new().unwrap();
-        let editor_handle = editor_win.as_weak();
-        let editor_handle2 = editor_win.as_weak();
-        let app_clone = app.clone();
-        let app_clone2 = app.clone();
-        editor_win.on_save(move || {
-            if let Some(ew) = editor_handle.upgrade() {
-                let text = ew.get_editor_text();
-                if let Ok(mut app) = app_clone.lock() {
-                    if let Some(doc) = app.asset_viewer_document.as_mut() {
-                        doc.xml = text.to_string();
-                    }
-                    app.start_asset_save();
-                }
-            }
-        });
-        let editor_handle3 = editor_win.as_weak();
-        let app_clone3 = app.clone();
-        editor_win.on_text_changed(move |text| {
-            if let Ok(mut app) = app_clone3.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    doc.xml = text.to_string();
-                    doc.validate_xml();
-                    if !doc.find_query.is_empty() {
-                        let q = doc.find_query.clone();
-                        let mc = doc.match_case;
-                        doc.search(&q, mc);
-                    }
-                    let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                    let message = doc
-                        .xml_validation
-                        .as_ref()
-                        .and_then(|r| r.as_ref().err().cloned())
-                        .unwrap_or_default();
-                    let dirty = doc.is_dirty();
-                    let counter = if doc.find_query.is_empty() {
-                        String::new()
-                    } else if doc.matches.is_empty() {
-                        "0 из 0".to_string()
-                    } else {
-                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                    };
-                    let line_count = text.lines().count().max(1);
-                    let line_numbers_text: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
-                    if let Some(ew) = editor_handle3.upgrade() {
-                        ew.set_is_dirty(dirty);
-                        ew.set_is_xml_valid(valid);
-                        ew.set_xml_status(message.into());
-                        ew.set_match_counter(counter.into());
-                        ew.set_line_numbers_text(line_numbers_text.into());
-                    }
-                }
-            }
-        });
-
-        // Find & replace callbacks
-        let eh = editor_win.as_weak();
-        let appc = app.clone();
-        editor_win.on_find_query_changed(move |text| {
-            if let Ok(mut app) = appc.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    doc.search(&text.to_string(), doc.match_case);
-                    let counter = if text.is_empty() {
-                        String::new()
-                    } else if doc.matches.is_empty() {
-                        "0 из 0".to_string()
-                    } else {
-                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                    };
-                    let cursor = if !doc.matches.is_empty() {
-                        let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                        format!("Ln {}, Col {}", l, c)
-                    } else {
-                        String::new()
-                    };
-                        if let Some(ew) = eh.upgrade() {
-                            ew.set_match_counter(counter.into());
-                            ew.set_cursor_position(cursor.into());
-                            if !doc.matches.is_empty() {
-                                let (l, _) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                                ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
-                            }
-                        }
-                }
-            }
-        });
-
-        let appc = app.clone();
-        editor_win.on_replace_query_changed(move |text| {
-            if let Ok(mut app) = appc.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    doc.replace_query = text.to_string();
-                }
-            }
-        });
-
-        let eh = editor_win.as_weak();
-        let appc = app.clone();
-        editor_win.on_find_next(move || {
-            if let Ok(mut app) = appc.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    doc.find_next();
-                    if !doc.matches.is_empty() {
-                        let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
-                        let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                        let cursor = format!("Ln {}, Col {}", l, c);
-                        if let Some(ew) = eh.upgrade() {
-                            ew.set_match_counter(counter.into());
-                            ew.set_cursor_position(cursor.into());
-                        }
-                    }
-                }
-            }
-        });
-
-        let eh = editor_win.as_weak();
-        let appc = app.clone();
-        editor_win.on_find_prev(move || {
-            if let Ok(mut app) = appc.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    doc.find_prev();
-                    if !doc.matches.is_empty() {
-                        let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
-                        let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                        let cursor = format!("Ln {}, Col {}", l, c);
-                        if let Some(ew) = eh.upgrade() {
-                            ew.set_match_counter(counter.into());
-                            ew.set_cursor_position(cursor.into());
-                            if !doc.matches.is_empty() {
-                                let (l, _) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                                ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let eh = editor_win.as_weak();
-        let appc = app.clone();
-        editor_win.on_toggle_match_case(move || {
-            if let Ok(mut app) = appc.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    doc.match_case = !doc.match_case;
-                    let q = doc.find_query.clone();
-                    doc.search(&q, doc.match_case);
-                    let counter = if q.is_empty() {
-                        String::new()
-                    } else if doc.matches.is_empty() {
-                        "0 из 0".to_string()
-                    } else {
-                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                    };
-                    if let Some(ew) = eh.upgrade() {
-                        ew.set_match_counter(counter.into());
-                        ew.set_match_case(doc.match_case);
-                    }
-                }
-            }
-        });
-
-        let eh = editor_win.as_weak();
-        let appc = app.clone();
-        editor_win.on_replace_current(move || {
-            if let Ok(mut app) = appc.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    let replacement = doc.replace_query.clone();
-                    doc.replace_current(&replacement);
-                    doc.validate_xml();
-                    let xml = doc.xml.clone().replace('\t', "    ");
-                    let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                    let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
-                    let dirty = doc.is_dirty();
-                    let counter = if doc.find_query.is_empty() {
-                        String::new()
-                    } else if doc.matches.is_empty() {
-                        "0 из 0".to_string()
-                    } else {
-                        format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                    };
-                    if let Some(ew) = eh.upgrade() {
-                        ew.set_editor_text(xml.into());
-                        ew.set_is_dirty(dirty);
-                        ew.set_is_xml_valid(valid);
-                        ew.set_xml_status(message.into());
-                        ew.set_match_counter(counter.into());
-                    }
-                }
-            }
-        });
-
-        let eh = editor_win.as_weak();
-        let appc = app.clone();
-        editor_win.on_replace_all(move || {
-            if let Ok(mut app) = appc.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    let replacement = doc.replace_query.clone();
-                    doc.replace_all(&replacement);
-                    doc.validate_xml();
-                    let xml = doc.xml.clone().replace('\t', "    ");
-                    let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                    let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
-                    let dirty = doc.is_dirty();
-                    if let Some(ew) = eh.upgrade() {
-                        ew.set_editor_text(xml.into());
-                        ew.set_is_dirty(dirty);
-                        ew.set_is_xml_valid(valid);
-                        ew.set_xml_status(message.into());
-                        ew.set_match_counter("0 из 0".into());
-                    }
-                }
-            }
-        });
-        let timer = slint::Timer::default();
-        timer.start(
-            slint::TimerMode::Repeated,
-            std::time::Duration::from_millis(50),
-            move || {
-                if let Ok(mut app) = app_clone2.lock() {
-                    app.receive_background_results();
-                    if app.asset_viewer_open && app.editor_sync_pending {
-                        if let Some(doc) = app.asset_viewer_document.as_ref() {
-                            let xml = doc.xml.clone().replace('\t', "    ");
-                            let status = app.status.clone();
-                            let line_count = doc.xml.lines().count().max(1);
-                            let nums: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
-                            app.editor_sync_pending = false;
-                            if let Some(ew) = editor_handle2.upgrade() {
-                                ew.set_editor_text(xml.into());
-                                ew.set_status(status.into());
-                                ew.set_line_numbers_text(nums.into());
-                                let _ = ew.show();
-                            }
-                        }
-                    }
-                    if app.asset_viewer_open {
-                        if let Some(doc) = app.asset_viewer_document.as_ref() {
-                            if let Some(ew) = editor_handle2.upgrade() {
-                                ew.set_is_dirty(doc.is_dirty());
-                                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                                ew.set_is_xml_valid(valid);
-                                let msg = doc
-                                    .xml_validation
-                                    .as_ref()
-                                    .and_then(|r| r.as_ref().err().cloned())
-                                    .unwrap_or_default();
-                                ew.set_xml_status(msg.into());
-                            }
-                        }
-                    }
-                }
-            },
-        );
-        editor_win.run().unwrap();
-        return;
-    }
     let app = std::sync::Arc::new(std::sync::Mutex::new(app::CheckerApp::default()));
     let ui = MainWindow::new().unwrap();
     let ui_handle = ui.as_weak();
@@ -949,7 +663,6 @@ fn main() {
     let app_clone17 = app.clone();
     let app_clone18 = app.clone();
     let app_clone19 = app.clone();
-    let app_clone20 = app.clone();
     let clipboard = std::sync::Arc::new(std::sync::Mutex::new(arboard::Clipboard::new().unwrap()));
     let mut last_count: usize = 0;
     let mut last_query = String::new();
@@ -1268,214 +981,6 @@ fn main() {
             }
         }
     });
-    let editor_win = AssetEditorWindow::new().unwrap();
-    let editor_handle = editor_win.as_weak();
-    let editor_handle2 = editor_win.as_weak();
-    editor_win.on_save(move || {
-        if let Some(ew) = editor_handle.upgrade() {
-            let text = ew.get_editor_text();
-            if let Ok(mut app) = app_clone20.lock() {
-                if let Some(doc) = app.asset_viewer_document.as_mut() {
-                    doc.xml = text.to_string();
-                }
-                app.start_asset_save();
-            }
-        }
-    });
-    let editor_handle3 = editor_win.as_weak();
-    let app_clone21 = app.clone();
-    editor_win.on_text_changed(move |text| {
-        if let Ok(mut app) = app_clone21.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                doc.xml = text.to_string();
-                doc.validate_xml();
-                if !doc.find_query.is_empty() {
-                    let q = doc.find_query.clone();
-                    let mc = doc.match_case;
-                    doc.search(&q, mc);
-                }
-                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                let message = doc
-                    .xml_validation
-                    .as_ref()
-                    .and_then(|r| r.as_ref().err().cloned())
-                    .unwrap_or_default();
-                let dirty = doc.is_dirty();
-                let counter = if doc.find_query.is_empty() {
-                    String::new()
-                } else if doc.matches.is_empty() {
-                    "0 из 0".to_string()
-                } else {
-                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                };
-                let line_count = text.lines().count().max(1);
-                let line_numbers_text: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
-                if let Some(ew) = editor_handle3.upgrade() {
-                    ew.set_is_dirty(dirty);
-                    ew.set_is_xml_valid(valid);
-                    ew.set_xml_status(message.into());
-                    ew.set_match_counter(counter.into());
-                    ew.set_line_numbers_text(line_numbers_text.into());
-                }
-            }
-        }
-    });
-
-    // Find & replace callbacks
-    let eh = editor_win.as_weak();
-    let appc = app.clone();
-    editor_win.on_find_query_changed(move |text| {
-        if let Ok(mut app) = appc.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                doc.search(&text.to_string(), doc.match_case);
-                let counter = if text.is_empty() {
-                    String::new()
-                } else if doc.matches.is_empty() {
-                    "0 из 0".to_string()
-                } else {
-                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                };
-                let cursor = if !doc.matches.is_empty() {
-                    let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                    format!("Ln {}, Col {}", l, c)
-                } else {
-                    String::new()
-                };
-                if let Some(ew) = eh.upgrade() {
-                    ew.set_match_counter(counter.into());
-                    if !cursor.is_empty() { ew.set_cursor_position(cursor.into()); }
-                }
-            }
-        }
-    });
-
-    let appc = app.clone();
-    editor_win.on_replace_query_changed(move |text| {
-        if let Ok(mut app) = appc.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                doc.replace_query = text.to_string();
-            }
-        }
-    });
-
-    let eh = editor_win.as_weak();
-    let appc = app.clone();
-    editor_win.on_find_next(move || {
-        if let Ok(mut app) = appc.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                doc.find_next();
-                if !doc.matches.is_empty() {
-                    let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
-                    let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                    let cursor = format!("Ln {}, Col {}", l, c);
-                    if let Some(ew) = eh.upgrade() {
-                        ew.set_match_counter(counter.into());
-                        ew.set_cursor_position(cursor.into());
-                        ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
-                    }
-                }
-            }
-        }
-    });
-
-    let eh = editor_win.as_weak();
-    let appc = app.clone();
-    editor_win.on_find_prev(move || {
-        if let Ok(mut app) = appc.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                doc.find_prev();
-                if !doc.matches.is_empty() {
-                    let counter = format!("{} из {}", doc.current_match_idx + 1, doc.matches.len());
-                    let (l, c) = crate::editor::line_col_at(&doc.xml, doc.matches[doc.current_match_idx].start);
-                    let cursor = format!("Ln {}, Col {}", l, c);
-                    if let Some(ew) = eh.upgrade() {
-                        ew.set_match_counter(counter.into());
-                        ew.set_cursor_position(cursor.into());
-                        ew.set_target_scroll_y((-(l as f32 - 5.0) * 18.0).into());
-                    }
-                }
-            }
-        }
-    });
-
-    let eh = editor_win.as_weak();
-    let appc = app.clone();
-    editor_win.on_toggle_match_case(move || {
-        if let Ok(mut app) = appc.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                doc.match_case = !doc.match_case;
-                let q = doc.find_query.clone();
-                doc.search(&q, doc.match_case);
-                let counter = if q.is_empty() {
-                    String::new()
-                } else if doc.matches.is_empty() {
-                    "0 из 0".to_string()
-                } else {
-                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                };
-                if let Some(ew) = eh.upgrade() {
-                    ew.set_match_counter(counter.into());
-                    ew.set_match_case(doc.match_case);
-                }
-            }
-        }
-    });
-
-    let eh = editor_win.as_weak();
-    let appc = app.clone();
-    editor_win.on_replace_current(move || {
-        if let Ok(mut app) = appc.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                let replacement = doc.replace_query.clone();
-                doc.replace_current(&replacement);
-                doc.validate_xml();
-                let xml = doc.xml.clone().replace('\t', "    ");
-                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
-                let dirty = doc.is_dirty();
-                let counter = if doc.find_query.is_empty() {
-                    String::new()
-                } else if doc.matches.is_empty() {
-                    "0 из 0".to_string()
-                } else {
-                    format!("{} из {}", doc.current_match_idx + 1, doc.matches.len())
-                };
-                if let Some(ew) = eh.upgrade() {
-                    ew.set_editor_text(xml.into());
-                    ew.set_is_dirty(dirty);
-                    ew.set_is_xml_valid(valid);
-                    ew.set_xml_status(message.into());
-                    ew.set_match_counter(counter.into());
-                }
-            }
-        }
-    });
-
-    let eh = editor_win.as_weak();
-    let appc = app.clone();
-    editor_win.on_replace_all(move || {
-        if let Ok(mut app) = appc.lock() {
-            if let Some(doc) = app.asset_viewer_document.as_mut() {
-                let replacement = doc.replace_query.clone();
-                doc.replace_all(&replacement);
-                doc.validate_xml();
-                let xml = doc.xml.clone().replace('\t', "    ");
-                let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                let message = doc.xml_validation.as_ref().and_then(|r| r.as_ref().err().cloned()).unwrap_or_default();
-                let dirty = doc.is_dirty();
-                if let Some(ew) = eh.upgrade() {
-                    ew.set_editor_text(xml.into());
-                    ew.set_is_dirty(dirty);
-                    ew.set_is_xml_valid(valid);
-                    ew.set_xml_status(message.into());
-                    ew.set_match_counter("0 из 0".into());
-                }
-            }
-        }
-    });
-    // Show editor window when asset_viewer_open becomes true
-    // (handled in timer below)
-
     let timer = slint::Timer::default();
     let ui_handle_timer = ui_handle.clone();
     let inv_handle_timer_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<slint::Weak<AssetInventoryWindow>>));
@@ -1527,36 +1032,6 @@ fn main() {
                     }
                 }
                 // Sync asset editor text when document loaded
-                if app.asset_viewer_open && app.editor_sync_pending {
-                    if let Some(doc) = app.asset_viewer_document.as_ref() {
-                        let xml = doc.xml.clone().replace('\t', "    ");
-                        let status = app.status.clone();
-                        let line_count = doc.xml.lines().count().max(1);
-                        let nums: String = (1..=line_count).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
-                        app.editor_sync_pending = false;
-                        if let Some(ew) = editor_handle2.upgrade() {
-                            ew.set_editor_text(xml.into());
-                            ew.set_status(status.into());
-                            ew.set_line_numbers_text(nums.into());
-                            let _ = ew.show();
-                        }
-                    }
-                }
-                if app.asset_viewer_open {
-                    if let Some(doc) = app.asset_viewer_document.as_ref() {
-                        if let Some(ew) = editor_handle2.upgrade() {
-                            ew.set_is_dirty(doc.is_dirty());
-                            let valid = doc.xml_validation.as_ref().map(|r| r.is_ok()).unwrap_or(true);
-                            ew.set_is_xml_valid(valid);
-                            let msg = doc
-                                .xml_validation
-                                .as_ref()
-                                .and_then(|r| r.as_ref().err().cloned())
-                                .unwrap_or_default();
-                            ew.set_xml_status(msg.into());
-                        }
-                    }
-                }
                 let q = ui.get_search_query().to_string();
                 app.search_query = q.clone();
                 if app.routes.len() == last_count && q == last_query && app.route_thumbnails_enabled == last_thumbnails_enabled {
@@ -2574,9 +2049,18 @@ fn main() {
                 .join("Assets")
                 .join(path_text.replace('/', "\\"));
             if full.is_file() {
-                if let Ok(mut app) = app_clone14.lock() {
-                    app.start_asset_view(full);
-                }
+                let serz_path = crate::external_editor::find_serz_path(&full)
+                    .unwrap_or_else(|| std::path::PathBuf::from("serz64.exe"));
+                let app_for_status = app_clone14.clone();
+                let _ = crate::external_editor::open_and_sync_with_vscode(
+                    &full,
+                    &serz_path,
+                    move |result| {
+                        if let Ok(mut app) = app_for_status.lock() {
+                            app.status = result.unwrap_or_else(|error| error);
+                        }
+                    },
+                );
             }
         }
     });
@@ -3021,30 +2505,14 @@ mod tests {
     use super::{
         check_route, decode_xml_text, extract_asset_references, extract_scenario_clues,
         fallback_serz_path, inspect_route_folder, is_skipped_route_scan_directory,
-        parse_asset_launch_args, parse_route_name, preferred_serz_path, scan_routes,
+        parse_route_name, preferred_serz_path, scan_routes,
         scan_routes_with_ignored, validate_serz_process, ScenarioClueCollection,
     };
-    use std::ffi::OsString;
     use std::fs;
     use std::io::Write;
     #[cfg(windows)]
     use std::path::Path;
     use std::path::PathBuf;
-
-    #[test]
-    fn parses_asset_launch_arguments_without_starting_for_other_extensions() {
-        assert_eq!(parse_asset_launch_args([]).unwrap(), None);
-        assert_eq!(
-            parse_asset_launch_args([OsString::from("asset.GeoPcDx")]).unwrap(),
-            Some(PathBuf::from("asset.GeoPcDx"))
-        );
-        assert!(parse_asset_launch_args([OsString::from("archive.ap")]).is_err());
-        assert!(parse_asset_launch_args([
-            OsString::from("asset.bin"),
-            OsString::from("another.bin")
-        ])
-        .is_err());
-    }
 
     #[test]
     fn only_skips_scenarios_when_requested_during_asset_check() {
