@@ -3,6 +3,27 @@
 version = 4
 
 [[package]]
+name = "TSC_Check_Tool"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "encoding_rs",
+ "notify",
+ "open",
+ "rayon",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "tempfile",
+ "walkdir",
+ "xml",
+ "zip",
+]
+
+[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4744,27 +4765,6 @@ dependencies = [
  "memchr",
  "nom 8.0.0",
  "petgraph",
-]
-
-[[package]]
-name = "ts_checker_rs"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "encoding_rs",
- "notify",
- "open",
- "rayon",
- "regex",
- "rfd",
- "serde",
- "serde_json",
- "slint",
- "slint-build",
- "tempfile",
- "walkdir",
- "xml",
- "zip",
 ]
 
 [[package]]
