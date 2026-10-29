@@ -1598,7 +1598,7 @@ where
                                     }
                                 };
                                 for name in archive.file_names().flatten() {
-                                    files.insert(name.replace('\\', "/").to_lowercase());
+                                    files.insert(name.replace('/', "\\").trim().to_lowercase());
                                 }
                             }
                         }

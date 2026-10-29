@@ -589,6 +589,8 @@ fn has_scenario_type_marker(xml: &str) -> bool {
         || lower.contains("<careerrules")
         || lower.contains("etemplate")
         || lower.contains("template scenario")
+        || lower.contains("timetable")
+        || lower.contains("etimetable")
 }
 
 /// Определяет тип сценария по XML свойств/сценария.
@@ -615,6 +617,9 @@ pub(crate) fn scenario_type_from_xml(xml: &str) -> String {
     if lower.contains("quickdrive") || lower.contains("quick drive") || lower.contains("etemplate") || lower.contains("template scenario") {
         return "Quick Drive".to_owned();
     }
+    if lower.contains("timetable") || lower.contains("etimetable") {
+        return "Timetable (Standard)".to_owned();
+    }
     if lower.contains("<careerrules") {
         return "Career".to_owned();
     }
@@ -632,9 +637,11 @@ fn normalize_scenario_type(value: &str) -> String {
         "Quick Drive".to_owned()
     } else if v.contains("career") {
         "Career".to_owned()
-    } else if v.contains("standard") || v.contains("normal") {
-        "Standard".to_owned()
-    } else if v.contains("template") {
+     } else if v.contains("standard") || v.contains("normal") {
+         "Standard".to_owned()
+     } else if v.contains("timetable") {
+         "Timetable (Standard)".to_owned()
+     } else if v.contains("template") {
         "Quick Drive".to_owned()
     } else if v.is_empty() {
         String::new()

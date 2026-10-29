@@ -27,6 +27,10 @@ pub struct AuditReport {
     pub broken_references: Vec<BrokenResourceRef>,
 }
 
+fn normalize_ap_path(value: &str) -> String {
+    value.replace('/', "\\").trim().to_lowercase()
+}
+
 #[derive(Default)]
 pub struct ApArchiveCache {
     pub inner: Mutex<HashMap<PathBuf, HashSet<String>>>,
@@ -42,11 +46,10 @@ impl ApArchiveCache {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        let normalized = relative.replace('\\', "/").to_lowercase();
-        let normalized = normalized.trim_start_matches('/').to_string();
+        let target = normalize_ap_path(relative);
 
         if let Some(set) = guard.get(product_dir) {
-            if set.contains(&normalized) {
+            if set.iter().any(|m| normalize_ap_path(m) == target) {
                 return true;
             }
         }
@@ -55,7 +58,7 @@ impl ApArchiveCache {
                 .to_string_lossy()
                 .eq_ignore_ascii_case(&product_dir.to_string_lossy())
             {
-                if set.contains(&normalized) {
+                if set.iter().any(|m| normalize_ap_path(m) == target) {
                     return true;
                 }
             }
@@ -115,9 +118,9 @@ fn is_blacklisted_sound_tag(tag: &str) -> bool {
             | "priority"
     ) || lower.contains("editorrenderdata")
 }
-pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
+pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResourceKind, String)> {
     let mut out = Vec::new();
-    for tag in ["GeometryID", "ShadowGeometryID"] {
+    for tag in ["GeometryID", "ShadowGeometryID", "CollisionGeometryID"] {
         for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
             let raw = value.as_str().trim().to_string();
             if !raw.is_empty() && !is_numeric_token(&raw) {
@@ -157,11 +160,13 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
         }
     }
 
-    for value in regex_tag("ScriptComponent")
-        .captures_iter(xml)
-        .filter_map(|c| c.get(1))
-    {
-        let raw = strip_tags(value.as_str()).trim().to_string();
+    for sc in regex_tag("ScriptComponent").captures_iter(xml).filter_map(|c| c.get(1)) {
+        let inner = sc.as_str();
+        let raw = regex_tag("Path")
+            .captures(inner)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_else(|| strip_tags(inner).trim().to_string());
         if !raw.is_empty() && !is_numeric_token(&raw) {
             out.push((AssetResourceKind::Script, raw));
         }
@@ -205,10 +210,45 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
         .filter_map(|c| c.get(1))
     {
         let inner = block.as_str();
-        let provider = tag_text(inner, "Provider").unwrap_or_default();
-        let product = tag_text(inner, "Product").unwrap_or_default();
+        let mut provider = tag_text(inner, "Provider").unwrap_or_default();
+        let mut product = tag_text(inner, "Product").unwrap_or_default();
         let mut blueprint = tag_text(inner, "BlueprintID").unwrap_or_default();
-        if provider.is_empty() || product.is_empty() || blueprint.is_empty() {
+        if blueprint.is_empty() {
+            continue;
+        }
+        if provider.is_empty() || product.is_empty() {
+            let comps: Vec<_> = product_root.components().collect();
+            let after_assets = comps
+                .iter()
+                .rposition(|c| c.as_os_str().eq_ignore_ascii_case("Assets"))
+                .map(|idx| &comps[idx + 1..])
+                .unwrap_or(&[]);
+            let (prov, prod) = if after_assets.len() >= 2 {
+                (
+                    after_assets[0].as_os_str().to_string_lossy().to_string(),
+                    after_assets[1].as_os_str().to_string_lossy().to_string(),
+                )
+            } else if comps.len() >= 2 {
+                (
+                    comps[comps.len() - 2]
+                        .as_os_str()
+                        .to_string_lossy()
+                        .to_string(),
+                    comps[comps.len() - 1]
+                        .as_os_str()
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            } else {
+                (String::new(), String::new())
+            };
+            if prov.is_empty() || prod.is_empty() {
+                continue;
+            }
+            provider = prov;
+            product = prod;
+        }
+        if provider.is_empty() || product.is_empty() {
             continue;
         }
         blueprint = blueprint.trim().to_string();
@@ -230,7 +270,7 @@ pub fn extract_bin_references(xml: &str) -> Vec<(AssetResourceKind, String)> {
 
 pub fn strip_shader_prefix(raw: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"^\[[0-9a-zA-Z]+\]").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"^\[[0-9a-zA-Z_\-]+\]").unwrap());
     if let Some(idx) = raw.rfind(['\\', '/']) {
         let (head, tail) = raw.split_at(idx + 1);
         format!("{}{}", head, re.replace(tail, ""))
@@ -402,7 +442,7 @@ fn ensure_extension(raw: &str, kind: AssetResourceKind) -> String {
         match kind {
             AssetResourceKind::Texture => format!("{}.TgPcDx", raw),
             AssetResourceKind::Geometry => format!("{}.GeoPcDx", raw),
-            AssetResourceKind::Animation => format!("{}.ia", raw),
+            AssetResourceKind::Animation => format!("{}.ban", raw),
             AssetResourceKind::ChildBlueprint => {
                 if raw.to_lowercase().ends_with(".xml") {
                     raw.to_string()
@@ -432,8 +472,6 @@ fn candidate_relatives(raw: &str, kind: AssetResourceKind) -> Vec<String> {
             vec![
                 format!("{}.out", stripped),
                 format!("{}.lua", stripped),
-                format!("{}.outz", stripped),
-                cleaned.clone(),
             ]
         }
         AssetResourceKind::Texture => {
@@ -455,8 +493,8 @@ fn candidate_relatives(raw: &str, kind: AssetResourceKind) -> Vec<String> {
                 cleaned.clone()
             };
             vec![
-                format!("{}.ia", stripped),
                 format!("{}.ban", stripped),
+                format!("{}.ia", stripped),
                 cleaned.clone(),
             ]
         }
@@ -482,11 +520,10 @@ fn candidate_relatives(raw: &str, kind: AssetResourceKind) -> Vec<String> {
             {
                 vec![cleaned]
             } else {
-                // Если расширение не указано, проверяем все звуковые форматы TSC
                 vec![
                     format!("{}.proxybin", cleaned),
-                    format!("{}.bin", cleaned),
                     format!("{}.proxyxml", cleaned),
+                    format!("{}.bin", cleaned),
                     format!("{}.xml", cleaned),
                     format!("{}.dav", cleaned),
                 ]
@@ -570,8 +607,22 @@ fn candidate_paths(
     if kind == AssetResourceKind::Texture {
         for rel in &rels {
             let rel_norm = rel.replace('/', "\\");
-            cands.push(normalize_path(&parent.join(&rel_norm)));
-            cands.push(normalize_path(&product_root.join(&rel_norm)));
+            let first = rel_norm
+                .split(['\\', '/'])
+                .find(|s| !s.is_empty())
+                .unwrap_or("");
+            let assets_first = !first.is_empty()
+                && !first.starts_with('.')
+                && assets_root.join(first).is_dir();
+            if assets_first {
+                cands.push(normalize_path(&assets_root.join(&rel_norm)));
+                cands.push(normalize_path(&parent.join(&rel_norm)));
+                cands.push(normalize_path(&product_root.join(&rel_norm)));
+            } else {
+                cands.push(normalize_path(&parent.join(&rel_norm)));
+                cands.push(normalize_path(&product_root.join(&rel_norm)));
+                cands.push(normalize_path(&assets_root.join(&rel_norm)));
+            }
         }
     } else {
         for rel in &rels {
@@ -588,14 +639,22 @@ fn candidate_paths(
                 && !first_component.starts_with('.')
                 && assets_root.join(first_component).is_dir();
             let assets_candidate_exists = assets_root.join(&rel_norm).exists();
+            let local_subfolder = matches!(
+                first_component.to_lowercase().as_str(),
+                "cab" | "cabs" | "textures" | "texture" | "audio" | "sound" | "sounds"
+                    | "scripts" | "script" | "anim" | "anims" | "animation" | "animations"
+            );
 
             if is_relative {
                 cands.push(normalize_path(&parent.join(&rel_norm)));
-            } else if provider_under_assets || assets_candidate_exists {
-                // Assets-root relative reference: resolve strictly under Assets root.
+                cands.push(normalize_path(&product_root.join(&rel_norm)));
+            } else if provider_under_assets {
+                cands.push(normalize_path(&assets_root.join(&rel_norm)));
+            } else if local_subfolder || !assets_candidate_exists {
+                cands.push(normalize_path(&parent.join(&rel_norm)));
+                cands.push(normalize_path(&product_root.join(&rel_norm)));
                 cands.push(normalize_path(&assets_root.join(&rel_norm)));
             } else {
-                // Fallback: try Assets root, then source folder, then product root.
                 cands.push(normalize_path(&assets_root.join(&rel_norm)));
                 cands.push(normalize_path(&parent.join(&rel_norm)));
                 cands.push(normalize_path(&product_root.join(&rel_norm)));
@@ -641,17 +700,17 @@ fn loose_exists(candidates: &[PathBuf]) -> bool {
 }
 
 fn ap_member_matches(product_dir: &Path, relative: &str, ap_cache: &ApArchiveCache) -> bool {
-    let target = strip_shader_prefix(&relative.replace('\\', "/")).to_lowercase();
-    let target = target.trim_start_matches('/').to_string();
+    let target = normalize_ap_path(&strip_shader_prefix(relative));
+    let target = target.trim_start_matches('\\').to_string();
     if let Ok(guard) = ap_cache.inner.lock() {
         for (key, set) in guard.iter() {
             if !key.to_string_lossy().eq_ignore_ascii_case(&product_dir.to_string_lossy()) {
                 continue;
             }
             for member in set {
-                let member_stripped = strip_shader_prefix(member).to_lowercase();
-                let member_stripped = member_stripped.trim_start_matches('/').to_string();
-                if member_stripped == target {
+                let member = normalize_ap_path(&strip_shader_prefix(member));
+                let member = member.trim_start_matches('\\').to_string();
+                if member == target {
                     return true;
                 }
             }
@@ -674,7 +733,15 @@ fn ap_exists(
     }
     let norm = strip_shader_prefix(&norm).replace('/', "\\");
     let mut is_global = is_global_asset_ref(&norm, kind, assets_root);
-    if kind != AssetResourceKind::Texture {
+    if kind == AssetResourceKind::Texture {
+        let first = norm
+            .split(['\\', '/'])
+            .find(|s| !s.is_empty())
+            .unwrap_or("");
+        if !is_global && !first.is_empty() && !first.starts_with('.') && assets_root.join(first).is_dir() {
+            is_global = true;
+        }
+    } else {
         let first = norm
             .split(['\\', '/'])
             .find(|s| !s.is_empty())
@@ -739,7 +806,7 @@ fn audit_one_file(
         .to_lowercase();
 
     if ext == "bin" {
-        for (kind, raw) in extract_bin_references(&xml) {
+        for (kind, raw) in extract_bin_references(&xml, &product_root) {
             let cands = candidate_paths(&raw, parent, &product_root, assets_root, kind);
             let expected = cands
                 .first()
@@ -932,7 +999,7 @@ mod tests {
                 <BlueprintID>child\bar.xml</BlueprintID>
             </iBlueprintLibrary-cAbsoluteBlueprintID>
         "#;
-        let refs = extract_bin_references(xml);
+        let refs = extract_bin_references(xml, Path::new("Assets/Kuju/RailSimulator"));
         assert!(refs
             .iter()
             .any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh")));
@@ -952,7 +1019,7 @@ mod tests {
     #[test]
     fn sound_classification() {
         let xml = r#"<SoundName>audio\horn.wav</SoundName>"#;
-        let refs = extract_bin_references(xml);
+        let refs = extract_bin_references(xml, Path::new("Assets/Kuju/RailSimulator"));
         assert!(refs.iter().any(|(k, _)| *k == AssetResourceKind::Sound));
     }
 
@@ -1002,6 +1069,58 @@ mod tests {
         for c in &cands {
             assert!(!c.to_string_lossy().contains("GYSEV_470_501\\RWAustria_2"));
          }
+    }
+
+    #[test]
+    fn inherits_empty_provider_product_in_child_blueprint() {
+        let xml = r#"
+            <iBlueprintLibrary-cAbsoluteBlueprintID>
+                <BlueprintSetID><iBlueprintLibrary-cBlueprintSetID>
+                    <Provider d:type="cDeltaString"></Provider>
+                    <Product d:type="cDeltaString"></Product>
+                </iBlueprintLibrary-cBlueprintSetID></BlueprintSetID>
+                <BlueprintID d:type="cDeltaString">child\bar.xml</BlueprintID>
+            </iBlueprintLibrary-cAbsoluteBlueprintID>
+        "#;
+        let refs = extract_bin_references(xml, Path::new("Assets/Kuju/RailSimulator"));
+        assert!(refs.iter().any(|(k, r)| {
+            *k == AssetResourceKind::ChildBlueprint && r == r"Kuju\RailSimulator\child\bar.bin"
+        }));
+    }
+
+    #[test]
+    fn detects_collision_geometry() {
+        let xml = r#"<CollisionGeometryID>x\[00]mesh</CollisionGeometryID>"#;
+        let refs = extract_bin_references(xml, Path::new("Assets/Kuju/RailSimulator"));
+        assert!(refs
+            .iter()
+            .any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh")));
+    }
+
+    #[test]
+    fn script_candidates_prefer_out_then_lua() {
+        let temp = std::env::temp_dir().join("tsc_script_candidate_test");
+        let assets = temp.join("Assets");
+        let dir = assets.join("Kuju").join("RailSimulator");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cands = candidate_paths(r"scripts\foo", &dir, &dir, &assets, AssetResourceKind::Script);
+        assert_eq!(
+            cands.first().unwrap(),
+            &normalize_path(&dir.join(r"scripts\foo.out"))
+        );
+        assert!(cands.iter().any(|p| p == &normalize_path(&dir.join(r"scripts\foo.lua"))));
+    }
+
+    #[test]
+    fn ap_cache_lookup_is_case_insensitive() {
+        let cache = ApArchiveCache::new();
+        let product_dir = std::path::PathBuf::from("Assets/Kuju/RailSimulator");
+        cache
+            .inner
+            .lock()
+            .unwrap()
+            .insert(product_dir.clone(), ["Textures\\Foo.TgPcDx".to_string()].into());
+        assert!(cache.lookup(&product_dir, "textures\\foo.tgpcdx"));
     }
 
     #[test]
