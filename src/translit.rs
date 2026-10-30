@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use crate::auditor::unescape_xml_entities;
+
 /// Расшифровка XML-сущностей: игра пишет в файлы и спецсимволы.
 pub(crate) fn decode_xml_text(text: &str) -> String {
     let mut decoded = String::with_capacity(text.len());

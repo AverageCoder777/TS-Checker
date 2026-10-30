@@ -138,7 +138,7 @@ fn tag_text(xml: &str, tag: &str) -> Option<String> {
     regex_tag(tag)
         .captures(xml)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().trim().to_string())
+        .map(|m| unescape_xml_entities(m.as_str().trim()))
         .filter(|s| !s.is_empty())
 }
 
@@ -181,11 +181,22 @@ fn is_blacklisted_sound_tag(tag: &str) -> bool {
             | "priority"
     ) || lower.contains("editorrenderdata")
 }
+pub fn unescape_xml_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
 pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResourceKind, String)> {
     let mut out = Vec::new();
     for tag in ["GeometryID", "ShadowGeometryID", "CollisionGeometryID"] {
         for value in regex_tag(tag).captures_iter(xml).filter_map(|c| c.get(1)) {
-            let raw = value.as_str().trim().to_string();
+            let raw = unescape_xml_entities(value.as_str().trim());
             if !raw.is_empty() && !is_numeric_token(&raw) {
                 out.push((AssetResourceKind::Geometry, raw));
             }
@@ -207,16 +218,16 @@ pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResou
             if is_blacklisted_sound_tag(tag) {
                 continue;
             }
-            if !tag.to_lowercase().ends_with("animname")
-                && !tag.to_lowercase().ends_with("animationname") {
-                continue;
-            }
-            let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            if inner.contains('<') {
-                continue;
-            }
-            let raw = strip_tags(inner).trim().to_string();
-            let clean = raw.lines().next().unwrap_or("").trim().to_string();
+             if !tag.to_lowercase().ends_with("animname")
+                 && !tag.to_lowercase().ends_with("animationname") {
+                 continue;
+             }
+             let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+             if inner.contains('<') {
+                 continue;
+             }
+             let raw = unescape_xml_entities(strip_tags(inner).trim());
+             let clean = raw.lines().next().unwrap_or("").trim().to_string();
             if !clean.is_empty() && !is_numeric_token(&clean) {
                 out.push((AssetResourceKind::Animation, clean));
             }
@@ -225,11 +236,11 @@ pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResou
 
     for sc in regex_tag("ScriptComponent").captures_iter(xml).filter_map(|c| c.get(1)) {
         let inner = sc.as_str();
-        let raw = regex_tag("Path")
-            .captures(inner)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().trim().to_string())
-            .unwrap_or_else(|| strip_tags(inner).trim().to_string());
+            let raw = regex_tag("Path")
+                .captures(inner)
+                .and_then(|c| c.get(1))
+                .map(|m| unescape_xml_entities(m.as_str().trim()))
+                .unwrap_or_else(|| unescape_xml_entities(strip_tags(inner).trim()));
         if !raw.is_empty() && !is_numeric_token(&raw) {
             out.push((AssetResourceKind::Script, raw));
         }
@@ -255,12 +266,12 @@ pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResou
             if !is_sound_tag {
                 continue;
             }
-            let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            if inner.contains('<') {
-                continue;
-            }
-            let raw = strip_tags(inner).trim().to_string();
-            let clean = raw.lines().next().unwrap_or("").trim().to_string();
+             let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+             if inner.contains('<') {
+                 continue;
+             }
+             let raw = unescape_xml_entities(strip_tags(inner).trim());
+             let clean = raw.lines().next().unwrap_or("").trim().to_string();
             if !clean.is_empty() && !is_numeric_token(&clean) {
                 out.push((AssetResourceKind::Sound, clean));
             }
@@ -372,20 +383,20 @@ fn material_has_valid_texture(inner: &str) -> bool {
     for cap in regex_tag("TextureByName").captures_iter(inner) {
         let block_inner = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         for ecap in regex_tag("e").captures_iter(block_inner) {
-            let raw = ecap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+            let raw = unescape_xml_entities(ecap.get(1).map(|m| m.as_str()).unwrap_or("").trim());
+            if is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
                 return true;
             }
         }
-        let raw = block_inner.trim();
-        if !raw.contains('<') && is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+        let raw = unescape_xml_entities(block_inner.trim());
+        if !raw.contains('<') && is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
             return true;
         }
     }
     for tag in ["TextureName", "Texture"] {
         for cap in regex_tag(tag).captures_iter(inner) {
-            let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
+            let raw = unescape_xml_entities(cap.get(1).map(|m| m.as_str()).unwrap_or("").trim());
+            if is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
                 return true;
             }
         }
@@ -425,18 +436,22 @@ pub fn extract_geo_texture_references(xml: &str) -> Vec<String> {
     for cap in regex_tag("TextureByName").captures_iter(&filtered) {
         let inner = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         for ecap in regex_tag("e").captures_iter(inner) {
-            let raw = ecap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
-                out.push(normalize_texture_reference(raw));
+            let raw = unescape_xml_entities(ecap.get(1).map(|m| m.as_str()).unwrap_or("").trim());
+            if is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
+                out.push(normalize_texture_reference(raw.as_str()));
             }
+        }
+        let raw = unescape_xml_entities(inner.trim());
+        if !raw.contains('<') && is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
+            out.push(normalize_texture_reference(raw.as_str()));
         }
     }
 
     for tag in ["TextureName", "Texture"] {
         for cap in regex_tag(tag).captures_iter(&filtered) {
-            let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-            if is_valid_texture_path(raw) && has_valid_texture_stem(raw) {
-                out.push(normalize_texture_reference(raw));
+            let raw = unescape_xml_entities(cap.get(1).map(|m| m.as_str()).unwrap_or("").trim());
+            if is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
+                out.push(normalize_texture_reference(raw.as_str()));
             }
         }
     }
