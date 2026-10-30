@@ -5,18 +5,138 @@ use std::collections::{HashMap, HashSet};
 use walkdir::WalkDir;
 
 pub fn is_safe_for_global_replacement(relative_path: &str, uses: &[AssetUse]) -> bool {
-    // Never replace assets referenced in track network databases.
-    if uses.iter().any(|u| {
-        let path_lower = u.source_file.display().to_lowercase();
-        path_lower.contains("tracks.bin")
-            || path_lower.contains("/networks/")
-            || path_lower.contains("\\networks\\")
-    }) {
-        return false;
+    let item = RouteAssetItem {
+        path: relative_path.to_owned(),
+        uses: uses.to_vec(),
+    };
+    !is_protected_network_asset(&item)
+}
+
+#[derive(Clone)]
+pub struct RouteAssetItem {
+    pub path: String,
+    pub uses: Vec<AssetUse>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RouteAssetType {
+    Scenery,
+    Loft,
+    Road,
+    Track,
+    TrackRules,
+    Weather,
+    Audio,
+    Other,
+}
+
+impl RouteAssetType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Scenery => "Сценери",
+            Self::Loft => "Лофт",
+            Self::Road => "Дорога",
+            Self::Track => "Пути / Сигналы",
+            Self::TrackRules => "Правило пути",
+            Self::Weather => "Погода",
+            Self::Audio => "Звук",
+            Self::Other => "Прочее",
+        }
+    }
+}
+
+pub fn classify_route_asset_type(asset: &str, uses: &[AssetUse]) -> RouteAssetType {
+    let mut track = false;
+    let mut trackrules = false;
+    let mut road = false;
+    let mut loft = false;
+    let mut weather = false;
+    let mut audio = false;
+    let mut scenery = false;
+
+    for usage in uses {
+        let source = usage.source_file.display().to_lowercase();
+        if source.contains("trackrules") {
+            trackrules = true;
+        } else if source.contains("track tiles") || source.contains("tracks.bin") {
+            track = true;
+        } else if source.contains("road tiles") || source.contains("roads.bin") {
+            road = true;
+        } else if source.contains("loft tiles") || source.contains("lofts.bin") {
+            loft = true;
+        } else if source.contains("routeproperties.xml") {
+            let asset_lower = asset.to_lowercase();
+            if asset_lower.contains("sky") || asset_lower.contains("weather") || source.contains("weather") {
+                weather = true;
+            } else {
+                scenery = true;
+            }
+        } else if source.contains("scenery") {
+            scenery = true;
+        }
+        if source.contains("sounds") || source.contains("audio") {
+            audio = true;
+        }
     }
 
-    let _ = relative_path;
-    true
+    let asset_lower = asset.to_lowercase();
+    if asset_lower.ends_with(".wav") || asset_lower.ends_with(".ogg") || asset_lower.ends_with(".mp3") {
+        audio = true;
+    }
+
+    if trackrules || asset_lower.contains("trackrules") {
+        RouteAssetType::TrackRules
+    } else if track {
+        RouteAssetType::Track
+    } else if road {
+        RouteAssetType::Road
+    } else if loft {
+        RouteAssetType::Loft
+    } else if weather {
+        RouteAssetType::Weather
+    } else if audio {
+        RouteAssetType::Audio
+    } else if scenery || asset_lower.contains("scenery") {
+        RouteAssetType::Scenery
+    } else if asset_lower.contains("track") {
+        RouteAssetType::Track
+    } else if asset_lower.contains("road") {
+        RouteAssetType::Road
+    } else if asset_lower.contains("loft") {
+        RouteAssetType::Loft
+    } else {
+        RouteAssetType::Other
+    }
+}
+pub fn is_protected_network_asset(asset: &RouteAssetItem) -> bool {
+    if asset.uses.iter().any(|usage| {
+        let path = usage.source_file.display().to_lowercase();
+        path.contains("tracks.bin")
+            || path.contains("/networks/")
+            || path.contains("\\networks\\")
+            || path.contains("trackrules")
+            || path.contains("junctions")
+    }) {
+        return true;
+    }
+
+    let path_lower = asset.path.to_lowercase();
+    if path_lower.contains("trackrules") || path_lower.contains("junctions") {
+        return true;
+    }
+
+    if path_lower.contains("signal")
+        && asset.uses.iter().any(|usage| {
+            let path = usage.source_file.display().to_lowercase();
+            path.contains("tracks.bin")
+                || path.contains("/networks/")
+                || path.contains("\\networks\\")
+        })
+    {
+        return true;
+    }
+
+    false
 }
 
 pub(crate) fn is_skipped_route_scan_directory(name: &str, ignore_scenarios: bool) -> bool {
@@ -1498,6 +1618,7 @@ where
                 uses.push(AssetUse {
                     source_file: analysis.file.clone(),
                     tile: tile.clone(),
+                    tile_kind: analysis.file.tile_kind(),
                     kind,
                 });
             }
@@ -1670,15 +1791,32 @@ where
         let parts: Vec<&str> = relative_asset.split('/').collect();
         let in_archive = if parts.len() >= 3 {
             let product_dir = assets_path.join(parts[0]).join(parts[1]);
-            let inner_path = parts[2..].join("/").to_lowercase();
-            let variants = [
+            let inner_path = parts[2..].join("\\").to_lowercase();
+            let product_path = parts[1..].join("\\").to_lowercase();
+            let full_path = relative_asset.replace('/', "\\").to_lowercase();
+            let mut variants = vec![
                 inner_path.clone(),
-                replace_broken_characters(&inner_path, "ss"),
-                replace_broken_characters(&inner_path, "ß"),
+                product_path.clone(),
+                full_path.clone(),
             ];
+            for base in [inner_path, product_path, full_path] {
+                variants.push(replace_broken_characters(&base, "ss"));
+                variants.push(replace_broken_characters(&base, "ß"));
+            }
+            // Texture slot prefixes: ensure a trailing extension for image refs.
+            let mut texture_variants = Vec::new();
+            for variant in &variants {
+                if !variant.ends_with(".tgpcdx")
+                    && !variant.ends_with(".geopcdx")
+                    && !variant.ends_with(".bin")
+                {
+                    texture_variants.push(format!("{}.tgpcdx", variant));
+                }
+            }
+            variants.extend(texture_variants);
             ap_cache
                 .get(&product_dir)
-                .is_some_and(|files| variants.iter().any(|variant| files.contains(variant)))
+                .is_some_and(|files| variants.iter().any(|variant| files.contains(&variant.trim().to_lowercase())))
         } else {
             false
         };
@@ -1715,6 +1853,7 @@ where
                 uses: uses.clone(),
                 suggested_repair,
                 is_corrupted_link: is_corrupted,
+                asset_type: classify_route_asset_type(&display_path, &uses),
             });
         }
 
@@ -1791,12 +1930,86 @@ pub(crate) fn replace_missing_asset(
         .to_string_lossy()
         .replace('/', "\\");
     let new_asset = replacement_relative.to_string_lossy().replace('\\', "/");
-    check_asset_kind_compatibility(old_asset, &new_asset)?;
     if !serz_path.is_file() {
         return Err(format!("Не найден Serz: {}", serz_path.display()));
     }
     if uses.is_empty() {
         return Err("Для отсутствующего ассета не найдены места использования.".to_owned());
+    }
+
+    let asset_type = classify_route_asset_type(old_asset, uses);
+    let replacement_xml = read_serz_xml(serz_path, &replacement_path)
+        .ok()
+        .or_else(|| std::fs::read_to_string(&replacement_path).ok());
+    let root_tag = replacement_xml.as_ref().and_then(|xml| first_blueprint_tag(xml));
+    let extension_ok = replacement_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bin") || ext.eq_ignore_ascii_case("xml"));
+    match asset_type {
+        RouteAssetType::Scenery => {
+            if let Some(tag) = &root_tag {
+                if ![
+                    "cSceneryBlueprint",
+                    "cAnimSceneryBlueprint",
+                    "cTimeSceneryBlueprint",
+                    "cSimpleWaterBlueprint",
+                    "cPrecipitationBlueprint",
+                ]
+                .contains(&tag.as_str())
+                {
+                    return Err("Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned());
+                }
+            } else if !extension_ok {
+                return Err("Для scenery-объекта выберите замену из папки Scenery.".to_owned());
+            }
+        }
+        RouteAssetType::Loft => {
+            if let Some(tag) = &root_tag {
+                if ![
+                    "cLoftBlueprint",
+                    "cTrackSectionBlueprint",
+                    "cRoadSectionBlueprint",
+                ]
+                .contains(&tag.as_str())
+                {
+                    return Err("Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned());
+                }
+            } else if !extension_ok {
+                return Err("Для loft-объекта выберите замену из папки Networks.".to_owned());
+            }
+        }
+        RouteAssetType::Road => {
+            if let Some(tag) = &root_tag {
+                if tag != "cRoadSectionBlueprint" {
+                    return Err("Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned());
+                }
+            } else if !extension_ok {
+                return Err("Для road-объекта выберите замену из папки Networks.".to_owned());
+            }
+        }
+        RouteAssetType::TrackRules => {
+            return Err("Замена путевых объектов в Tracks.bin заблокирована для предотвращения повреждения маршрута.".to_owned());
+        }
+        _ => {
+            if root_tag.is_none() && !extension_ok {
+                return Err("Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned());
+            }
+        }
+    }
+
+    if old_asset.to_lowercase().contains("trackrules")
+        || old_asset.to_lowercase().contains("junctions")
+        || uses.iter().any(|usage| {
+            let path = usage.source_file.display().to_lowercase();
+            path.contains("tracks.bin")
+                || path.contains("/networks/")
+                || path.contains("\\networks\\")
+                || path.contains("trackrules")
+                || path.contains("junctions")
+        })
+    {
+        return Err("Замена путевых объектов в Tracks.bin заблокирована для предотвращения повреждения маршрута.".into());
     }
 
     let canonical_route = route_path
@@ -3298,6 +3511,12 @@ mod tests {
                 stamp: None,
             },
             tile: "тайл X=+000000 Z=+000000".to_owned(),
+            tile_kind: RouteFile::Archive {
+                archive: archive.clone(),
+                name: "Scenery/Grass.xml".to_owned(),
+                stamp: None,
+            }
+            .tile_kind(),
             kind: AssetKind::Scenery,
         }];
 
@@ -3602,4 +3821,12 @@ mod tests {
         assert_eq!(references[0].0.to_text(), r"RailVehicles\Brücke.GeoPcDx");
         assert_eq!(references[1].0.to_text(), r"Textures\Bäume.TgPcDx");
     }
+}
+
+fn first_blueprint_tag(xml: &str) -> Option<String> {
+    let regex = Regex::new(r"<(c[A-Za-z0-9]+Blueprint)").ok()?;
+    regex
+        .captures(xml)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_owned())
 }

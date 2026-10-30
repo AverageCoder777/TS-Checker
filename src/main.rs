@@ -1,4 +1,4 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 slint::include_modules!();
 use slint::Model;
 
@@ -66,6 +66,7 @@ struct MissingAsset {
     uses: Vec<AssetUse>,
     suggested_repair: Option<String>,
     is_corrupted_link: bool,
+    asset_type: crate::assets::RouteAssetType,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,7 @@ struct UmlautAsset {
 struct AssetUse {
     source_file: RouteFile,
     tile: String,
+    tile_kind: TileKind,
     /// Что за объект: объект маршрута, файл состава или что-то другое.
     kind: AssetKind,
 }
@@ -180,9 +182,9 @@ impl RouteFile {
                 cache.insert(archive.to_path_buf(), zip);
             }
             let zip = cache.get_mut(archive).unwrap();
-            let mut member = zip.by_name(name).map_err(|error| {
-                format!("Не удалось прочитать {name} из архива: {error}")
-            })?;
+            let mut member = zip
+                .by_name(name)
+                .map_err(|error| format!("Не удалось прочитать {name} из архива: {error}"))?;
             let member_size = member.size();
             let mut reader = BufReader::new(&mut member);
             let mut data = Vec::with_capacity(member_size as usize);
@@ -196,10 +198,10 @@ impl RouteFile {
                 format!("Не удалось создать папку {}: {error}", parent.display())
             })?;
         }
-        let mut output = BufWriter::new(
-            fs::File::create(&target)
-                .map_err(|error| format!("Не удалось создать файл {}: {error}", target.display()))?,
-        );
+        let mut output =
+            BufWriter::new(fs::File::create(&target).map_err(|error| {
+                format!("Не удалось создать файл {}: {error}", target.display())
+            })?);
         output
             .write_all(&data)
             .map_err(|error| format!("Не удалось распаковать {name}: {error}"))?;
@@ -278,6 +280,63 @@ impl AssetKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TileKind {
+    Scenery,
+    Loft,
+    Road,
+    Track,
+    TracksMaster,
+    LoftsMaster,
+    RoadsMaster,
+    RouteProps,
+    Other,
+}
+
+impl TileKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Scenery => "Сценери",
+            Self::Loft => "Лофт",
+            Self::Road => "Дорога",
+            Self::Track => "Пути",
+            Self::TracksMaster => "Сеть",
+            Self::LoftsMaster => "Сеть",
+            Self::RoadsMaster => "Сеть",
+            Self::RouteProps => "Свойства",
+            Self::Other => "Прочее",
+        }
+    }
+}
+
+impl RouteFile {
+    pub(crate) fn tile_kind(&self) -> TileKind {
+        let path = self.display().to_lowercase();
+        if path.ends_with("tracks.bin") {
+            TileKind::TracksMaster
+        } else if path.ends_with("lofts.bin") {
+            TileKind::LoftsMaster
+        } else if path.ends_with("roads.bin") {
+            TileKind::RoadsMaster
+        } else if path.ends_with("routeproperties.xml") {
+            TileKind::RouteProps
+        } else if path.contains("track tiles")
+            || path.contains("track tiles\\")
+            || path.contains("track tiles/")
+        {
+            TileKind::Track
+        } else if path.contains("road tiles") {
+            TileKind::Road
+        } else if path.contains("loft tiles") {
+            TileKind::Loft
+        } else if path.contains("scenery") {
+            TileKind::Scenery
+        } else {
+            TileKind::Other
+        }
+    }
+}
+
 struct AssetReplacementReport {
     replaced_files: usize,
     replaced_instances: usize,
@@ -340,8 +399,8 @@ mod reference;
 mod routes;
 mod scenario;
 mod settings;
-mod translit;
 mod texture;
+mod translit;
 mod windows;
 
 pub(crate) use assets::*;
@@ -375,15 +434,15 @@ fn load_vehicle_preview_image(
     vehicle: &ScenarioVehicle,
     resolved: Option<&std::path::PathBuf>,
 ) -> slint::Image {
-    let resolved = resolved
-        .cloned()
-        .or_else(|| crate::blueprint::resolve_blueprint_file_cached_free(
+    let resolved = resolved.cloned().or_else(|| {
+        crate::blueprint::resolve_blueprint_file_cached_free(
             rw_path,
             route_path,
             &vehicle.blueprint,
             &vehicle.provider,
             &vehicle.product,
-        ));
+        )
+    });
     let Some(path) = resolved else {
         return slint::Image::default();
     };
@@ -424,7 +483,9 @@ fn load_vehicle_preview_image(
     let mut base_dir = String::new();
     let mut found = false;
     for index in 0..zip.len() {
-        let Ok(entry) = zip.by_index(index) else { continue; };
+        let Ok(entry) = zip.by_index(index) else {
+            continue;
+        };
         let name = entry.name().unwrap_or_default().to_string();
         let entry_stem = std::path::Path::new(&name)
             .file_stem()
@@ -447,11 +508,16 @@ fn load_vehicle_preview_image(
     let image_name = if base_dir.is_empty() {
         "LocoInformation/image.png".to_owned()
     } else {
-        format!("{}/LocoInformation/image.png", base_dir.trim_end_matches('/'))
+        format!(
+            "{}/LocoInformation/image.png",
+            base_dir.trim_end_matches('/')
+        )
     };
 
     for index in 0..zip.len() {
-        let Ok(mut entry) = zip.by_index(index) else { continue; };
+        let Ok(mut entry) = zip.by_index(index) else {
+            continue;
+        };
         let entry_name = entry.name().unwrap_or_default().to_string();
         if !entry_name.eq_ignore_ascii_case(&image_name) {
             continue;
@@ -535,11 +601,7 @@ fn sort_items(items: &mut Vec<BrokenResourceRef>, col: usize, asc: bool) {
             1 => b.expected_path.to_string_lossy().to_string(),
             _ => b.parent_file.to_string_lossy().to_string(),
         };
-        if asc {
-            va.cmp(&vb)
-        } else {
-            vb.cmp(&va)
-        }
+        if asc { va.cmp(&vb) } else { vb.cmp(&va) }
     });
 }
 
@@ -604,8 +666,7 @@ fn build_inventory_rows(
             slint::ModelRc::new(slint::VecModel::from(row_items));
         rows.push(row);
         safe_flags.push(crate::assets::is_safe_for_global_replacement(
-            &a.path,
-            &a.uses,
+            &a.path, &a.uses,
         ));
     }
     (rows, safe_flags)
@@ -641,8 +702,20 @@ fn main() {
                         Ok(data) => match crate::texture::decode_tgpcdx_to_rgba(&data) {
                             Ok((w, h, rgba)) => {
                                 let viewer = TextureViewerWindow::new().unwrap();
-                                viewer.set_texture_image(crate::texture::rgba_to_slint_image(w, h, &rgba));
-                                viewer.set_info_text(format!("{} x {} px  {}", w, h, path.display()).into());
+                                viewer.set_texture_image(crate::texture::rgba_to_slint_image(
+                                    w, h, &rgba,
+                                ));
+                                viewer.set_texture_orig_width(w as i32);
+                                viewer.set_texture_orig_height(h as i32);
+                                viewer.set_zoom_factor(if w > 640 || h > 480 {
+                                    (640.0 / w as f32).min(480.0 / h as f32)
+                                } else {
+                                    1.0
+                                });
+                                viewer.set_info_text(
+                                    format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display())
+                                        .into(),
+                                );
                                 let _ = viewer.run();
                                 std::process::exit(0);
                             }
@@ -660,13 +733,27 @@ fn main() {
             }
         }
         // File association: open .TgPcDx directly in texture viewer
-        if path.is_file() && path.extension().map(|e| e.eq_ignore_ascii_case("tgpcdx")).unwrap_or(false) {
+        if path.is_file()
+            && path
+                .extension()
+                .map(|e| e.eq_ignore_ascii_case("tgpcdx"))
+                .unwrap_or(false)
+        {
             match std::fs::read(&path) {
                 Ok(data) => match crate::texture::decode_tgpcdx_to_rgba(&data) {
                     Ok((w, h, rgba)) => {
                         let viewer = TextureViewerWindow::new().unwrap();
                         viewer.set_texture_image(crate::texture::rgba_to_slint_image(w, h, &rgba));
-                        viewer.set_info_text(format!("{} x {} px  {}", w, h, path.display()).into());
+                        viewer.set_texture_orig_width(w as i32);
+                        viewer.set_texture_orig_height(h as i32);
+                        viewer.set_zoom_factor(if w > 640 || h > 480 {
+                            (640.0 / w as f32).min(480.0 / h as f32)
+                        } else {
+                            1.0
+                        });
+                        viewer.set_info_text(
+                            format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display()).into(),
+                        );
                         let _ = viewer.run();
                         std::process::exit(0);
                     }
@@ -703,6 +790,7 @@ fn main() {
     // Handle file association launch: TS-Checker opened with a .bin/.GeoPcDx file.
     let app = std::sync::Arc::new(std::sync::Mutex::new(app::CheckerApp::default()));
     let ui = MainWindow::new().unwrap();
+    crate::settings::apply_saved_language(&crate::settings::load_language());
     let ui_handle = ui.as_weak();
     if let Ok(mut app) = app.lock() {
         app.start_route_scan();
@@ -784,10 +872,15 @@ fn main() {
         let app = app_clone7.clone();
         move |idx| {
             if let Ok(mut app) = app.lock() {
-                let missing_assets = app.result.as_ref().map(|r| r.missing_assets.clone()).unwrap_or_default();
+                let missing_assets = app
+                    .result
+                    .as_ref()
+                    .map(|r| r.missing_assets.clone())
+                    .unwrap_or_default();
                 if let Some(missing) = missing_assets.get(idx as usize).cloned() {
                     if let Some(repair) = missing.suggested_repair.clone() {
-                        let assets_path = std::path::PathBuf::from(app.rw_path.trim()).join("Assets");
+                        let assets_path =
+                            std::path::PathBuf::from(app.rw_path.trim()).join("Assets");
                         let replacement = assets_path.join(repair.replace('/', "\\"));
                         let replacement_relative = repair.clone();
                         app.start_asset_replacement(
@@ -806,7 +899,11 @@ fn main() {
         let app = app_clone7.clone();
         move || {
             if let Ok(mut app) = app.lock() {
-                let missing_assets = app.result.as_ref().map(|r| r.missing_assets.clone()).unwrap_or_default();
+                let missing_assets = app
+                    .result
+                    .as_ref()
+                    .map(|r| r.missing_assets.clone())
+                    .unwrap_or_default();
                 let repairable: Vec<_> = missing_assets
                     .into_iter()
                     .filter(|asset| {
@@ -846,13 +943,30 @@ fn main() {
             let (asset, tiles) = if let Ok(app) = app.lock() {
                 if let Some(result) = app.result.as_ref() {
                     if let Some(missing) = result.missing_assets.get(idx as usize) {
-                        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                        let mut counts: std::collections::BTreeMap<String, (TileKind, usize)> =
+                            std::collections::BTreeMap::new();
                         for usage in &missing.uses {
-                            *counts.entry(usage.tile.clone()).or_insert(0) += 1;
+                            let entry = counts
+                                .entry(usage.tile.clone())
+                                .or_insert((usage.tile_kind, 0));
+                            entry.1 += 1;
                         }
                         let tiles: Vec<slint::SharedString> = counts
                             .into_iter()
-                            .map(|(tile, count)| format!("{} ({})", tile, count).into())
+                            .map(|(tile, (kind, count))| {
+                                let badge = match kind {
+                                    TileKind::Scenery => "[Сценери]",
+                                    TileKind::Loft => "[Лофт]",
+                                    TileKind::Road => "[Дорога]",
+                                    TileKind::Track => "[Пути]",
+                                    TileKind::TracksMaster
+                                    | TileKind::LoftsMaster
+                                    | TileKind::RoadsMaster => "[Сеть]",
+                                    TileKind::RouteProps => "[Свойства]",
+                                    TileKind::Other => "[Прочее]",
+                                };
+                                format!("{} {} ({})", badge, tile, count).into()
+                            })
                             .collect();
                         (missing.path.clone(), tiles)
                     } else {
@@ -874,7 +988,11 @@ fn main() {
         let state = ap_picker_state.clone();
         let handle = ap_picker_handle.clone();
         move |query| {
-            let entries = state.lock().ok().and_then(|s| s.as_ref().map(|s| s.entries.clone())).unwrap_or_default();
+            let entries = state
+                .lock()
+                .ok()
+                .and_then(|s| s.as_ref().map(|s| s.entries.clone()))
+                .unwrap_or_default();
             let q = query.to_lowercase();
             let filtered: Vec<slint::SharedString> = entries
                 .iter()
@@ -900,21 +1018,44 @@ fn main() {
         let app = app_clone7.clone();
         move || {
             let (archive_path, missing, rw_path, _selected_index, entry) = {
-                let guard = match state.lock() { Ok(g) => g, Err(_) => return };
+                let guard = match state.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
                 let Some(s) = guard.as_ref() else { return };
-                let pw = match handle.upgrade() { Some(p) => p, None => return };
+                let pw = match handle.upgrade() {
+                    Some(p) => p,
+                    None => return,
+                };
                 let idx = pw.get_selected_index() as usize;
                 let filtered = pw.get_filtered_entries();
-                let selected_entry = filtered.row_data(idx).map(|v| v.to_string()).or_else(|| s.entries.get(idx).cloned());
+                let selected_entry = filtered
+                    .row_data(idx)
+                    .map(|v| v.to_string())
+                    .or_else(|| s.entries.get(idx).cloned());
                 let Some(entry) = selected_entry else { return };
-                (s.archive_path.clone(), s.missing.clone(), s.rw_path.clone(), idx, entry)
+                (
+                    s.archive_path.clone(),
+                    s.missing.clone(),
+                    s.rw_path.clone(),
+                    idx,
+                    entry,
+                )
             };
             // derive provider/product from archive parent dirs
             let assets_path = PathBuf::from(rw_path.trim()).join("Assets");
             let archive_rel = archive_path.strip_prefix(&assets_path).ok();
-            let mut parts: Vec<String> = archive_rel.map(|p| p.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect()).unwrap_or_default();
+            let mut parts: Vec<String> = archive_rel
+                .map(|p| {
+                    p.components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
             // remove archive file name
-            if !parts.is_empty() { parts.pop(); }
+            if !parts.is_empty() {
+                parts.pop();
+            }
             let provider = parts.first().cloned().unwrap_or_default();
             let product = parts.get(1).cloned().unwrap_or_default();
             // build a synthetic replacement relative path Provider/Product/...xml? Engine expects .bin file; extract entry to temp file.
@@ -926,7 +1067,10 @@ fn main() {
             };
             let temp_dir = assets_path.join(&temp_rel_dir);
             let _ = std::fs::create_dir_all(&temp_dir);
-            let entry_file_name = std::path::Path::new(&entry).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "asset.bin".to_owned());
+            let entry_file_name = std::path::Path::new(&entry)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "asset.bin".to_owned());
             let temp_file = temp_dir.join(&entry_file_name);
             // extract from archive
             if let Ok(file) = std::fs::File::open(&archive_path) {
@@ -938,7 +1082,10 @@ fn main() {
                     }
                 }
             }
-            let replacement_relative = temp_file.strip_prefix(&assets_path).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| entry.clone());
+            let replacement_relative = temp_file
+                .strip_prefix(&assets_path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| entry.clone());
             if let Ok(mut app) = app.lock() {
                 app.start_asset_replacement(
                     missing,
@@ -979,6 +1126,15 @@ fn main() {
             }
         };
         if let Some(missing) = missing {
+            if crate::assets::is_protected_network_asset(&crate::assets::RouteAssetItem {
+                path: missing.path.clone(),
+                uses: missing.uses.clone(),
+            }) {
+                if let Ok(mut app) = app_clone7.lock() {
+                    app.status = "Замена путевых объектов в Tracks.bin заблокирована для предотвращения повреждения маршрута.".to_owned();
+                }
+                return;
+            }
             let assets_path = PathBuf::from(rw_path.trim()).join("Assets");
             let start_dir =
                 existing_directory_upwards(&asset_directory(&assets_path, &missing.path))
@@ -1045,7 +1201,9 @@ fn main() {
     });
     let timer = slint::Timer::default();
     let ui_handle_timer = ui_handle.clone();
-    let inv_handle_timer_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<slint::Weak<AssetInventoryWindow>>));
+    let inv_handle_timer_slot = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<slint::Weak<AssetInventoryWindow>>,
+    ));
     let inv_handle_timer_slot_clone = inv_handle_timer_slot.clone();
     timer.start(
         slint::TimerMode::Repeated,
@@ -1058,7 +1216,10 @@ fn main() {
             if let Ok(mut app) = app_clone.lock() {
                 app.receive_background_results();
                 if app.inventory_refresh_pending {
-                    let inv_weak = inv_handle_timer_slot_clone.lock().ok().and_then(|g| g.clone());
+                    let inv_weak = inv_handle_timer_slot_clone
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone());
                     if let Some(inv) = inv_weak.and_then(|w| w.upgrade()) {
                         let show_missing = inv.get_show_missing_only();
                         let (rows, safe) = if let Ok(state) = app.asset_inventory_state.lock() {
@@ -1077,17 +1238,55 @@ fn main() {
                     && app.missing_assets_popup.is_some()
                     && !app.missing_assets_shown
                 {
-                    let missing_assets = app.result.as_ref().map(|r| r.missing_assets.clone()).unwrap_or_default();
-                    let paths: Vec<slint::SharedString> = missing_assets.iter().map(|m| m.path.clone().into()).collect();
-                    let counts: Vec<i32> = missing_assets.iter().map(|m| m.uses.len() as i32).collect();
-                    let repairs: Vec<slint::SharedString> = missing_assets.iter().map(|m| m.suggested_repair.clone().unwrap_or_default().into()).collect();
-                    let corrupted: Vec<bool> = missing_assets.iter().map(|m| m.is_corrupted_link).collect();
+                    let missing_assets = app
+                        .result
+                        .as_ref()
+                        .map(|r| r.missing_assets.clone())
+                        .unwrap_or_default();
+                    let paths: Vec<slint::SharedString> = missing_assets
+                        .iter()
+                        .map(|m| m.path.clone().into())
+                        .collect();
+                    let counts: Vec<i32> =
+                        missing_assets.iter().map(|m| m.uses.len() as i32).collect();
+                    let repairs: Vec<slint::SharedString> = missing_assets
+                        .iter()
+                        .map(|m| m.suggested_repair.clone().unwrap_or_default().into())
+                        .collect();
+                    let corrupted: Vec<bool> =
+                        missing_assets.iter().map(|m| m.is_corrupted_link).collect();
+                    let types: Vec<slint::SharedString> = missing_assets
+                        .iter()
+                        .map(|m| crate::assets::RouteAssetType::label(m.asset_type).into())
+                        .collect();
+                    let safe: Vec<bool> = missing_assets
+                        .iter()
+                        .map(|m| {
+                            !crate::assets::is_protected_network_asset(
+                                &crate::assets::RouteAssetItem {
+                                    path: m.path.clone(),
+                                    uses: m.uses.clone(),
+                                },
+                            )
+                        })
+                        .collect();
                     if let Some(mw) = missing_handle.upgrade() {
                         mw.set_missing_assets(slint::ModelRc::new(slint::VecModel::from(paths)));
                         mw.set_missing_counts(slint::ModelRc::new(slint::VecModel::from(counts)));
-                        mw.set_missing_suggested_repairs(slint::ModelRc::new(slint::VecModel::from(repairs)));
-                        mw.set_missing_corrupted(slint::ModelRc::new(slint::VecModel::from(corrupted)));
-                        mw.set_active_tile_list(slint::ModelRc::new(slint::VecModel::<slint::SharedString>::default()));
+                        mw.set_missing_suggested_repairs(slint::ModelRc::new(
+                            slint::VecModel::from(repairs),
+                        ));
+                        mw.set_missing_corrupted(slint::ModelRc::new(slint::VecModel::from(
+                            corrupted,
+                        )));
+                        mw.set_missing_asset_types(slint::ModelRc::new(slint::VecModel::from(
+                            types,
+                        )));
+                        mw.set_missing_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                        mw.set_active_tile_list(slint::ModelRc::new(slint::VecModel::<
+                            slint::SharedString,
+                        >::default(
+                        )));
                         mw.set_active_tile_asset("".into());
                         let _ = mw.show();
                         app.missing_assets_shown = true;
@@ -1096,7 +1295,10 @@ fn main() {
                 // Sync asset editor text when document loaded
                 let q = ui.get_search_query().to_string();
                 app.search_query = q.clone();
-                if app.routes.len() == last_count && q == last_query && app.route_thumbnails_enabled == last_thumbnails_enabled {
+                if app.routes.len() == last_count
+                    && q == last_query
+                    && app.route_thumbnails_enabled == last_thumbnails_enabled
+                {
                     if app.status != last_status {
                         last_status = app.status.clone();
                         ui.set_status(last_status.clone().into());
@@ -1105,17 +1307,22 @@ fn main() {
                         last_check_log = app.check_log.clone();
                         ui.set_check_log(last_check_log.clone().into());
                     }
-                ui.set_has_result(app.result.is_some());
-                ui.set_missing_assets_count(app.result.as_ref().map(|r| r.missing_assets.len() as i32).unwrap_or(0));
-                ui.set_is_checking(app.is_checking());
-                if app.is_checking() {
-                    ui.set_show_log(true);
-                }
-                ui.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
-                ui.set_is_checking(app.is_checking());
-                if app.is_checking() {
-                    ui.set_show_log(true);
-                }
+                    ui.set_has_result(app.result.is_some());
+                    ui.set_missing_assets_count(
+                        app.result
+                            .as_ref()
+                            .map(|r| r.missing_assets.len() as i32)
+                            .unwrap_or(0),
+                    );
+                    ui.set_is_checking(app.is_checking());
+                    if app.is_checking() {
+                        ui.set_show_log(true);
+                    }
+                    ui.set_route_thumbnails_enabled(app.route_thumbnails_enabled);
+                    ui.set_is_checking(app.is_checking());
+                    if app.is_checking() {
+                        ui.set_show_log(true);
+                    }
                     return;
                 }
                 last_count = app.routes.len();
@@ -1170,7 +1377,12 @@ fn main() {
                     ui.set_check_log(last_check_log.clone().into());
                 }
                 ui.set_has_result(app.result.is_some());
-                ui.set_missing_assets_count(app.result.as_ref().map(|r| r.missing_assets.len() as i32).unwrap_or(0));
+                ui.set_missing_assets_count(
+                    app.result
+                        .as_ref()
+                        .map(|r| r.missing_assets.len() as i32)
+                        .unwrap_or(0),
+                );
             }
         },
     );
@@ -1258,6 +1470,7 @@ fn main() {
     let settings_handle2 = settings_win.as_weak();
     let settings_handle3 = settings_win.as_weak();
     let settings_handle4 = settings_win.as_weak();
+    let settings_handle5 = settings_win.as_weak();
     if let Ok(app) = app_clone11.lock() {
         let available = settings::maximum_serz_processes();
         let all_presets: [usize; 6] = [1, 6, 8, 12, 16, 32];
@@ -1275,7 +1488,10 @@ fn main() {
                 .max()
                 .unwrap_or(1);
         }
-        let index = presets.iter().position(|p| *p == current.to_string()).unwrap_or(0);
+        let index = presets
+            .iter()
+            .position(|p| *p == current.to_string())
+            .unwrap_or(0);
         settings_win.set_serz_process_limit(current as i32);
         settings_win.set_serz_process_limit_max(available as i32);
         settings_win.set_serz_presets(slint::ModelRc::new(slint::VecModel::from(presets)));
@@ -1285,6 +1501,15 @@ fn main() {
         settings_win.set_route_scan_on_hdd(app.route_scan_on_hdd);
         settings_win.set_hide_quick_drive_free_roam(app.hide_quick_drive_free_roam);
         settings_win.set_game_path(app.rw_path.clone().into());
+        let langs = ["ru", "en", "de"];
+        settings_win.set_language_options(slint::ModelRc::new(slint::VecModel::from(
+            langs.iter().map(|s| (*s).to_string().into()).collect::<Vec<slint::SharedString>>(),
+        )));
+        let lang_idx = langs
+            .iter()
+            .position(|&l| l == app.language)
+            .unwrap_or(0);
+        settings_win.set_language_index(lang_idx as i32);
     }
     settings_win.on_pick_locoswap(move || {
         if let Some(sw) = settings_handle.upgrade() {
@@ -1318,6 +1543,20 @@ fn main() {
             }
         }
     });
+    let app_clone_lang = app_clone11.clone();
+    settings_win.on_language_selected(move |lang| {
+        let lang = lang.to_string();
+        if let Ok(mut app) = app_clone_lang.lock() {
+            app.language = lang.clone();
+        }
+        crate::settings::apply_saved_language(&lang);
+        let _ = crate::settings::save_language(&lang);
+        if let Some(sw) = settings_handle5.upgrade() {
+            let langs = ["ru", "en", "de"];
+            let idx = langs.iter().position(|&l| l == lang).unwrap_or(0);
+            sw.set_language_index(idx as i32);
+        }
+    });
     let app_clone12 = app_clone11.clone();
     settings_win.on_serz_preset_selected(move |i| {
         if let Some(sw) = settings_handle4.upgrade() {
@@ -1340,6 +1579,9 @@ fn main() {
             let thumbs = sw.get_route_thumbnails_enabled();
             let hdd = sw.get_route_scan_on_hdd();
             let hide_scenarios = sw.get_hide_quick_drive_free_roam();
+            let lang_idx = sw.get_language_index() as usize;
+            let langs = ["ru", "en", "de"];
+            let language = langs.get(lang_idx).copied().unwrap_or("ru").to_owned();
             if let Ok(mut app) = app_clone11.lock() {
                 app.serz_process_limit = limit;
                 app.locoswap_path = path.clone();
@@ -1347,12 +1589,15 @@ fn main() {
                 app.route_thumbnails_enabled = thumbs;
                 app.route_scan_on_hdd = hdd;
                 app.hide_quick_drive_free_roam = hide_scenarios;
+                app.language = language.clone();
                 let _ = crate::settings::save_serz_process_limit(limit);
                 let _ = crate::settings::save_locoswap_path(&path);
                 let _ = crate::settings::save_last_game_path(&game_path);
                 let _ = crate::settings::save_route_thumbnail_setting(thumbs);
                 let _ = crate::settings::save_route_scan_on_hdd(hdd);
                 let _ = crate::settings::save_hide_quick_drive_free_roam(hide_scenarios);
+                let _ = crate::settings::save_language(&language);
+                crate::settings::apply_saved_language(&language);
             }
         }
     });
@@ -1688,7 +1933,9 @@ fn main() {
                 app.scenarios
                     .iter()
                     .enumerate()
-                    .filter(|(_, s)| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                    .filter(|(_, s)| {
+                        !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type)
+                    })
                     .position(|(i, _)| i == si)
             });
             if let Some(ui) = ui_handle.upgrade() {
@@ -1771,7 +2018,10 @@ fn main() {
                 Some(c) => c,
                 None => return,
             };
-            let vehicle = match consists.get(consist_idx).and_then(|c| c.vehicles.get(idx as usize)) {
+            let vehicle = match consists
+                .get(consist_idx)
+                .and_then(|c| c.vehicles.get(idx as usize))
+            {
                 Some(v) => v.clone(),
                 None => return,
             };
@@ -1802,9 +2052,10 @@ fn main() {
             } else {
                 String::new()
             };
-            let image = load_vehicle_preview_image(&rw_path, &route_path, &vehicle, resolved.as_ref());
+            let image =
+                load_vehicle_preview_image(&rw_path, &route_path, &vehicle, resolved.as_ref());
             if let Some(sw) = scenario_handle_preview.upgrade() {
-                if let Some(idx) = path_text.find("Assets"){
+                if let Some(idx) = path_text.find("Assets") {
                     sw.set_selected_vehicle_path(path_text[idx..].into());
                 } else {
                     sw.set_selected_vehicle_path(path_text.into());
@@ -1812,7 +2063,9 @@ fn main() {
                 sw.set_selected_vehicle_image(image);
                 let details = format!(
                     "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: {}",
-                    vehicle.provider, vehicle.product, vehicle.blueprint,
+                    vehicle.provider,
+                    vehicle.product,
+                    vehicle.blueprint,
                     vehicle.number.clone().unwrap_or_else(|| "—".to_owned())
                 );
                 sw.set_selected_vehicle_info(details.into());
@@ -1921,20 +2174,19 @@ fn main() {
                         .arg("/select,")
                         .arg(path.as_os_str())
                         .spawn();
-                  } else {
-                      let mut cur = path.as_path();
-                      while !cur.exists() {
-                          match cur.parent() {
-                              Some(p) => cur = p,
-                              None => break,
-                          }
-                      }
-                      let _ = crate::windows::open_in_file_explorer(cur);
-                  }
-            } else {
-                  // Если блюпринт не найден, ничего не открываем.
+                } else {
+                    let mut cur = path.as_path();
+                    while !cur.exists() {
+                        match cur.parent() {
+                            Some(p) => cur = p,
+                            None => break,
+                        }
+                    }
+                    let _ = crate::windows::open_in_file_explorer(cur);
                 }
-
+            } else {
+                // Если блюпринт не найден, ничего не открываем.
+            }
         }
     });
     ui.on_open_route_folder(move || {
@@ -1952,11 +2204,11 @@ fn main() {
             inv.set_show_missing_only(!cur);
             let show_missing = !cur;
             if let Ok(app) = app_clone6.lock() {
-                    if let Ok(state) = app.asset_inventory_state.lock() {
-                        let (rows, safe) = build_inventory_rows(&state, show_missing);
-                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
-                    }
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let (rows, safe) = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                    inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                }
             }
         }
     });
@@ -1977,11 +2229,11 @@ fn main() {
                         _ => {}
                     }
                 }
-                    if let Ok(state) = app.asset_inventory_state.lock() {
-                        let (rows, safe) = build_inventory_rows(&state, show_missing);
-                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
-                    }
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let (rows, safe) = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                    inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                }
             }
         }
     });
@@ -2002,11 +2254,11 @@ fn main() {
                         _ => {}
                     }
                 }
-                    if let Ok(state) = app.asset_inventory_state.lock() {
-                        let (rows, safe) = build_inventory_rows(&state, show_missing);
-                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
-                    }
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let (rows, safe) = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                    inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                }
             }
         }
     });
@@ -2017,11 +2269,11 @@ fn main() {
                 if let Ok(mut state) = app.asset_inventory_state.lock() {
                     state.search = text.to_string();
                 }
-                    if let Ok(state) = app.asset_inventory_state.lock() {
-                        let (rows, safe) = build_inventory_rows(&state, show_missing);
-                        inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                        inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
-                    }
+                if let Ok(state) = app.asset_inventory_state.lock() {
+                    let (rows, safe) = build_inventory_rows(&state, show_missing);
+                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                    inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
+                }
             }
         }
     });
@@ -2138,7 +2390,9 @@ fn main() {
         if (selected as usize) >= rows.row_count() {
             return;
         }
-        let first_cell = rows.row_data(selected as usize).and_then(|rm| rm.row_data(0));
+        let first_cell = rows
+            .row_data(selected as usize)
+            .and_then(|rm| rm.row_data(0));
         let asset_path = first_cell.map(|c| c.text.to_string()).unwrap_or_default();
         if asset_path.is_empty() {
             return;
@@ -2183,6 +2437,7 @@ fn main() {
             .map(|rel| rel.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| picked.to_string_lossy().replace('\\', "/"));
 
+        let asset_type = crate::assets::classify_route_asset_type(&asset.path, &asset.uses);
         let uses: Vec<_> = asset
             .uses
             .into_iter()
@@ -2201,6 +2456,7 @@ fn main() {
             uses,
             suggested_repair: None,
             is_corrupted_link: false,
+            asset_type,
         };
         if let Ok(mut app) = app_clone_replace.lock() {
             app.inventory_replacement_pending_check = true;
@@ -2246,8 +2502,10 @@ fn main() {
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let current_display_items: std::sync::Arc<std::sync::Mutex<Vec<BrokenResourceRef>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let audit_sort_col: std::sync::Arc<std::sync::Mutex<usize>> = std::sync::Arc::new(std::sync::Mutex::new(0));
-    let audit_sort_asc: std::sync::Arc<std::sync::Mutex<bool>> = std::sync::Arc::new(std::sync::Mutex::new(true));
+    let audit_sort_col: std::sync::Arc<std::sync::Mutex<usize>> =
+        std::sync::Arc::new(std::sync::Mutex::new(0));
+    let audit_sort_asc: std::sync::Arc<std::sync::Mutex<bool>> =
+        std::sync::Arc::new(std::sync::Mutex::new(true));
     let all_audit_items_for_start = all_audit_items.clone();
     let current_display_items_for_start = current_display_items.clone();
     let audit_sort_col_for_start = audit_sort_col.clone();
@@ -2318,68 +2576,85 @@ fn main() {
         let ap_cache = ApArchiveCache::new();
         let path_for_thread = path.clone();
         let window_weak_thread = window_weak.clone();
-            let all_store = all_audit_items_for_start.clone();
-            let current_store = current_display_items_for_start.clone();
-            let sort_col_store = audit_sort_col_for_start.clone();
-            let sort_asc_store = audit_sort_asc_for_start.clone();
-            let results_store = all_store.clone();
-            std::thread::spawn(move || {
-                println!("[Auditor] Starting audit for: {:?}", path_for_thread);
-                let progress_cb: std::sync::Arc<dyn Fn(usize, usize) + Send + Sync> = {
-                    let ww = window_weak_thread.clone();
-                    std::sync::Arc::new(move |done, total| {
-                        let ww = ww.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(w) = ww.upgrade() {
-                                w.set_audit_progress(done as f32 / total as f32);
-                                w.set_audit_status(format!("Сканирование: {} / {} файлов...", done, total).into());
-                            }
-                        });
-                    })
-                };
-                let report = crate::audit_folder_with_progress(&path_for_thread, &assets_root, &serz_path, max_threads, &ap_cache, Some(progress_cb));
-                println!("[Auditor] Audit done, broken: {}", report.broken_references.len());
-                if let Ok(mut store) = results_store.lock() {
-                    *store = report.broken_references.clone();
-                }
-                let col = *sort_col_store.lock().unwrap();
-                let asc = *sort_asc_store.lock().unwrap();
-                let filter = window_weak_thread.upgrade().map(|w| w.get_active_filter().to_string()).unwrap_or_else(|| "all".to_string());
-                let mut items: Vec<BrokenResourceRef> = report.broken_references.clone();
-                filter_items(&mut items, &filter);
-                sort_items(&mut items, col, asc);
-                if let Ok(mut store) = current_store.lock() {
-                    *store = items.clone();
-                }
+        let all_store = all_audit_items_for_start.clone();
+        let current_store = current_display_items_for_start.clone();
+        let sort_col_store = audit_sort_col_for_start.clone();
+        let sort_asc_store = audit_sort_asc_for_start.clone();
+        let results_store = all_store.clone();
+        std::thread::spawn(move || {
+            println!("[Auditor] Starting audit for: {:?}", path_for_thread);
+            let progress_cb: std::sync::Arc<dyn Fn(usize, usize) + Send + Sync> = {
                 let ww = window_weak_thread.clone();
-                slint::invoke_from_event_loop(move || {
-                    if let Some(w) = ww.upgrade() {
-                        let mut rows: Vec<slint::ModelRc<slint::StandardListViewItem>> = Vec::new();
-                        for b in &items {
-                            let kind = match b.kind {
-                                AssetResourceKind::Geometry => "Геометрия",
-                                AssetResourceKind::Texture => "Текстура",
-                                AssetResourceKind::Animation => "Анимация",
-                                AssetResourceKind::Script => "Скрипт",
-                                AssetResourceKind::Sound => "Звуки",
-                                AssetResourceKind::ChildBlueprint => "Дочерние объекты",
-                            };
-                            let mut item0 = slint::StandardListViewItem::default();
-                            item0.text = kind.into();
-                            let mut item1 = slint::StandardListViewItem::default();
-                            item1.text = b.expected_path.to_string_lossy().to_string().into();
-                            let mut item2 = slint::StandardListViewItem::default();
-                            item2.text = b.parent_file.to_string_lossy().to_string().into();
-                            rows.push(slint::ModelRc::new(slint::VecModel::from(vec![item0, item1, item2])));
+                std::sync::Arc::new(move |done, total| {
+                    let ww = ww.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = ww.upgrade() {
+                            w.set_audit_progress(done as f32 / total as f32);
+                            w.set_audit_status(
+                                format!("Сканирование: {} / {} файлов...", done, total).into(),
+                            );
                         }
-                        w.set_broken_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                        w.set_audit_progress(1.0);
-                        w.set_audit_status(format!("Готово: {} проблем", items.len()).into());
-                        w.set_selected_row(-1);
-                    }
+                    });
                 })
-                .ok();
-            });
+            };
+            let report = crate::audit_folder_with_progress(
+                &path_for_thread,
+                &assets_root,
+                &serz_path,
+                max_threads,
+                &ap_cache,
+                Some(progress_cb),
+            );
+            println!(
+                "[Auditor] Audit done, broken: {}",
+                report.broken_references.len()
+            );
+            if let Ok(mut store) = results_store.lock() {
+                *store = report.broken_references.clone();
+            }
+            let col = *sort_col_store.lock().unwrap();
+            let asc = *sort_asc_store.lock().unwrap();
+            let filter = window_weak_thread
+                .upgrade()
+                .map(|w| w.get_active_filter().to_string())
+                .unwrap_or_else(|| "all".to_string());
+            let mut items: Vec<BrokenResourceRef> = report.broken_references.clone();
+            filter_items(&mut items, &filter);
+            sort_items(&mut items, col, asc);
+            if let Ok(mut store) = current_store.lock() {
+                *store = items.clone();
+            }
+            let ww = window_weak_thread.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(w) = ww.upgrade() {
+                    let mut rows: Vec<slint::ModelRc<slint::StandardListViewItem>> = Vec::new();
+                    for b in &items {
+                        let kind = match b.kind {
+                            AssetResourceKind::Geometry => "Геометрия",
+                            AssetResourceKind::Texture => "Текстура",
+                            AssetResourceKind::Animation => "Анимация",
+                            AssetResourceKind::Script => "Скрипт",
+                            AssetResourceKind::Sound => "Звуки",
+                            AssetResourceKind::ChildBlueprint => "Дочерние объекты",
+                        };
+                        let mut item0 = slint::StandardListViewItem::default();
+                        item0.text = kind.into();
+                        let mut item1 = slint::StandardListViewItem::default();
+                        item1.text = b.expected_path.to_string_lossy().to_string().into();
+                        let mut item2 = slint::StandardListViewItem::default();
+                        item2.text = b.parent_file.to_string_lossy().to_string().into();
+                        rows.push(slint::ModelRc::new(slint::VecModel::from(vec![
+                            item0, item1, item2,
+                        ])));
+                    }
+                    w.set_broken_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                    w.set_audit_progress(1.0);
+                    w.set_audit_status(format!("Готово: {} проблем", items.len()).into());
+                    w.set_selected_row(-1);
+                }
+            })
+            .ok();
+        });
     });
     let auditor_weak_for_filter = auditor_win.as_weak();
     auditor_win.on_filter_changed(move |filter| {
@@ -2417,7 +2692,9 @@ fn main() {
                     item1.text = b.expected_path.to_string_lossy().to_string().into();
                     let mut item2 = slint::StandardListViewItem::default();
                     item2.text = b.parent_file.to_string_lossy().to_string().into();
-                    rows.push(slint::ModelRc::new(slint::VecModel::from(vec![item0, item1, item2])));
+                    rows.push(slint::ModelRc::new(slint::VecModel::from(vec![
+                        item0, item1, item2,
+                    ])));
                 }
                 w.set_broken_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
                 w.set_selected_row(-1);
@@ -2428,7 +2705,10 @@ fn main() {
     let auditor_weak_for_open = auditor_win.as_weak();
     let current_display_for_open = current_display_items_for_open.clone();
     auditor_win.on_open_source_file(move |row| {
-        let items = current_display_for_open.lock().map(|g| g.clone()).unwrap_or_default();
+        let items = current_display_for_open
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         if row < 0 || row as usize >= items.len() {
             return;
         }
@@ -2440,7 +2720,10 @@ fn main() {
     let auditor_weak_for_missing = auditor_win.as_weak();
     let current_display_for_missing = current_display_items_for_open.clone();
     auditor_win.on_open_missing_target_folder(move |row| {
-        let items = current_display_for_missing.lock().map(|g| g.clone()).unwrap_or_default();
+        let items = current_display_for_missing
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         if row < 0 || row as usize >= items.len() {
             return;
         }
@@ -2468,7 +2751,10 @@ fn main() {
         let asc_now = *a;
         drop(c);
         drop(a);
-        let filter = auditor_weak_for_sort.upgrade().map(|w| w.get_active_filter().to_string()).unwrap_or_else(|| "all".to_string());
+        let filter = auditor_weak_for_sort
+            .upgrade()
+            .map(|w| w.get_active_filter().to_string())
+            .unwrap_or_else(|| "all".to_string());
         let all_items = all_for_sort.lock().map(|g| g.clone()).unwrap_or_default();
         let mut items = all_items;
         filter_items(&mut items, &filter);
@@ -2497,7 +2783,9 @@ fn main() {
                     item1.text = b.expected_path.to_string_lossy().to_string().into();
                     let mut item2 = slint::StandardListViewItem::default();
                     item2.text = b.parent_file.to_string_lossy().to_string().into();
-                    rows.push(slint::ModelRc::new(slint::VecModel::from(vec![item0, item1, item2])));
+                    rows.push(slint::ModelRc::new(slint::VecModel::from(vec![
+                        item0, item1, item2,
+                    ])));
                 }
                 w.set_broken_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
                 w.set_selected_row(-1);
@@ -2517,9 +2805,19 @@ fn main() {
             return;
         }
         let item = &items[row as usize];
-        let asset_path = if item.parent_file.extension().map(|e| e.eq_ignore_ascii_case("bin") || e.eq_ignore_ascii_case("geopcdx")).unwrap_or(false) {
+        let asset_path = if item
+            .parent_file
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("bin") || e.eq_ignore_ascii_case("geopcdx"))
+            .unwrap_or(false)
+        {
             item.parent_file.clone()
-        } else if item.expected_path.extension().map(|e| e.eq_ignore_ascii_case("bin") || e.eq_ignore_ascii_case("geopcdx")).unwrap_or(false) {
+        } else if item
+            .expected_path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("bin") || e.eq_ignore_ascii_case("geopcdx"))
+            .unwrap_or(false)
+        {
             item.expected_path.clone()
         } else {
             let w = auditor_weak_for_edit.clone();
@@ -2530,17 +2828,16 @@ fn main() {
             });
             return;
         };
-    let rw_path = app_clone_edit.lock().map(|a| a.rw_path.clone()).unwrap_or_default();
-    let serz_path = crate::assets::find_serz_path(&asset_path)
-        .or_else(|| {
-            let p = crate::preferred_serz_path(std::path::Path::new(&rw_path));
-            if p.is_file() {
-                Some(p)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| PathBuf::from("serz.exe"));
+        let rw_path = app_clone_edit
+            .lock()
+            .map(|a| a.rw_path.clone())
+            .unwrap_or_default();
+        let serz_path = crate::assets::find_serz_path(&asset_path)
+            .or_else(|| {
+                let p = crate::preferred_serz_path(std::path::Path::new(&rw_path));
+                if p.is_file() { Some(p) } else { None }
+            })
+            .unwrap_or_else(|| PathBuf::from("serz.exe"));
         let weak = auditor_weak_for_edit.clone();
         std::thread::spawn(move || {
             let cb_weak = weak.clone();
@@ -2556,7 +2853,9 @@ fn main() {
                     }
                 });
             };
-            if let Err(e) = crate::external_editor::open_and_sync_with_vscode(&asset_path, &serz_path, callback) {
+            if let Err(e) =
+                crate::external_editor::open_and_sync_with_vscode(&asset_path, &serz_path, callback)
+            {
                 let w = weak.clone();
                 let msg = format!("✗ {}", e);
                 let _ = slint::invoke_from_event_loop(move || {
@@ -2572,53 +2871,88 @@ fn main() {
     let current_display_for_preview = current_display_items.clone();
     let viewer_win = TextureViewerWindow::new().unwrap();
     let viewer_weak = viewer_win.as_weak();
-    let tex_state: std::sync::Arc<std::sync::Mutex<Option<(u32,u32,Vec<u8>,std::path::PathBuf)>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let tex_state: std::sync::Arc<
+        std::sync::Mutex<Option<(u32, u32, Vec<u8>, std::path::PathBuf)>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(None));
     let tex_state_for_preview = tex_state.clone();
     let tex_state_for_toggle = tex_state.clone();
     let tex_state_for_export = tex_state.clone();
     let tex_state_for_replace = tex_state.clone();
     auditor_win.on_preview_texture(move |row| {
-        let items = current_display_for_preview.lock().map(|g| g.clone()).unwrap_or_default();
-        if row < 0 || row as usize >= items.len() { return; }
+        let items = current_display_for_preview
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if row < 0 || row as usize >= items.len() {
+            return;
+        }
         let item = &items[row as usize];
-        let path = if item.expected_path.extension().map(|e| e.eq_ignore_ascii_case("tgpcdx")).unwrap_or(false) {
+        let path = if item
+            .expected_path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("tgpcdx"))
+            .unwrap_or(false)
+        {
             item.expected_path.clone()
-        } else if item.parent_file.extension().map(|e| e.eq_ignore_ascii_case("tgpcdx")).unwrap_or(false) {
+        } else if item
+            .parent_file
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("tgpcdx"))
+            .unwrap_or(false)
+        {
             item.parent_file.clone()
         } else {
             return;
         };
-        if !path.is_file() { return; }
+        if !path.is_file() {
+            return;
+        }
         let tex_state = tex_state_for_preview.clone();
         let viewer_weak = viewer_weak.clone();
         std::thread::spawn(move || {
             if let Ok(data) = std::fs::read(&path) {
-                    if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
-                        if let Ok(mut st) = tex_state.lock() { *st = Some((w, h, rgba.clone(), path.clone())); }
-                        let info = format!("{} x {} px  {}", w, h, path.display());
-                        let vw = viewer_weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(v) = vw.upgrade() {
-                                let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
-                                v.set_texture_image(img);
-                                v.set_info_text(info.into());
-                                let _ = v.show();
-                            }
-                        });
+                if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
+                    if let Ok(mut st) = tex_state.lock() {
+                        *st = Some((w, h, rgba.clone(), path.clone()));
                     }
+                    let info = format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display());
+                    let vw = viewer_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(v) = vw.upgrade() {
+                            let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
+                            v.set_texture_image(img);
+                            v.set_texture_orig_width(w as i32);
+                            v.set_texture_orig_height(h as i32);
+                            v.set_zoom_factor(if w > 640 || h > 480 {
+                                (640.0 / w as f32).min(480.0 / h as f32)
+                            } else {
+                                1.0
+                            });
+                            v.set_info_text(info.into());
+                            let _ = v.show();
+                        }
+                    });
+                }
             }
         });
     });
 
     let viewer_weak_toggle = viewer_win.as_weak();
     viewer_win.on_toggle_alpha(move || {
-        let st = tex_state_for_toggle.lock().map(|g| g.clone()).unwrap_or(None);
+        let st = tex_state_for_toggle
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or(None);
         if let Some((w, h, rgba, _)) = st {
-            let show = viewer_weak_toggle.upgrade().map(|v| v.get_show_alpha()).unwrap_or(true);
+            let show = viewer_weak_toggle
+                .upgrade()
+                .map(|v| v.get_show_alpha())
+                .unwrap_or(true);
             let mut data = rgba.clone();
             if !show {
-                for i in (3..data.len()).step_by(4) { data[i] = 255; }
+                for i in (3..data.len()).step_by(4) {
+                    data[i] = 255;
+                }
             }
             let img = crate::texture::rgba_to_slint_image(w, h, &data);
             if let Some(v) = viewer_weak_toggle.upgrade() {
@@ -2629,9 +2963,14 @@ fn main() {
 
     let viewer_weak_export = viewer_win.as_weak();
     viewer_win.on_export_dds(move || {
-        let st = tex_state_for_export.lock().map(|g| g.clone()).unwrap_or(None);
+        let st = tex_state_for_export
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or(None);
         if let Some((_, _, _, path)) = st {
-            let out = rfd::FileDialog::new().add_filter("DDS", &["dds"]).save_file();
+            let out = rfd::FileDialog::new()
+                .add_filter("DDS", &["dds"])
+                .save_file();
             if let Some(out) = out {
                 let _ = crate::texture::export_tgpcdx_to_dds(&path, &out);
             }
@@ -2641,24 +2980,38 @@ fn main() {
 
     let viewer_weak_replace = viewer_win.as_weak();
     viewer_win.on_replace_from_dds(move || {
-        let st = tex_state_for_replace.lock().map(|g| g.clone()).unwrap_or(None);
+        let st = tex_state_for_replace
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or(None);
         if let Some((_, _, _, path)) = st {
-            let input = rfd::FileDialog::new().add_filter("DDS", &["dds"]).pick_file();
+            let input = rfd::FileDialog::new()
+                .add_filter("DDS", &["dds"])
+                .pick_file();
             if let Some(input) = input {
                 let _ = crate::texture::convert_dds_to_tgpcdx(&input, &path);
                 if let Ok(data) = std::fs::read(&path) {
-                          if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
-                              if let Ok(mut s) = tex_state_for_replace.lock() { *s = Some((w, h, rgba.clone(), path.clone())); }
-                              let info = format!("{} x {} px  {}", w, h, path.display());
-                              let vw = viewer_weak_replace.clone();
-                              let _ = slint::invoke_from_event_loop(move || {
-                                  if let Some(v) = vw.upgrade() {
-                                      let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
-                                      v.set_texture_image(img);
-                                      v.set_info_text(info.into());
-                                  }
-                              });
-                          }
+                    if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
+                        if let Ok(mut s) = tex_state_for_replace.lock() {
+                            *s = Some((w, h, rgba.clone(), path.clone()));
+                        }
+                        let info = format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display());
+                        let vw = viewer_weak_replace.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(v) = vw.upgrade() {
+                                let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
+                                v.set_texture_image(img);
+                                v.set_texture_orig_width(w as i32);
+                                v.set_texture_orig_height(h as i32);
+                                v.set_zoom_factor(if w > 640 || h > 480 {
+                                    (640.0 / w as f32).min(480.0 / h as f32)
+                                } else {
+                                    1.0
+                                });
+                                v.set_info_text(info.into());
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -2669,10 +3022,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_route, decode_xml_text, extract_asset_references, extract_scenario_clues,
-        fallback_serz_path, inspect_route_folder, is_skipped_route_scan_directory,
-        parse_route_name, preferred_serz_path, scan_routes,
-        scan_routes_with_ignored, validate_serz_process, ScenarioClueCollection,
+        ScenarioClueCollection, check_route, decode_xml_text, extract_asset_references,
+        extract_scenario_clues, fallback_serz_path, inspect_route_folder,
+        is_skipped_route_scan_directory, parse_route_name, preferred_serz_path, scan_routes,
+        scan_routes_with_ignored, validate_serz_process,
     };
     use std::fs;
     use std::io::Write;
@@ -2876,10 +3229,12 @@ mod tests {
         assert_eq!(result.incomplete_folders[0].file_count, 0);
         assert_eq!(result.incomplete_folders[1].id, "leftovers");
         assert_eq!(result.incomplete_folders[1].file_count, 1);
-        assert!(result.incomplete_folders[1]
-            .inventory
-            .iter()
-            .any(|entry| entry.contains("Scenery") && entry.contains("orphan.dat")));
+        assert!(
+            result.incomplete_folders[1]
+                .inventory
+                .iter()
+                .any(|entry| entry.contains("Scenery") && entry.contains("orphan.dat"))
+        );
     }
 
     #[test]
@@ -2931,18 +3286,26 @@ mod tests {
 
         let clues = extract_scenario_clues(xml);
 
-        assert!(clues
-            .iter()
-            .any(|clue| clue == "ScenarioName: Express to Brighton"));
-        assert!(clues
-            .iter()
-            .any(|clue| clue == "ScenarioDescription: Stopping at Lewes and Falmer"));
-        assert!(clues
-            .iter()
-            .any(|clue| clue == "StartLocationName: London Victoria"));
-        assert!(!clues
-            .iter()
-            .any(|clue| clue.contains("74151eaf-456f-41e7-8b38-6f48ee8ef031")));
+        assert!(
+            clues
+                .iter()
+                .any(|clue| clue == "ScenarioName: Express to Brighton")
+        );
+        assert!(
+            clues
+                .iter()
+                .any(|clue| clue == "ScenarioDescription: Stopping at Lewes and Falmer")
+        );
+        assert!(
+            clues
+                .iter()
+                .any(|clue| clue == "StartLocationName: London Victoria")
+        );
+        assert!(
+            !clues
+                .iter()
+                .any(|clue| clue.contains("74151eaf-456f-41e7-8b38-6f48ee8ef031"))
+        );
     }
 
     #[test]
@@ -2962,9 +3325,11 @@ mod tests {
         );
 
         let clues = clues.into_clues();
-        assert!(clues
-            .iter()
-            .any(|clue| clue == "StartLocation: King's Cross (упоминается в 2 сценариях)"));
+        assert!(
+            clues
+                .iter()
+                .any(|clue| clue == "StartLocation: King's Cross (упоминается в 2 сценариях)")
+        );
         assert!(clues.iter().any(|clue| clue == "StartLocation: Victoria"));
         assert_eq!(
             clues
@@ -2991,14 +3356,18 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(report
-            .scenario_clues
-            .iter()
-            .any(|clue| clue.contains("ScenarioName: Coastal run")));
-        assert!(report
-            .scenario_clues
-            .iter()
-            .any(|clue| clue.contains("ScenarioDescription: Through Hastings")));
+        assert!(
+            report
+                .scenario_clues
+                .iter()
+                .any(|clue| clue.contains("ScenarioName: Coastal run"))
+        );
+        assert!(
+            report
+                .scenario_clues
+                .iter()
+                .any(|clue| clue.contains("ScenarioDescription: Through Hastings"))
+        );
     }
 
     #[test]
@@ -3013,15 +3382,19 @@ mod tests {
         let report = inspect_route_folder(&route, "empty").unwrap().unwrap();
 
         assert_eq!(report.file_count, 0);
-        assert!(report
-            .problems
-            .iter()
-            .any(|problem| problem.contains("RouteProperties")));
-        for directory in ["Networks", "RouteInformation", "Scenery", "Terrain"] {
-            assert!(report
+        assert!(
+            report
                 .problems
                 .iter()
-                .any(|problem| problem.contains(directory) && problem.contains("пуста")));
+                .any(|problem| problem.contains("RouteProperties"))
+        );
+        for directory in ["Networks", "RouteInformation", "Scenery", "Terrain"] {
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|problem| problem.contains(directory) && problem.contains("пуста"))
+            );
         }
     }
 

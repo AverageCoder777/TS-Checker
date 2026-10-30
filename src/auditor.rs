@@ -41,26 +41,89 @@ impl ApArchiveCache {
         Self::default()
     }
 
+    pub fn ensure_indexed(&self, product_dir: &Path) {
+        {
+            let guard = match self.inner.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            if guard.contains_key(product_dir) {
+                return;
+            }
+        }
+
+        let mut files = HashSet::new();
+        if let Ok(entries) = fs::read_dir(product_dir) {
+            for entry in entries.flatten() {
+                let archive_path = entry.path();
+                if !archive_path.is_file() {
+                    continue;
+                }
+                if !archive_path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ap"))
+                {
+                    continue;
+                }
+                let archive_file = match fs::File::open(&archive_path) {
+                    Ok(file) => file,
+                    Err(_) => continue,
+                };
+                let mut archive = match zip::ZipArchive::new(archive_file) {
+                    Ok(archive) => archive,
+                    Err(_) => continue,
+                };
+                for index in 0..archive.len() {
+                    let entry = match archive.by_index(index) {
+                        Ok(entry) => entry,
+                        Err(_) => continue,
+                    };
+                    if entry.is_dir() {
+                        continue;
+                    }
+                    let raw_name = match entry.name() {
+                        Ok(name) => name.to_string(),
+                        Err(_) => continue,
+                    };
+                    let name = raw_name.replace('/', "\\").trim().to_lowercase();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    files.insert(name.clone());
+                    let parts: Vec<&str> =
+                        name.split('\\').filter(|part| !part.is_empty()).collect();
+                    if parts.len() >= 3 {
+                        files.insert(parts[2..].join("\\"));
+                        files.insert(parts[1..].join("\\"));
+                    } else if parts.len() == 2 {
+                        files.insert(parts[1..].join("\\"));
+                    }
+                }
+            }
+        }
+
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.entry(product_dir.to_path_buf()).or_insert(files);
+        }
+    }
+
     pub fn lookup(&self, product_dir: &Path, relative: &str) -> bool {
+        self.ensure_indexed(product_dir);
         let guard = match self.inner.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
         };
         let target = normalize_ap_path(relative);
 
-        if let Some(set) = guard.get(product_dir) {
-            if set.iter().any(|m| normalize_ap_path(m) == target) {
-                return true;
-            }
-        }
         for (key, set) in guard.iter() {
-            if key
+            if !key
                 .to_string_lossy()
                 .eq_ignore_ascii_case(&product_dir.to_string_lossy())
             {
-                if set.iter().any(|m| normalize_ap_path(m) == target) {
-                    return true;
-                }
+                continue;
+            }
+            if set.iter().any(|member| normalize_ap_path(member) == target) {
+                return true;
             }
         }
         false

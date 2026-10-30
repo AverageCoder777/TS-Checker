@@ -2,6 +2,33 @@
 
 use super::*;
 use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+
+fn default_language() -> String {
+    "ru".to_owned()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppConfig {
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            language: "ru".to_owned(),
+        }
+    }
+}
+
+pub type Config = AppConfig;
+pub type AppSettings = AppConfig;
+pub type Settings = AppConfig;
+pub type Configuration = AppConfig;
+pub type AppConfiguration = AppConfig;
+pub type UserSettings = AppConfig;
 
 pub(crate) fn last_game_path_file() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|app_data| {
@@ -338,6 +365,84 @@ pub(crate) fn save_hide_quick_drive_free_roam(enabled: bool) -> Result<(), Strin
     fs::write(&path, enabled.to_string()).map_err(|error| {
         format!("Не удалось сохранить настройку сценариев {}: {error}", path.display())
     })
+}
+
+pub(crate) fn config_file() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| {
+        PathBuf::from(app_data)
+            .join("TS-Checker")
+            .join("config.json")
+    })
+}
+
+pub(crate) fn language_setting_file() -> Option<PathBuf> {
+    config_file()
+}
+
+pub(crate) fn load_config() -> AppConfig {
+    config_file()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str::<AppConfig>(&contents).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_config(config: &AppConfig) -> Result<(), String> {
+    let path = config_file().ok_or_else(|| "Windows APPDATA не определена; конфигурацию не сохранить.".to_owned())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Некорректный путь к конфигурации.".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
+    let data = serde_json::to_string_pretty(config)
+        .map_err(|error| format!("Не удалось подготовить конфигурацию: {error}"))?;
+    fs::write(&path, data).map_err(|error| format!("Не удалось сохранить конфигурацию {}: {error}", path.display()))
+}
+
+pub(crate) fn load_language() -> String {
+    load_config().language
+}
+
+pub(crate) fn load_language_setting() -> Result<String, String> {
+    Ok(load_config().language)
+}
+
+pub(crate) fn save_language(lang: &str) -> Result<(), String> {
+    let mut config = load_config();
+    config.language = lang.to_owned();
+    save_config(&config)
+}
+
+pub(crate) fn save_language_setting(lang: &str) -> Result<(), String> {
+    save_language(lang)
+}
+
+pub(crate) fn read_language_setting(path: &Path) -> Result<String, String> {
+    if path.exists() {
+        let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if let Ok(config) = serde_json::from_str::<AppConfig>(&contents) {
+            return Ok(config.language);
+        }
+        let trimmed = contents.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+    }
+    Ok("ru".to_owned())
+}
+
+pub(crate) fn write_language_setting(path: &Path, lang: &str) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| "Некорректный путь к настройкам языка.".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
+    let config = AppConfig { language: lang.to_owned() };
+    let data = serde_json::to_string_pretty(&config)
+        .map_err(|error| format!("Не удалось подготовить настройку языка: {error}"))?;
+    fs::write(path, data).map_err(|error| format!("Не удалось сохранить настройку языка {}: {error}", path.display()))
+}
+
+pub fn apply_saved_language(lang: &str) {
+    if lang == "system" {
+        return;
+    }
+    let _ = slint::select_bundled_translation(lang);
 }
 
 #[cfg(test)]

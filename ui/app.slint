@@ -1,4 +1,6 @@
 import { VerticalBox, HorizontalBox, Button, LineEdit, ListView, CheckBox, StandardTableView, Slider, TextEdit, ComboBox } from "std-widgets.slint";
+import { TextureViewerWindow } from "texture_viewer.slint";
+export { TextureViewerWindow } from "texture_viewer.slint";
 
 export struct RouteItem {
     name: string,
@@ -11,7 +13,7 @@ export struct ScenarioItem {
 }
 
 export component MainWindow inherits Window {
-    title: "TS-Checker";
+    title: "TSC Check Tool";
     min-width: 1350px;
     min-height: 1000px;
 
@@ -55,7 +57,7 @@ export component MainWindow inherits Window {
                 spacing: 6px;
                 LineEdit {
                     horizontal-stretch: 1;
-                    placeholder-text: "Поиск маршрутов...";
+                    placeholder-text: @tr("Поиск маршрутов");
                     text <=> search-query;
                 }
                  Button {
@@ -64,7 +66,7 @@ export component MainWindow inherits Window {
                      clicked => { open-settings(); }
                  }
                  Button {
-                     text: "Аудит...";
+                     text: @tr("Проверка");
                      clicked => { open-folder-auditor(); }
                  }
             }
@@ -148,27 +150,27 @@ export component MainWindow inherits Window {
                         overflow: TextOverflow.elide;
                     }
                     Text {
-                        text: "Сценариев: \{scenario-items.length}";
+                        text: @tr("Сценариев: {}", scenario-items.length);
                         font-size: 13px;
                         color: #cccccc;
                     }
                 }
             }
             Rectangle { height: 16px; }
-            Text { text: "Сценарии маршрута:"; font-size: 14px; }
+            Text { text: @tr("Сценарии маршрута:"); font-size: 14px; }
             HorizontalBox {
                 min-height: 32px;
                 preferred-height: 32px;
                 padding-top: 4px;
                 Text {
-                    text: "Название сценария";
+                    text: @tr("Название сценария");
                     font-size: 13px;
                     font-weight: 600;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
                 Text {
-                    text: "Тип";
+                    text: @tr("Тип");
                     font-size: 13px;
                     font-weight: 600;
                     vertical-alignment: center;
@@ -238,7 +240,7 @@ export component MainWindow inherits Window {
                         clicked => { show_log = true; start-check(); }
                     }
                     Text {
-                        text: "Проверить маршрут";
+                        text: @tr("Проверить маршрут");
                         color: #ffffff;
                         font-size: 14px;
                         font-weight: 600;
@@ -248,13 +250,13 @@ export component MainWindow inherits Window {
                 }
                 Button {
                     min-height: 30px;
-                    text: "Показать все объекты";
+                    text: @tr("Показать все объекты");
                     enabled: has-result;
                     clicked => { show-inventory(); }
                 }
                 Button {
                     min-height: 30px;
-                    text: show_log ? "Скрыть лог" : "Показать лог";
+                    text: show_log ? @tr("Скрыть лог") : @tr("Показать лог");
                     clicked => { show_log = !show_log; }
                 }
             }
@@ -274,18 +276,13 @@ export component MainWindow inherits Window {
                         padding-left: 8px;
                         padding-right: 8px;
                         Text {
-                            text: "Лог";
+                            text: @tr("Лог");
                             font-size: 13px;
                             font-weight: 600;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                             color: #aaaaaa;
                         }
-                        /*Button {
-                            text: "X";
-                            min-width: 24px;
-                            clicked => { show_log = false; }
-                        }*/
                     }
                     log_view := TextEdit {
                         text: check-log;
@@ -305,7 +302,7 @@ export component MainWindow inherits Window {
 }
 
 export component AssetInventoryWindow inherits Window {
-    title: "Инвентарь ассетов маршрута";
+    title: @tr("Список объектов маршрута");
     min-width: 900px;
     min-height: 700px;
 
@@ -328,16 +325,16 @@ export component AssetInventoryWindow inherits Window {
     VerticalBox {
         HorizontalBox {
             LineEdit {
-                placeholder-text: "Поиск по пути, тайлу или исходному файлу";
+                placeholder-text: @tr("Поиск по пути, тайлу или исходному файлу");
                 text <=> search-query;
                 edited(text) => { root.search-changed(text); }
             }
             Button {
-                text: show-missing-only ? "Показать все" : "Только недостающие";
+                text: show-missing-only ? @tr("Показать все") : @tr("Только недостающие");
                 clicked => { toggle-missing-only(); }
             }
             Button {
-                text: "Открыть в редакторе";
+                text: @tr("Открыть в редакторе");
                 clicked => { root.open-in-editor(); }
             }
             Rectangle {
@@ -353,7 +350,7 @@ export component AssetInventoryWindow inherits Window {
                 }
 
                 Text {
-                    text: "Заменить в маршруте...";
+                    text: @tr("Заменить в маршруте");
                     color: !can_replace ? #666666 : #ffffff;
                     font-size: 13px;
                     font-weight: 600;
@@ -362,12 +359,12 @@ export component AssetInventoryWindow inherits Window {
                 }
             }
             Button {
-                text: "Проверить на умляуты";
+                text: @tr("Проверить на символы");
                 clicked => { root.scan-umlauts(); }
             }
         }
         if selected-asset >= 0 && selected-asset < inventory-is-safe.length && !inventory-is-safe[selected-asset] : Text {
-            text: "⚠ Путевые объекты и сигналы (Tracks.bin) заменяются только в редакторе TSC во избежание сбоя линков.";
+            text: @tr("⚠ Путевая инфраструктура заменяется только в редакторе TSC!!!");
             color: #f59e0b;
             font-size: 12px;
         }
@@ -376,9 +373,9 @@ export component AssetInventoryWindow inherits Window {
                 root.row-selected(row);
             }
             columns: [
-                { title: "Путь ассета", min-width: 200px, horizontal-stretch: 2, sort-order: SortOrder.ascending },
-                { title: "Кол-во использований", min-width: 120px, horizontal-stretch: 0 },
-                { title: "Тайлы", min-width: 120px, horizontal-stretch: 1 },
+                { title: @tr("Путь объекта"), min-width: 200px, horizontal-stretch: 2, sort-order: SortOrder.ascending },
+                { title: @tr("Кол-во использований"), min-width: 120px, horizontal-stretch: 0 },
+                { title: @tr("Тайлы"), min-width: 120px, horizontal-stretch: 1 },
             ];
             rows: inventory-rows;
             current-row <=> current-row;
@@ -389,7 +386,7 @@ export component AssetInventoryWindow inherits Window {
 }
 
 export component IgnoreListWindow inherits Window {
-    title: "Игнор-лист маршрутов";
+    title: @tr("Игнор-лист маршрутов");
     min-width: 400px;
     min-height: 300px;
 
@@ -399,12 +396,12 @@ export component IgnoreListWindow inherits Window {
         ListView {
             for r in ignored-routes: Text { text: r; }
         }
-        Button { text: "Добавить выбранный маршрут в игнор-лист"; }
+        Button { text: @tr("Добавить выбранный маршрут в игнор-лист"); }
     }
 }
 
 export component IncompleteFoldersWindow inherits Window {
-    title: "Неполные папки";
+    title: @tr("Сломанные маршруты");
     min-width: 500px;
     min-height: 300px;
 
@@ -473,7 +470,7 @@ export component ScenarioWindow inherits Window {
                             padding-right: 8px;
                             padding-top: 3px;
                             padding-bottom: 3px;
-                            Text { text: "Время: " + scenario-start-time; font-size: 12px; }
+                            Text { text: @tr("Время: {}", scenario-start-time); font-size: 12px; }
                         }
                     }
                     Rectangle {
@@ -485,7 +482,7 @@ export component ScenarioWindow inherits Window {
                             padding-right: 8px;
                             padding-top: 3px;
                             padding-bottom: 3px;
-                            Text { text: "Автор: " + scenario-author; font-size: 12px; }
+                            Text { text: @tr("Автор: {}", scenario-author); font-size: 12px; }
                         }
                     }
                     Rectangle {
@@ -497,7 +494,7 @@ export component ScenarioWindow inherits Window {
                             padding-right: 8px;
                             padding-top: 3px;
                             padding-bottom: 3px;
-                            Text { text: "Погода: " + scenario-weather; font-size: 12px; }
+                            Text { text: @tr("Погода: {}", scenario-weather); font-size: 12px; }
                         }
                     }
                     Rectangle {
@@ -509,7 +506,7 @@ export component ScenarioWindow inherits Window {
                             padding-right: 8px;
                             padding-top: 3px;
                             padding-bottom: 3px;
-                            Text { text: "Сезон: " + scenario-season; font-size: 12px; }
+                            Text { text: @tr("Сезон: {}", scenario-season); font-size: 12px; }
                         }
                     }
                     Rectangle { horizontal-stretch: 1; }
@@ -531,7 +528,7 @@ export component ScenarioWindow inherits Window {
                 VerticalBox {
                     padding: 6px;
                     spacing: 4px;
-                    Text { text: "Составы (" + consist-names.length + ")"; font-size: 14px; font-weight: 600; color: #cccccc; }
+                    Text { text: @tr("Составы ({})", consist-names.length); font-size: 14px; font-weight: 600; color: #cccccc; }
                     ListView {
                         vertical-stretch: 1;
                         for c[i] in consist-names: Rectangle {
@@ -557,7 +554,7 @@ export component ScenarioWindow inherits Window {
                                         background: #1e3a5f;
                                         border-radius: 3px;
                                         Text {
-                                            text: "Игрок";
+                                            text: @tr("Игрок");
                                             color: #93c5fd;
                                             font-size: 10px;
                                             horizontal-alignment: center;
@@ -574,7 +571,7 @@ export component ScenarioWindow inherits Window {
                                         overflow: TextOverflow.elide;
                                     }
                                     if consist-missing[i] : Button {
-                                        text: "LocoSwap";
+                                        text: @tr("LocoSwap");
                                         clicked => { open-locoswap-consist(i); }
                                     }
                                 }
@@ -595,7 +592,7 @@ export component ScenarioWindow inherits Window {
                 VerticalBox {
                     padding: 6px;
                     spacing: 4px;
-                    Text { text: "Подвижные единицы (" + vehicle-names.length + ")"; font-size: 14px; font-weight: 600; color: #cccccc; }
+                    Text { text: @tr("Вагоны ({})", vehicle-names.length); font-size: 14px; font-weight: 600; color: #cccccc; }
                     ListView {
                         vertical-stretch: 1;
                         for v[i] in vehicle-names: Rectangle {
@@ -635,7 +632,7 @@ export component ScenarioWindow inherits Window {
                     alignment: LayoutAlignment.start;
                     spacing: 6px;
                     padding: 6px;
-                    Text { text: "Свойства единицы"; font-size: 14px; font-weight: 600; color: #cccccc; }
+                    Text { text: @tr("Свойства вагона"); font-size: 14px; font-weight: 600; color: #cccccc; }
                     Text {
                         text: selected-vehicle-info;
                         font-size: 12px;
@@ -682,12 +679,11 @@ export component ScenarioWindow inherits Window {
                 }
             }
         }
-        HorizontalBox {
+        HorizontalLayout {
             min-height: 36px;
-            preferred-height: 40px;
             padding: 4px;
             Button {
-                text: "Открыть папку";
+                text: @tr("Открыть папку");
                 clicked => { open-scenario-folder(); }
             }
             Rectangle {
@@ -703,7 +699,7 @@ export component ScenarioWindow inherits Window {
                     clicked => { open-locoswap(); }
                 }
                 Text {
-                    text: "Открыть в LocoSwap";
+                    text: @tr("Открыть в LocoSwap");
                     color: #ffffff;
                     font-size: 13px;
                     font-weight: 600;
@@ -712,14 +708,14 @@ export component ScenarioWindow inherits Window {
                 }
             }
             Button {
-                text: "Закрыть";
+                text: @tr("Закрыть");
                 clicked => { close-scenario(); }
             }
         }
     }
 }
 export component MissingAssetsWindow inherits Window {
-    title: "Недостающие ассеты";
+    title: @tr("Недостающие объекты");
     min-width: 700px;
     min-height: 400px;
 
@@ -727,6 +723,10 @@ export component MissingAssetsWindow inherits Window {
     in property <[int]> missing-counts: [];
     in property <[string]> missing-suggested-repairs: [];
     in property <[bool]> missing-corrupted: [];
+    in property <[string]> missing-asset-types: [];
+    in property <[bool]> missing-is-safe: [];
+    property <bool> has_selection: selected-asset >= 0;
+    in-out property <bool> is_selected_asset_replaceable: has_selection && selected-asset < missing-is-safe.length && missing-is-safe[selected-asset];
     in-out property <[string]> active-tile-list: [];
     in property <string> active-tile-asset: "";
     in-out property <int> selected-asset: -1;
@@ -744,7 +744,7 @@ export component MissingAssetsWindow inherits Window {
         HorizontalLayout {
             spacing: 8px;
             Text {
-                text: "Недостающие ассеты маршрута";
+                text: @tr("Недостающие объекты маршрута");
                 font-size: 16px;
                 font-weight: 700;
                 vertical-alignment: center;
@@ -804,6 +804,24 @@ export component MissingAssetsWindow inherits Window {
                             overflow: TextOverflow.elide;
                         }
 
+                        if missing-asset-types.length > i : Rectangle {
+                            background: missing-asset-types[i] == @tr("Окружение") ? #1f3a2f : (missing-asset-types[i] == @tr("Лофт") ? #1f2f3a : (missing-asset-types[i] == @tr("Дорога") ? #2f1f3a : (missing-asset-types[i] == @tr("Путевая инфраструктура") ? #3a1f1f : (missing-asset-types[i] == @tr("Правила путей") ? #3a1f1f : #2a2a2a))));
+                            border-radius: 3px;
+                            height: 20px;
+                            min-width: 70px;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                Text {
+                                    text: missing-asset-types[i];
+                                    color: #e2e8f0;
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
                         if missing-corrupted[i] : Rectangle {
                             background: #d97706;
                             border-radius: 3px;
@@ -812,7 +830,7 @@ export component MissingAssetsWindow inherits Window {
                                 padding-left: 6px;
                                 padding-right: 6px;
                                 Text {
-                                    text: "Повреждён путь";
+                                    text: @tr("Повреждён путь");
                                     color: #ffffff;
                                     font-size: 10px;
                                     font-weight: 600;
@@ -829,7 +847,7 @@ export component MissingAssetsWindow inherits Window {
                                 padding-left: 6px;
                                 padding-right: 6px;
                                 Text {
-                                    text: "×" + missing-counts[i];
+                                    text: missing-counts[i];
                                     font-size: 11px;
                                     color: #94a3b8;
                                     font-weight: 600;
@@ -839,7 +857,7 @@ export component MissingAssetsWindow inherits Window {
                         }
 
                         if missing-corrupted[i] && missing-suggested-repairs[i] != "" : Text {
-                            text: "-> " + missing-suggested-repairs[i];
+                            text: "-> / {missing-suggested-repairs[i]}";
                             font-size: 11px;
                             color: #fbbf24;
                             vertical-alignment: center;
@@ -847,7 +865,7 @@ export component MissingAssetsWindow inherits Window {
                         }
 
                         Button {
-                            text: "📋";
+                            text: @tr("Копировать путь");
                             horizontal-stretch: 0;
                             min-width: 32px;
                             preferred-height: 24px;
@@ -855,14 +873,14 @@ export component MissingAssetsWindow inherits Window {
                         }
 
                         if missing-corrupted[i] : Button {
-                            text: "Починить";
+                            text: @tr("Починить");
                             min-width: 70px;
                             preferred-height: 24px;
                             clicked => { repair-corrupted(i); }
                         }
 
                         Button {
-                            text: "Тайлы";
+                            text: @tr("Тайлы");
                             min-width: 60px;
                             preferred-height: 24px;
                             clicked => { inspect-tiles(i); }
@@ -883,7 +901,7 @@ export component MissingAssetsWindow inherits Window {
                 spacing: 4px;
                 HorizontalLayout {
                     Text {
-                        text: "Использование на тайлах для: " + active-tile-asset;
+                        text: @tr("Использование на тайлах для: {}", active-tile-asset);
                         font-size: 12px;
                         font-weight: 700;
                         color: #cbd5e1;
@@ -891,7 +909,7 @@ export component MissingAssetsWindow inherits Window {
                         overflow: TextOverflow.elide;
                     }
                     Button {
-                        text: "✕ Закрыть";
+                        text: @tr("✕ Закрыть");
                         preferred-height: 20px;
                         clicked => { active-tile-list = []; }
                     }
@@ -906,7 +924,7 @@ export component MissingAssetsWindow inherits Window {
                             horizontal-stretch: 1;
                         }
                         Button {
-                            text: "📋";
+                            text: @tr("Копировать путь");
                             min-width: 28px;
                             preferred-height: 20px;
                             clicked => { copy-to-clipboard(tile); }
@@ -920,7 +938,7 @@ export component MissingAssetsWindow inherits Window {
             padding: 4px;
             spacing: 6px;
             Button {
-                text: "Скопировать весь список";
+                text: @tr("Скопировать весь список");
                 clicked => { copy-all-to-clipboard(); }
             }
             Rectangle { horizontal-stretch: 1; }
@@ -934,7 +952,7 @@ export component MissingAssetsWindow inherits Window {
                     clicked => { repair-all-corrupted(); }
                 }
                 Text {
-                    text: "Починить все битые пути";
+                    text: @tr("Починить все битые пути");
                     color: #ffffff;
                     font-size: 13px;
                     font-weight: 600;
@@ -947,20 +965,20 @@ export component MissingAssetsWindow inherits Window {
                 preferred-width: 190px;
                 preferred-height: 32px;
                 border-radius: 4px;
-                background: selected-asset < 0 ? #262626 : (replace_touch.pressed ? #047857 : (replace_touch.has-hover ? #10b981 : #059669));
+                background: (!root.has_selection || !root.is_selected_asset_replaceable) ? #262626 : (replace_touch.pressed ? #047857 : (replace_touch.has-hover ? #10b981 : #059669));
 
                 replace_touch := TouchArea {
-                    enabled: selected-asset >= 0;
+                    enabled: root.has_selection && root.is_selected_asset_replaceable;
                     clicked => {
-                        if (selected-asset >= 0) {
+                        if (root.has_selection && root.is_selected_asset_replaceable) {
                             replace-missing(selected-asset);
                         }
                     }
                 }
 
                 Text {
-                    text: "Заменить выбранный...";
-                    color: selected-asset < 0 ? #666666 : #ffffff;
+                    text: @tr("Заменить выбранный");
+                    color: (!root.has_selection || !root.is_selected_asset_replaceable) ? #666666 : #ffffff;
                     font-size: 13px;
                     font-weight: 600;
                     horizontal-alignment: center;
@@ -968,7 +986,7 @@ export component MissingAssetsWindow inherits Window {
                 }
             }
             Button {
-                text: "Закрыть";
+                text: @tr("Закрыть");
                 clicked => { close-missing(); }
             }
         }
@@ -976,7 +994,7 @@ export component MissingAssetsWindow inherits Window {
 }
 
 export component ApAssetPickerWindow inherits Window {
-    title: "Выбор ассета из архива";
+    title: @tr("Выбор объекта из архива");
     min-width: 620px;
     min-height: 420px;
 
@@ -995,12 +1013,12 @@ export component ApAssetPickerWindow inherits Window {
         padding: 6px;
         spacing: 6px;
         Text {
-            text: "Выбор ассета из архива: " + archive-name;
+            text: @tr("Выбор объекта из архива: {}", archive-name);
             font-size: 16px;
             font-weight: 700;
         }
         LineEdit {
-            placeholder-text: "Поиск...";
+            placeholder-text: @tr("Поиск");
             text <=> search-query;
             edited => { search-changed(search-query); }
         }
@@ -1050,7 +1068,7 @@ export component ApAssetPickerWindow inherits Window {
                     clicked => { confirm-selection(); }
                 }
                 Text {
-                    text: "Выбрать";
+                    text: @tr("Выбрать");
                     color: #ffffff;
                     font-size: 13px;
                     font-weight: 600;
@@ -1063,7 +1081,7 @@ export component ApAssetPickerWindow inherits Window {
 }
 
 export component SettingsWindow inherits Window {
-    title: "Настройки";
+    title: @tr("Настройки");
     min-width: 400px;
     min-height: 210px;
 
@@ -1080,11 +1098,14 @@ export component SettingsWindow inherits Window {
     in-out property <bool> route-thumbnails-enabled: true;
     in-out property <bool> route-scan-on-hdd: false;
     in-out property <bool> hide-quick-drive-free-roam: false;
+    in-out property <[string]> language-options: ["ru", "en", "de"];
+    in-out property <int> language-index: 0;
 
     callback save-settings();
     callback pick-locoswap();
     callback pick-game();
     callback serz-preset-selected(int);
+    callback language-selected(string);
 
     VerticalBox {
         HorizontalBox {
@@ -1094,7 +1115,7 @@ export component SettingsWindow inherits Window {
             Text { horizontal-alignment: TextHorizontalAlignment.start;
                 min-width: 0px;
                 overflow: TextOverflow.elide;
-                text: "Потоков процессора:";
+                text: @tr("Потоков процессора:");
                 vertical-alignment: TextVerticalAlignment.center; }
             
             ComboBox {
@@ -1116,7 +1137,7 @@ export component SettingsWindow inherits Window {
                 line-height-factor: 0;
                 min-height: 20px;
                 overflow: TextOverflow.elide;
-                text: "Путь к LocoSwap:";
+                text: @tr("Путь к LocoSwap:");
                 vertical-alignment: TextVerticalAlignment.center;
                 wrap: TextWrap.word-wrap; }
             LineEdit {
@@ -1127,7 +1148,7 @@ export component SettingsWindow inherits Window {
                 min-height: 20px; text <=> locoswap-path; }
             Button { icon-size: 15px;
                 min-height: 20px;
-                text: "Обзор..."; clicked => { pick-locoswap(); } }
+                text: @tr("Обзор"); clicked => { pick-locoswap(); } }
         }
         HorizontalBox {
             alignment: LayoutAlignment.stretch;
@@ -1139,7 +1160,7 @@ export component SettingsWindow inherits Window {
                 line-height-factor: 0;
                 min-height: 20px;
                 overflow: TextOverflow.elide;
-                text: "Папка с игрой:";
+                text: @tr("Папка с игрой:");
                 vertical-alignment: TextVerticalAlignment.center;
                 wrap: TextWrap.word-wrap; }
             LineEdit {
@@ -1150,33 +1171,53 @@ export component SettingsWindow inherits Window {
                 min-height: 20px; text <=> game-path; }
             Button { icon-size: 15px;
                 min-height: 20px;
-                text: "Обзор..."; clicked => { pick-game(); } }
+                text: @tr("Обзор"); clicked => { pick-game(); } }
         }
         CheckBox {
             min-height: 20px;
-            text: "Миниатюры маршрутов";
+            text: @tr("Миниатюры маршрутов");
             checked <=> route-thumbnails-enabled;
         }
         CheckBox {
             min-height: 20px;
-            text: "Игра установлена на HDD";
+            text: @tr("Игра установлена на HDD");
             checked <=> route-scan-on-hdd;
         }
         CheckBox {
             min-height: 20px;
-            text: "Не отображать Quick-Drive и Free-Roam сценарии";
+            text: @tr("Не отображать Quick-Drive и Free-Roam сценарии");
             checked <=> hide-quick-drive-free-roam;
+        }
+        HorizontalBox {
+            alignment: LayoutAlignment.start;
+            cross-axis-alignment: CrossAxisAlignment.center;
+            padding: 0px;
+            Text {
+                horizontal-alignment: TextHorizontalAlignment.start;
+                min-width: 0px;
+                overflow: TextOverflow.elide;
+                text: @tr("Язык интерфейса:");
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+            ComboBox {
+                width: 100px;
+                model: language-options;
+                current-index <=> language-index;
+                selected(text) => {
+                    root.language-selected(text)
+                }
+            }
         }
         Button {
             min-height: 20px;
-            text: "Сохранить";
+            text: @tr("Сохранить");
             clicked => { save-settings(); }
         }
     }
 }
 
 export component FolderAuditorWindow inherits Window {
-    title: "Аудит ресурсов папки";
+    title: @tr("Проверка ресурсов папки");
     min-width: 860px;
     min-height: 560px;
 
@@ -1204,14 +1245,14 @@ export component FolderAuditorWindow inherits Window {
             LineEdit {
                 horizontal-stretch: 1;
                 text <=> folder-path;
-                placeholder-text: "Папка для проверки...";
+                placeholder-text: @tr("Папка для проверки...");
             }
             Button {
-                text: "Обзор...";
+                text: @tr("Обзор");
                 clicked => { root.pick-folder(); }
             }
             Button {
-                text: "Начать проверку";
+                text: @tr("Начать проверку");
                 clicked => { root.start-audit(root.folder-path); }
             }
         }
@@ -1228,34 +1269,34 @@ export component FolderAuditorWindow inherits Window {
         HorizontalBox {
             Rectangle { property <string> f: "all"; background: root.active-filter == f ? #059669 : #333333; border-radius: 4px; min-width: 70px; height: 28px;
                 TouchArea { clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
-                Text { text: "Все"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                Text { text: @tr("Всё"); color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
             }
             Rectangle { background: root.active-filter == "geometry" ? #059669 : #333333; border-radius: 4px; min-width: 90px; height: 28px;
                 TouchArea { clicked => { root.active-filter = "geometry"; root.filter-changed("geometry"); } }
-                Text { text: "Геометрия"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                Text { text: @tr("Геометрия"); color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
             }
             Rectangle { background: root.active-filter == "texture" ? #059669 : #333333; border-radius: 4px; min-width: 90px; height: 28px;
                 TouchArea { clicked => { root.active-filter = "texture"; root.filter-changed("texture"); } }
-                Text { text: "Текстуры"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                Text { text: @tr("Текстуры"); color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
             }
             Rectangle { background: root.active-filter == "script" ? #059669 : #333333; border-radius: 4px; min-width: 80px; height: 28px;
                 TouchArea { clicked => { root.active-filter = "script"; root.filter-changed("script"); } }
-                Text { text: "Скрипты"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                Text { text: @tr("Скрипты"); color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
             }
             Rectangle { background: root.active-filter == "sound" ? #059669 : #333333; border-radius: 4px; min-width: 70px; height: 28px;
                 TouchArea { clicked => { root.active-filter = "sound"; root.filter-changed("sound"); } }
-                Text { text: "Звуки"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                Text { text: @tr("Звуки"); color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
             }
             Rectangle { background: root.active-filter == "child" ? #059669 : #333333; border-radius: 4px; min-width: 120px; height: 28px;
                 TouchArea { clicked => { root.active-filter = "child"; root.filter-changed("child"); } }
-                Text { text: "Дочерние объекты"; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                Text { text: @tr("Дочерние объекты"); color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
             }
         }
         StandardTableView {
             columns: [
-                { title: sort-col == 0 ? (sort-ascending ? "Тип ↑" : "Тип ↓") : "Тип", min-width: 120px },
-                { title: sort-col == 1 ? (sort-ascending ? "Отсутствующий файл ↑" : "Отсутствующий файл ↓") : "Отсутствующий файл", min-width: 300px, horizontal-stretch: 2 },
-                { title: sort-col == 2 ? (sort-ascending ? "Файл-источник ↑" : "Файл-источник ↓") : "Файл-источник", min-width: 300px, horizontal-stretch: 2 },
+                { title: sort-col == 0 ? (sort-ascending ? @tr("Тип ↑") : @tr("Тип ↓")) : @tr("Тип"), min-width: 120px },
+                { title: sort-col == 1 ? (sort-ascending ? @tr("Отсутствующий файл ↑") : @tr("Отсутствующий файл ↓")) : @tr("Отсутствующий файл"), min-width: 300px, horizontal-stretch: 2 },
+                { title: sort-col == 2 ? (sort-ascending ? @tr("Файл-источник ↑") : @tr("Файл-источник ↓")) : @tr("Файл-источник"), min-width: 300px, horizontal-stretch: 2 },
             ];
             rows: broken-rows;
             current-row-changed(row) => {
@@ -1266,22 +1307,22 @@ export component FolderAuditorWindow inherits Window {
         }
         HorizontalBox {
             Button {
-                text: "Открыть файл-источник";
+                text: @tr("Открыть папку файла-источника");
                 enabled: root.selected-row >= 0;
                 clicked => { root.open-source-file(root.selected-row); }
             }
             Button {
-                text: "Открыть папку отсутствующего файла";
+                text: @tr("Открыть папку отсутствующего файла");
                 enabled: root.selected-row >= 0;
                 clicked => { root.open-missing-target-folder(root.selected-row); }
             }
             Button {
-                text: "Открыть в VS Code";
+                text: @tr("Открыть файл-источник");
                 enabled: root.selected-row >= 0;
                 clicked => { root.edit-in-vscode(root.selected-row); }
             }
             Button {
-                text: "Просмотр текстуры";
+                text: @tr("Просмотр текстуры");
                 enabled: root.selected-row >= 0;
                 clicked => { root.preview-texture(root.selected-row); }
             }
@@ -1291,47 +1332,3 @@ export component FolderAuditorWindow inherits Window {
 }
 
 
-export component TextureViewerWindow inherits Window {
-    title: "Просмотр текстуры";
-    min-width: 640px;
-    min-height: 480px;
-
-    in property <image> texture-image;
-    in property <string> info-text: "";
-    in-out property <float> zoom: 1.0;
-    in-out property <bool> show-alpha: true;
-
-    callback export-dds();
-    callback replace-from-dds();
-    callback toggle-alpha();
-
-    VerticalBox {
-        Text { text: info-text; }
-        HorizontalBox {
-            Button { text: "1x"; clicked => { zoom = 1.0; } }
-            Button { text: "2x"; clicked => { zoom = 2.0; } }
-            Button { text: "Fit"; clicked => { zoom = 1.0; } }
-            Button { text: show-alpha ? "Скрыть альфа" : "Показать альфа"; clicked => { show-alpha = !show-alpha; toggle-alpha(); } }
-            Button { text: "Экспорт в DDS"; clicked => { export-dds(); } }
-            Button { text: "Заменить из DDS"; clicked => { replace-from-dds(); } }
-        }
-        Rectangle {
-            vertical-stretch: 1;
-            horizontal-stretch: 1;
-            background: #1a1a1a;
-            clip: true;
-            Flickable {
-                width: 100%;
-                height: 100%;
-                content-width: texture-image.width * zoom * 1px;
-                content-height: texture-image.height * zoom * 1px;
-                Image {
-                    source: texture-image;
-                    width: texture-image.width * zoom * 1px;
-                    height: texture-image.height * zoom * 1px;
-                    image-fit: contain;
-                }
-            }
-        }
-    }
-}

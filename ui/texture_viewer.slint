@@ -1,0 +1,23 @@
+import { VerticalBox, Button } from "std-widgets.slint";
+
+export component TextureViewerWindow inherits Window {
+    title: @tr("Просмотр текстур");
+    in-out property <image> texture-image;
+    in-out property <int> texture-orig-width: 0;
+    in-out property <int> texture-orig-height: 0;
+    in-out property <float> zoom-factor: 1.0;
+    in-out property <string> info-text: "";
+    in-out property <bool> show-alpha: true;
+
+    callback toggle-alpha();
+    callback export-dds();
+    callback replace-from-dds();
+
+    VerticalBox {
+        Text { text: info-text; }
+        Image { source: texture-image; width: texture-orig-width * 1px; height: texture-orig-height * 1px; }
+        Button { text: @tr("Переключить альфа-канал"); clicked => { toggle-alpha(); } }
+        Button { text: @tr("Экспортировать DDS"); clicked => { export-dds(); } }
+        Button { text: @tr("Заменить из DDS"); clicked => { replace-from-dds(); } }
+    }
+}

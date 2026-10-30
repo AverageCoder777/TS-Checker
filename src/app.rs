@@ -61,6 +61,7 @@ pub(crate) struct CheckerApp {
     pub(crate) route_scan_on_hdd: bool,
     pub(crate) hide_quick_drive_free_roam: bool,
     pub(crate) locoswap_path: String,
+    pub(crate) language: String,
     pub(crate) asset_inventory_state: Arc<Mutex<AssetInventoryWindowState>>,
     pub(crate) inventory_action_tx: Sender<InventoryAction>,
     inventory_action_rx: Receiver<InventoryAction>,
@@ -100,6 +101,7 @@ impl Default for CheckerApp {
             Ok(value) => (value, None),
             Err(error) => (false, Some(error)),
         };
+        let language = load_language();
         let (inventory_action_tx, inventory_action_rx) = mpsc::channel();
         if let Some(warning) = settings_warning {
             status.push(' ');
@@ -150,6 +152,7 @@ impl Default for CheckerApp {
             route_scan_on_hdd,
             hide_quick_drive_free_roam,
             locoswap_path: load_locoswap_path(),
+            language,
             asset_inventory_state: Arc::new(Mutex::new(AssetInventoryWindowState::default())),
             inventory_action_tx,
             inventory_action_rx,
