@@ -4,6 +4,8 @@ use std::path::Path;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::process::Command;
 
 pub(crate) fn open_in_explorer(target_path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]

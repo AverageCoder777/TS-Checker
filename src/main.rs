@@ -18,26 +18,6 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use zip::ZipArchive;
 
-#[derive(Clone)]
-struct ScenarioSelectionSnapshot {
-    scen_items: Vec<ScenarioItem>,
-    ui_selected_scenario: i32,
-    scenario_name: String,
-    scenario_title: String,
-    scenario_author: String,
-    scenario_season: String,
-    scenario_start_time: String,
-    scenario_weather: String,
-    consist_names: Vec<slint::SharedString>,
-    consist_player: Vec<bool>,
-    consist_missing: Vec<bool>,
-    consist_complete: Vec<bool>,
-    vehicles: Vec<slint::SharedString>,
-    missing: Vec<bool>,
-    paths: Vec<slint::SharedString>,
-    selected_vehicle_info: String,
-}
-
 const DEFAULT_CONCURRENT_SERZ: usize = 8;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1626,28 +1606,36 @@ fn main() {
         let ui_handle = ui_handle3.clone();
         let scenario_handle = scenario_handle.clone();
         std::thread::spawn(move || {
-            let data = (|| -> Option<ScenarioSelectionSnapshot> {
-                let mut app = app.lock().ok()?;
+            let mut app = match app.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
                 app.refresh_scenarios();
                 let hide = app.hide_quick_drive_free_roam;
                 let filtered_indices: Vec<usize> = app
                     .scenarios
                     .iter()
                     .enumerate()
-                    .filter(|(_, s)| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                    .filter(|(_, s)| {
+                        !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type)
+                    })
                     .map(|(i, _)| i)
                     .collect();
                 let ui_idx = idx as usize;
-                let &scen_idx = filtered_indices.get(ui_idx)?;
+                let Some(&scen_idx) = filtered_indices.get(ui_idx) else {
+                    return;
+                };
                 if scen_idx >= app.scenarios.len() {
-                    return None;
+                    return;
                 }
                 crate::scenario::load_scenario_metadata(&mut app.scenarios[scen_idx]);
 
                 let scen_items: Vec<ScenarioItem> = app
                     .scenarios
                     .iter()
-                    .filter(|s| !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type))
+                    .filter(|s| {
+                        !hide || !crate::scenario::is_hidden_scenario_type(&s.scenario_type)
+                    })
                     .map(|s| ScenarioItem {
                         name: s.name.clone().into(),
                         scenario_type: s.scenario_type.clone().into(),
@@ -1657,8 +1645,9 @@ fn main() {
                 let needs_load = app.scenarios[scen_idx].consists.is_none();
                 if needs_load {
                     let scenario_path = app.scenarios[scen_idx].path.clone();
-                    let serz_path =
-                        crate::assets::preferred_serz_path(std::path::Path::new(app.rw_path.trim()));
+                    let serz_path = crate::assets::preferred_serz_path(std::path::Path::new(
+                        app.rw_path.trim(),
+                    ));
                     let consists = crate::scenario::load_consists(&scenario_path, &serz_path);
                     app.scenarios[scen_idx].consists = Some(consists);
                 }
@@ -1698,14 +1687,14 @@ fn main() {
                             .map(|c| {
                                 let mut all_ok = true;
                                 let mut flags = Vec::with_capacity(c.vehicles.len());
-                                 for veh in &c.vehicles {
-                                     let exists = crate::blueprint::vehicle_blueprint_exists(
-                                         std::path::Path::new(&rw_path),
-                                         &veh.provider,
-                                         &veh.product,
-                                         &veh.blueprint,
-                                     );
-                                     flags.push(!exists);
+                                for veh in &c.vehicles {
+                                    let exists = crate::blueprint::vehicle_blueprint_exists(
+                                        std::path::Path::new(&rw_path),
+                                        &veh.provider,
+                                        &veh.product,
+                                        &veh.blueprint,
+                                    );
+                                    flags.push(!exists);
                                     if !exists {
                                         all_ok = false;
                                     }
@@ -1768,7 +1757,9 @@ fn main() {
                 {
                     format!(
                         "Поставщик: {}\nДополнение: {}\nФайл: {}\nНомер: {}",
-                        v.provider, v.product, v.blueprint,
+                        v.provider,
+                        v.product,
+                        v.blueprint,
                         v.number.clone().unwrap_or_else(|| "—".to_owned())
                     )
                 } else {
@@ -1803,70 +1794,45 @@ fn main() {
                 let scenario_start_time = fallback(&scenario.start_time);
                 let scenario_weather = fallback(&weather_name);
 
-                Some(ScenarioSelectionSnapshot {
-                    scen_items,
-                    ui_selected_scenario: ui_idx as i32,
-                    scenario_name,
-                    scenario_title,
-                    scenario_author,
-                    scenario_season,
-                    scenario_start_time,
-                    scenario_weather,
-                    consist_names,
-                    consist_player,
-                    consist_missing,
-                    consist_complete,
-                    vehicles,
-                    missing,
-                    paths,
-                    selected_vehicle_info,
-                })
-            })();
+                let ui_selected_scenario = ui_idx as i32;
 
-            if let Some(data) = data {
-                let ScenarioSelectionSnapshot {
-                    scen_items,
-                    ui_selected_scenario,
-                    scenario_name,
-                    scenario_title,
-                    scenario_author,
-                    scenario_season,
-                    scenario_start_time,
-                    scenario_weather,
-                    consist_names,
-                    consist_player,
-                    consist_missing,
-                    consist_complete,
-                    vehicles,
-                    missing,
-                    paths,
-                    selected_vehicle_info,
-                } = data;
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_handle.upgrade() {
-                        ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen_items)));
-                        ui.set_selected_scenario(ui_selected_scenario);
-                    }
-                    if let Some(sw) = scenario_handle.upgrade() {
-                        sw.set_scenario_name(scenario_name.into());
-                        sw.set_scenario_title(scenario_title.into());
-                        sw.set_scenario_author(scenario_author.into());
-                        sw.set_scenario_season(scenario_season.into());
-                        sw.set_scenario_start_time(scenario_start_time.into());
-                        sw.set_scenario_weather(scenario_weather.into());
-                        sw.set_consist_names(slint::ModelRc::new(slint::VecModel::from(consist_names)));
-                        sw.set_consist_player(slint::ModelRc::new(slint::VecModel::from(consist_player)));
-                        sw.set_consist_missing(slint::ModelRc::new(slint::VecModel::from(consist_missing)));
-                        sw.set_consist_complete(slint::ModelRc::new(slint::VecModel::from(consist_complete)));
-                        sw.set_vehicle_names(slint::ModelRc::new(slint::VecModel::from(vehicles)));
-                        sw.set_vehicle_missing(slint::ModelRc::new(slint::VecModel::from(missing)));
-                        sw.set_vehicle_paths(slint::ModelRc::new(slint::VecModel::from(paths)));
-                        sw.set_selected_vehicle_info(selected_vehicle_info.into());
-                        sw.set_selected_consist(0);
-                        let _ = sw.show();
+                drop(app);
+
+
+            let result = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_handle.upgrade() else {
+                        eprintln!("scenario UI handle dropped before update");
+                        return;
+                    };
+                    ui.set_scenario_items(slint::ModelRc::from(scen_items.as_slice()));
+                    ui.set_selected_scenario(ui_selected_scenario);
+
+                    let Some(sw) = scenario_handle.upgrade() else {
+                        eprintln!("scenario window handle dropped before update");
+                        return;
+                    };
+                    sw.set_scenario_name(scenario_name.into());
+                    sw.set_scenario_title(scenario_title.into());
+                    sw.set_scenario_author(scenario_author.into());
+                    sw.set_scenario_season(scenario_season.into());
+                    sw.set_scenario_start_time(scenario_start_time.into());
+                    sw.set_scenario_weather(scenario_weather.into());
+                    sw.set_consist_names(slint::ModelRc::from(consist_names.as_slice()));
+                    sw.set_consist_player(slint::ModelRc::from(consist_player.as_slice()));
+                    sw.set_consist_missing(slint::ModelRc::from(consist_missing.as_slice()));
+                    sw.set_consist_complete(slint::ModelRc::from(consist_complete.as_slice()));
+                    sw.set_vehicle_names(slint::ModelRc::from(vehicles.as_slice()));
+                    sw.set_vehicle_missing(slint::ModelRc::from(missing.as_slice()));
+                    sw.set_vehicle_paths(slint::ModelRc::from(paths.as_slice()));
+                    sw.set_selected_vehicle_info(selected_vehicle_info.into());
+                    sw.set_selected_consist(0);
+                    if let Err(err) = sw.show() {
+                        eprintln!("failed to show scenario window: {err}");
                     }
                 });
-            }
+                if let Err(err) = result {
+                    eprintln!("failed to invoke scenario UI update: {err}");
+                }
         });
     });
 
