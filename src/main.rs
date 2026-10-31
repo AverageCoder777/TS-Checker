@@ -18,6 +18,26 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use zip::ZipArchive;
 
+#[derive(Clone)]
+struct ScenarioSelectionSnapshot {
+    scen_items: Vec<ScenarioItem>,
+    ui_selected_scenario: i32,
+    scenario_name: String,
+    scenario_title: String,
+    scenario_author: String,
+    scenario_season: String,
+    scenario_start_time: String,
+    scenario_weather: String,
+    consist_names: Vec<slint::SharedString>,
+    consist_player: Vec<bool>,
+    consist_missing: Vec<bool>,
+    consist_complete: Vec<bool>,
+    vehicles: Vec<slint::SharedString>,
+    missing: Vec<bool>,
+    paths: Vec<slint::SharedString>,
+    selected_vehicle_info: String,
+}
+
 const DEFAULT_CONCURRENT_SERZ: usize = 8;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1606,7 +1626,7 @@ fn main() {
         let ui_handle = ui_handle3.clone();
         let scenario_handle = scenario_handle.clone();
         std::thread::spawn(move || {
-            let data = (|| -> Option<(Vec<ScenarioItem>, i32, String, String, String, String, String, String, Vec<slint::SharedString>, Vec<bool>, Vec<bool>, Vec<bool>, Vec<slint::SharedString>, Vec<bool>, Vec<slint::SharedString>, String)> {
+            let data = (|| -> Option<ScenarioSelectionSnapshot> {
                 let mut app = app.lock().ok()?;
                 app.refresh_scenarios();
                 let hide = app.hide_quick_drive_free_roam;
@@ -1783,9 +1803,9 @@ fn main() {
                 let scenario_start_time = fallback(&scenario.start_time);
                 let scenario_weather = fallback(&weather_name);
 
-                Some((
+                Some(ScenarioSelectionSnapshot {
                     scen_items,
-                    ui_idx as i32,
+                    ui_selected_scenario: ui_idx as i32,
                     scenario_name,
                     scenario_title,
                     scenario_author,
@@ -1800,28 +1820,28 @@ fn main() {
                     missing,
                     paths,
                     selected_vehicle_info,
-                ))
+                })
             })();
 
-            if let Some((
-                scen_items,
-                ui_selected_scenario,
-                scenario_name,
-                scenario_title,
-                scenario_author,
-                scenario_season,
-                scenario_start_time,
-                scenario_weather,
-                consist_names,
-                consist_player,
-                consist_missing,
-                consist_complete,
-                vehicles,
-                missing,
-                paths,
-                selected_vehicle_info,
-            )) = data
-            {
+            if let Some(data) = data {
+                let ScenarioSelectionSnapshot {
+                    scen_items,
+                    ui_selected_scenario,
+                    scenario_name,
+                    scenario_title,
+                    scenario_author,
+                    scenario_season,
+                    scenario_start_time,
+                    scenario_weather,
+                    consist_names,
+                    consist_player,
+                    consist_missing,
+                    consist_complete,
+                    vehicles,
+                    missing,
+                    paths,
+                    selected_vehicle_info,
+                } = data;
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_handle.upgrade() {
                         ui.set_scenario_items(slint::ModelRc::new(slint::VecModel::from(scen_items)));
