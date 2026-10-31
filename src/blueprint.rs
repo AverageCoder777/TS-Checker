@@ -19,25 +19,27 @@ static AP_ARCHIVE_ENTRIES: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn ap_archive_entries(path: &Path) -> Vec<String> {
-    if let Ok(cache) = AP_ARCHIVE_ENTRIES.lock() {
-        if let Some(cached) = cache.get(path) {
-            return cached.clone();
-        }
+    if let Ok(cache) = AP_ARCHIVE_ENTRIES.lock()
+        && let Some(cached) = cache.get(path)
+    {
+        return cached.clone();
     }
     let mut entries = Vec::new();
-    if let Ok(file) = fs::File::open(path) {
-        if let Ok(zip) = zip::ZipArchive::new(file) {
-            for name_result in zip.file_names() {
-                let Ok(name) = name_result else { continue; };
-                let name = name.to_string();
-                let ext = Path::new(&name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if ext == "bin" || ext == "xml" {
-                    entries.push(name);
-                }
+    if let Ok(file) = fs::File::open(path)
+        && let Ok(zip) = zip::ZipArchive::new(file)
+    {
+        for name_result in zip.file_names() {
+            let Ok(name) = name_result else {
+                continue;
+            };
+            let name = name.to_string();
+            let ext = Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "bin" || ext == "xml" {
+                entries.push(name);
             }
         }
     }
@@ -50,10 +52,10 @@ pub(crate) fn ap_archive_entries(path: &Path) -> Vec<String> {
 }
 
 pub(crate) fn ap_archive_member_stems(path: &Path) -> Option<HashSet<String>> {
-    if let Ok(cache) = AP_ARCHIVE_INDEX.lock() {
-        if let Some(cached) = cache.get(path) {
-            return cached.clone();
-        }
+    if let Ok(cache) = AP_ARCHIVE_INDEX.lock()
+        && let Some(cached) = cache.get(path)
+    {
+        return cached.clone();
     }
     let stems = (|| {
         let file = fs::File::open(path).ok()?;
@@ -134,17 +136,11 @@ pub(crate) fn vehicle_blueprint_exists(
         .unwrap_or("")
         .to_ascii_lowercase();
     if extension == "xml" {
-        candidates.push(format!(
-            "{}.bin",
-            normalized.trim_end_matches(".xml")
-        ));
-        candidates.push(normalized.clone());
+        candidates.push(format!("{}.bin", normalized.trim_end_matches(".xml")));
+        candidates.push(normalized);
     } else if extension == "bin" {
         candidates.push(normalized.clone());
-        candidates.push(format!(
-            "{}.xml",
-            normalized.trim_end_matches(".bin")
-        ));
+        candidates.push(format!("{}.xml", normalized.trim_end_matches(".bin")));
     } else {
         candidates.push(format!("{}.bin", normalized));
         candidates.push(format!("{}.xml", normalized));
@@ -229,17 +225,19 @@ pub(crate) fn resolve_blueprint_file(
     }
 
     let roots: Vec<PathBuf> = vec![assets_path.clone(), route_path.to_path_buf()];
-    candidates.sort_by_key(|candidate| match candidate
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("bin") => 0usize,
-        Some("geopcdx") => 1,
-        Some("tgpcdx") => 2,
-        Some("xml") => 3,
-        _ => 4,
+    candidates.sort_by_key(|candidate| {
+        match candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("bin") => 0usize,
+            Some("geopcdx") => 1,
+            Some("tgpcdx") => 2,
+            Some("xml") => 3,
+            _ => 4,
+        }
     });
     for root in &roots {
         for candidate in &candidates {
@@ -269,7 +267,7 @@ pub(crate) fn resolve_blueprint_file(
         }
     }
     if search_roots.is_empty() {
-        search_roots.push(assets_path.clone());
+        search_roots.push(assets_path);
     }
 
     for root in &search_roots {
@@ -297,10 +295,10 @@ pub(crate) fn resolve_blueprint_file(
                 {
                     continue;
                 }
-                if let Some(stems) = ap_archive_member_stems(&path) {
-                    if stems.contains(&file_stem.to_ascii_lowercase()) {
-                        return Some(path.clone());
-                    }
+                if let Some(stems) = ap_archive_member_stems(&path)
+                    && stems.contains(&file_stem.to_ascii_lowercase())
+                {
+                    return Some(path.clone());
                 }
             }
         }

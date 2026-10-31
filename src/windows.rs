@@ -1,7 +1,6 @@
-﻿//! Windows shell integrations such as Explorer and the Recycle Bin.
+//! Windows shell integrations such as Explorer and the Recycle Bin.
 
 use std::path::Path;
-use std::process::Command;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -43,7 +42,9 @@ pub(crate) fn open_in_explorer(target_path: &Path) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = target_path;
-        open::that(target_path).map(|_| ()).map_err(|error| error.to_string())
+        open::that(target_path)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 

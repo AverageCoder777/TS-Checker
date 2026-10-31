@@ -219,56 +219,79 @@ pub(crate) fn read_route_scenarios(route_path: &Path, serz_path: &Path) -> Vec<R
     let Ok(entries) = fs::read_dir(&scenarios_path) else {
         return Vec::new();
     };
-    let dirs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
-        let mut scenarios: Vec<RouteScenario> = dirs.into_par_iter().map(|path| {
-        let id = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let mut scenario = RouteScenario { path: path.clone(), name: id.clone(), scenario_type: String::new(), metadata_loaded: false, ..RouteScenario::default() };
-        let mut properties_had_type = false;
-        if let Ok(xml) = fs::read_to_string(path.join("ScenarioProperties.xml")) {
-            scenario.name = localised_text(&xml, "DisplayName");
-            if scenario.name.is_empty() { scenario.name = id.clone(); }
-            scenario.author = element_text(&xml, "Author");
-            scenario.season = match element_text(&xml, "Season").as_str() {
-                "SEASON_SPRING" => "Spring".to_owned(),
-                "SEASON_SUMMER" => "Summer".to_owned(),
-                "SEASON_AUTUMN" => "Autumn".to_owned(),
-                "SEASON_WINTER" => "Winter".to_owned(),
-                other => other.to_owned(),
+    let dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    let mut scenarios: Vec<RouteScenario> = dirs
+        .into_par_iter()
+        .map(|path| {
+            let id = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let mut scenario = RouteScenario {
+                path: path.clone(),
+                name: id.clone(),
+                scenario_type: String::new(),
+                metadata_loaded: false,
+                ..RouteScenario::default()
             };
-            scenario.weather = element_text(&xml, "WeatherBlueprint");
-            if scenario.weather.is_empty() { scenario.weather = element_text(&xml, "Weather"); }
-            if scenario.weather.is_empty() {
-                if let Some(start) = xml.find("<WeatherBlueprint") {
+            let mut properties_had_type = false;
+            if let Ok(xml) = fs::read_to_string(path.join("ScenarioProperties.xml")) {
+                scenario.name = localised_text(&xml, "DisplayName");
+                if scenario.name.is_empty() {
+                    scenario.name = id;
+                }
+                scenario.author = element_text(&xml, "Author");
+                scenario.season = match element_text(&xml, "Season").as_str() {
+                    "SEASON_SPRING" => "Spring".to_owned(),
+                    "SEASON_SUMMER" => "Summer".to_owned(),
+                    "SEASON_AUTUMN" => "Autumn".to_owned(),
+                    "SEASON_WINTER" => "Winter".to_owned(),
+                    other => other.to_owned(),
+                };
+                scenario.weather = element_text(&xml, "WeatherBlueprint");
+                if scenario.weather.is_empty() {
+                    scenario.weather = element_text(&xml, "Weather");
+                }
+                if scenario.weather.is_empty()
+                    && let Some(start) = xml.find("<WeatherBlueprint")
+                {
                     let rest = &xml[start..];
                     let tag_end = rest.find('>').unwrap_or(rest.len());
                     let end = rest.find("</WeatherBlueprint>").unwrap_or(rest.len());
                     let block = &rest[tag_end + 1..end];
                     let bp = element_text(block, "BlueprintID");
-                    scenario.weather = if bp.is_empty() { block.trim().to_owned() } else { bp };
+                    scenario.weather = if bp.is_empty() {
+                        block.trim().to_owned()
+                    } else {
+                        bp
+                    };
                 }
+                scenario.duration = element_text(&xml, "DurationMins");
+                scenario.start_time = scenario_start_time(&xml);
+                scenario.state = element_text(&xml, "StateName");
+                scenario.player_consist = element_text(&xml, "QuickDrivePlayerConsistName");
+                scenario.date = scenario_date(&xml);
+                scenario.scenario_type = scenario_type_from_xml(&xml);
+                properties_had_type = has_scenario_type_marker(&xml);
+                scenario.metadata_loaded = true;
             }
-            scenario.duration = element_text(&xml, "DurationMins");
-            scenario.start_time = scenario_start_time(&xml);
-            scenario.state = element_text(&xml, "StateName");
-            scenario.player_consist = element_text(&xml, "QuickDrivePlayerConsistName");
-            scenario.date = scenario_date(&xml);
-            scenario.scenario_type = scenario_type_from_xml(&xml);
-            properties_had_type = has_scenario_type_marker(&xml);
-            scenario.metadata_loaded = true;
-        }
-        if !properties_had_type {
-            if let Some(bin_xml) = read_scenario_file(&path, serz_path) {
+            if !properties_had_type && let Some(bin_xml) = read_scenario_file(&path, serz_path) {
                 let from_bin = scenario_type_from_xml(&bin_xml);
                 if has_scenario_type_marker(&bin_xml) {
                     scenario.scenario_type = from_bin;
                 }
             }
-        }
-        if scenario.scenario_type.is_empty() {
-            scenario.scenario_type = "Standard".to_owned();
-        }
-        scenario
-    }).collect();
+            if scenario.scenario_type.is_empty() {
+                scenario.scenario_type = "Standard".to_owned();
+            }
+            scenario
+        })
+        .collect();
 
     scenarios.sort_by(|left, right| left.name.cmp(&right.name));
     scenarios
@@ -309,19 +332,19 @@ pub(crate) fn load_scenario_metadata(scenario: &mut RouteScenario) {
         if scenario.weather.is_empty() {
             scenario.weather = element_text(&xml, "Weather");
         }
-        if scenario.weather.is_empty() {
-            if let Some(start) = xml.find("<WeatherBlueprint") {
-                let rest = &xml[start..];
-                let tag_end = rest.find('>').unwrap_or(rest.len());
-                let end = rest.find("</WeatherBlueprint>").unwrap_or(rest.len());
-                let block = &rest[tag_end + 1..end];
-                let bp = element_text(block, "BlueprintID");
-                scenario.weather = if bp.is_empty() {
-                    block.trim().to_owned()
-                } else {
-                    bp
-                };
-            }
+        if scenario.weather.is_empty()
+            && let Some(start) = xml.find("<WeatherBlueprint")
+        {
+            let rest = &xml[start..];
+            let tag_end = rest.find('>').unwrap_or(rest.len());
+            let end = rest.find("</WeatherBlueprint>").unwrap_or(rest.len());
+            let block = &rest[tag_end + 1..end];
+            let bp = element_text(block, "BlueprintID");
+            scenario.weather = if bp.is_empty() {
+                block.trim().to_owned()
+            } else {
+                bp
+            };
         }
     } else if scenario.name.is_empty() {
         scenario.name = scenario
@@ -348,10 +371,10 @@ pub(crate) fn load_consists(scenario_path: &Path, serz_path: &Path) -> Vec<Scena
 /// Читает файл сценария с составами: он может быть XML или бинарным.
 pub(crate) fn read_scenario_file(scenario_path: &Path, serz_path: &Path) -> Option<String> {
     let binary = scenario_path.join("Scenario.bin");
-    if binary.is_file() {
-        if let Ok(xml) = crate::assets::read_serz_xml(serz_path, &binary) {
-            return Some(xml);
-        }
+    if binary.is_file()
+        && let Ok(xml) = crate::assets::read_serz_xml(serz_path, &binary)
+    {
+        return Some(xml);
     }
     let text = scenario_path.join("Scenario.xml");
     if text.is_file() {
@@ -513,7 +536,9 @@ pub(crate) fn weather_display_name(
     if blueprint.is_empty() {
         return String::new();
     }
-    let resolved = crate::blueprint::resolve_blueprint_file_cached_free(rw_path, route_path, blueprint, "", "");
+    let resolved = crate::blueprint::resolve_blueprint_file_cached_free(
+        rw_path, route_path, blueprint, "", "",
+    );
     if let Some(path) = resolved {
         let ext = path
             .extension()
@@ -531,19 +556,19 @@ pub(crate) fn weather_display_name(
                 name = element_text(&xml, "Name");
             }
             // Если блюпринт обёрнут в cWeatherBlueprint, ищем внутри блока.
-            if name.is_empty() {
-                if let Some(start) = xml.find("<cWeatherBlueprint") {
-                    let rest = &xml[start..];
-                    let tag_end = rest.find('>').unwrap_or(rest.len());
-                    let end = rest.find("</cWeatherBlueprint>").unwrap_or(rest.len());
-                    let block = &rest[tag_end + 1..end];
-                    name = element_text(block, "LocalisedDisplayName");
-                    if name.is_empty() {
-                        name = element_text(block, "Name");
-                    }
-                    if name.is_empty() {
-                        name = block.trim().to_owned();
-                    }
+            if name.is_empty()
+                && let Some(start) = xml.find("<cWeatherBlueprint")
+            {
+                let rest = &xml[start..];
+                let tag_end = rest.find('>').unwrap_or(rest.len());
+                let end = rest.find("</cWeatherBlueprint>").unwrap_or(rest.len());
+                let block = &rest[tag_end + 1..end];
+                name = element_text(block, "LocalisedDisplayName");
+                if name.is_empty() {
+                    name = element_text(block, "Name");
+                }
+                if name.is_empty() {
+                    name = block.trim().to_owned();
                 }
             }
             if !name.is_empty() {
@@ -572,7 +597,13 @@ fn scenario_date(xml: &str) -> String {
     format!("{day:02}.{month:02}.{year}")
 }
 fn has_scenario_type_marker(xml: &str) -> bool {
-    for tag in ["ScenarioClass", "ScenarioType", "ScenarioMode", "Type", "Class"] {
+    for tag in [
+        "ScenarioClass",
+        "ScenarioType",
+        "ScenarioMode",
+        "Type",
+        "Class",
+    ] {
         if !element_text(xml, tag).is_empty() {
             return true;
         }
@@ -596,7 +627,13 @@ fn has_scenario_type_marker(xml: &str) -> bool {
 /// Определяет тип сценария по XML свойств/сценария.
 pub(crate) fn scenario_type_from_xml(xml: &str) -> String {
     // Явный тег ScenarioClass / аналоги.
-    for tag in ["ScenarioClass", "ScenarioType", "ScenarioMode", "Type", "Class"] {
+    for tag in [
+        "ScenarioClass",
+        "ScenarioType",
+        "ScenarioMode",
+        "Type",
+        "Class",
+    ] {
         let value = element_text(xml, tag);
         if !value.is_empty() {
             let normalized = normalize_scenario_type(&value);
@@ -614,7 +651,11 @@ pub(crate) fn scenario_type_from_xml(xml: &str) -> String {
     if lower.contains("freeroam") || lower.contains("free roam") {
         return "Free Roam".to_owned();
     }
-    if lower.contains("quickdrive") || lower.contains("quick drive") || lower.contains("etemplate") || lower.contains("template scenario") {
+    if lower.contains("quickdrive")
+        || lower.contains("quick drive")
+        || lower.contains("etemplate")
+        || lower.contains("template scenario")
+    {
         return "Quick Drive".to_owned();
     }
     if lower.contains("timetable") || lower.contains("etimetable") {
@@ -637,11 +678,11 @@ fn normalize_scenario_type(value: &str) -> String {
         "Quick Drive".to_owned()
     } else if v.contains("career") {
         "Career".to_owned()
-     } else if v.contains("standard") || v.contains("normal") {
-         "Standard".to_owned()
-     } else if v.contains("timetable") {
-         "Timetable (Standard)".to_owned()
-     } else if v.contains("template") {
+    } else if v.contains("standard") || v.contains("normal") {
+        "Standard".to_owned()
+    } else if v.contains("timetable") {
+        "Timetable (Standard)".to_owned()
+    } else if v.contains("template") {
         "Quick Drive".to_owned()
     } else if v.is_empty() {
         String::new()
@@ -651,31 +692,38 @@ fn normalize_scenario_type(value: &str) -> String {
 }
 
 pub(crate) fn is_hidden_scenario_type(scenario_type: &str) -> bool {
-    matches!(scenario_type.trim().to_lowercase().as_str(), "quick drive" | "free roam")
+    matches!(
+        scenario_type.trim().to_lowercase().as_str(),
+        "quick drive" | "free roam"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::assets::check_route;
-#[test]
-fn checks_real_route_x() {
-    let rw_path = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks");
-    let route = rw_path.join(r"Content\Routes\1f8f9c40-10bb-4310-ab5c-3a6a74893eb1");
-    let serz = rw_path.join(r"serz.exe");
-    if !route.is_dir() || !serz.is_file() {
-        return;
-    }
-    let result = check_route(&route, &rw_path.join("Assets"), &serz, false, 1, |_| {});
-    match result {
-        Ok(r) => {
-            println!("missing: {}, errors: {}, structure: {}",
-                r.missing_assets.len(), r.conversion_errors.len(), r.structure_issues.len());
-            if let Some(last) = r.conversion_errors.last() {
-                println!("последняя ошибка: {last}");
-            }
+    #[test]
+    fn checks_real_route_x() {
+        let rw_path = PathBuf::from(r"X:\SteamLibrary\steamapps\common\RailWorks");
+        let route = rw_path.join(r"Content\Routes\1f8f9c40-10bb-4310-ab5c-3a6a74893eb1");
+        let serz = rw_path.join(r"serz.exe");
+        if !route.is_dir() || !serz.is_file() {
+            return;
         }
-        Err(e) => panic!("{e}"),
+        let result = check_route(&route, &rw_path.join("Assets"), &serz, false, 1, |_| {});
+        match result {
+            Ok(r) => {
+                println!(
+                    "missing: {}, errors: {}, structure: {}",
+                    r.missing_assets.len(),
+                    r.conversion_errors.len(),
+                    r.structure_issues.len()
+                );
+                if let Some(last) = r.conversion_errors.last() {
+                    println!("последняя ошибка: {last}");
+                }
+            }
+            Err(e) => panic!("{e}"),
+        }
     }
-}
 }

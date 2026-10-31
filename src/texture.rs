@@ -77,8 +77,12 @@ pub fn export_tgpcdx_bytes_to_dds(data: &[u8], output: &Path) -> Result<(), Stri
     let first = blocks[0];
     let fmt_str = extract_tag(first, "Format", "cDeltaString").unwrap_or_default();
     let d3d_fmt = tgpcdx_format_to_d3d(&fmt_str);
-    let width: u32 = extract_tag(first, "Width", "sUInt16").and_then(|s| s.parse().ok()).unwrap_or(0);
-    let height: u32 = extract_tag(first, "Height", "sUInt16").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let width: u32 = extract_tag(first, "Width", "sUInt16")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let height: u32 = extract_tag(first, "Height", "sUInt16")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let mip_count = blocks.len() as u32;
 
     let mut dds = ddsfile::Dds::new_d3d(ddsfile::NewD3dParams {
@@ -96,8 +100,12 @@ pub fn export_tgpcdx_bytes_to_dds(data: &[u8], output: &Path) -> Result<(), Stri
     for block in &blocks {
         let blob = extract_blob(block).ok_or("no blob")?;
         let bytes = hex_decode(&blob);
-        let _bw: u32 = extract_tag(block, "Width", "sUInt16").and_then(|s| s.parse().ok()).unwrap_or(width);
-        let _bh: u32 = extract_tag(block, "Height", "sUInt16").and_then(|s| s.parse().ok()).unwrap_or(height);
+        let _bw: u32 = extract_tag(block, "Width", "sUInt16")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(width);
+        let _bh: u32 = extract_tag(block, "Height", "sUInt16")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(height);
         // compute size not strictly needed; copy bytes
         let sz = bytes.len();
         if offset + sz <= dds.data.len() {
@@ -153,23 +161,41 @@ pub fn convert_dds_to_tgpcdx(input: &Path, output: &Path) -> Result<(), String> 
     s.push_str("<cHcTextureGroup xmlns:d=\"http://www.kuju.com/TnT/2003/Delta\" d:version=\"1.0\" d:id=\"1\">\n");
     s.push_str("\t<Texture>\n");
     s.push_str("\t\t<cHcTexture d:id=\"2\">\n");
-    s.push_str(&format!("\t\t\t<Width d:type=\"sUInt32\">{}</Width>\n", width));
-    s.push_str(&format!("\t\t\t<Height d:type=\"sUInt32\">{}</Height>\n", height));
+    s.push_str(&format!(
+        "\t\t\t<Width d:type=\"sUInt32\">{}</Width>\n",
+        width
+    ));
+    s.push_str(&format!(
+        "\t\t\t<Height d:type=\"sUInt32\">{}</Height>\n",
+        height
+    ));
     s.push_str("\t\t\t<Name d:type=\"cDeltaString\">texture</Name>\n");
     s.push_str("\t\t\t<Data>\n");
     s.push_str("\t\t\t\t<cHcTextureData d:id=\"3\">\n");
     s.push_str("\t\t\t\t\t<Mip>\n");
     for (w, h, bytes) in &mips {
         s.push_str("\t\t\t\t\t\t<cHcImageDx d:id=\"4\">\n");
-        s.push_str(&format!("\t\t\t\t\t\t\t<Format d:type=\"cDeltaString\">{}</Format>\n", fmt_str));
+        s.push_str(&format!(
+            "\t\t\t\t\t\t\t<Format d:type=\"cDeltaString\">{}</Format>\n",
+            fmt_str
+        ));
         s.push_str("\t\t\t\t\t\t\t<IsSwizzled d:type=\"bool\">0</IsSwizzled>\n");
-        s.push_str(&format!("\t\t\t\t\t\t\t<Width d:type=\"sUInt16\">{}</Width>\n", w));
-        s.push_str(&format!("\t\t\t\t\t\t\t<Height d:type=\"sUInt16\">{}</Height>\n", h));
+        s.push_str(&format!(
+            "\t\t\t\t\t\t\t<Width d:type=\"sUInt16\">{}</Width>\n",
+            w
+        ));
+        s.push_str(&format!(
+            "\t\t\t\t\t\t\t<Height d:type=\"sUInt16\">{}</Height>\n",
+            h
+        ));
         let mut chunks = Vec::new();
         for c in bytes.chunks(8) {
             chunks.push(c.iter().map(|b| format!("{:02X}", b)).collect::<String>());
         }
-        s.push_str(&format!("\t\t\t\t\t\t\t<d:blob d:size=\"{}\">", bytes.len()));
+        s.push_str(&format!(
+            "\t\t\t\t\t\t\t<d:blob d:size=\"{}\">",
+            bytes.len()
+        ));
         s.push_str(&chunks.join(" "));
         s.push_str("</d:blob>\n");
         s.push_str("\t\t\t\t\t\t</cHcImageDx>\n");
@@ -224,23 +250,23 @@ fn find_serz() -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    if let Ok(out) = Command::new("where").arg("serz.exe").output() {
-        if out.status.success() {
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                let p = PathBuf::from(line.trim());
-                if p.is_file() {
-                    return Ok(p);
-                }
+    if let Ok(out) = Command::new("where").arg("serz.exe").output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let p = PathBuf::from(line.trim());
+            if p.is_file() {
+                return Ok(p);
             }
         }
     }
-    if let Ok(out) = Command::new("where").arg("serz64.exe").output() {
-        if out.status.success() {
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                let p = PathBuf::from(line.trim());
-                if p.is_file() {
-                    return Ok(p);
-                }
+    if let Ok(out) = Command::new("where").arg("serz64.exe").output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let p = PathBuf::from(line.trim());
+            if p.is_file() {
+                return Ok(p);
             }
         }
     }

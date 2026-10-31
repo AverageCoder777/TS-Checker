@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -415,14 +416,14 @@ pub(crate) use windows::*;
 
 fn load_route_icon_image(icon_path: &std::path::Path) -> slint::Image {
     if let Ok(data) = std::fs::read(icon_path) {
-        if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-            if let Ok(image) = slint::Image::load_from_data(&data, Some("png")) {
-                return image;
-            }
-        } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            if let Ok(image) = slint::Image::load_from_data(&data, Some("jpeg")) {
-                return image;
-            }
+        if data.starts_with(&[0x89, 0x50, 0x4E, 0x47])
+            && let Ok(image) = slint::Image::load_from_data(&data, Some("png"))
+        {
+            return image;
+        } else if data.starts_with(&[0xFF, 0xD8, 0xFF])
+            && let Ok(image) = slint::Image::load_from_data(&data, Some("jpeg"))
+        {
+            return image;
         }
     }
     slint::Image::load_from_path(icon_path).unwrap_or_default()
@@ -458,10 +459,10 @@ fn load_vehicle_preview_image(
             .join("LocoInformation")
             .join("image.png");
         if image_path.is_file() {
-            if let Ok(data) = std::fs::read(&image_path) {
-                if let Ok(image) = slint::Image::load_from_data(&data, Some("png")) {
-                    return image;
-                }
+            if let Ok(data) = std::fs::read(&image_path)
+                && let Ok(image) = slint::Image::load_from_data(&data, Some("png"))
+            {
+                return image;
             }
             return slint::Image::load_from_path(&image_path).unwrap_or_default();
         }
@@ -523,10 +524,10 @@ fn load_vehicle_preview_image(
             continue;
         }
         let mut data = Vec::new();
-        if std::io::Read::read_to_end(&mut entry, &mut data).is_ok() {
-            if let Ok(image) = slint::Image::load_from_data(&data, Some("png")) {
-                return image;
-            }
+        if std::io::Read::read_to_end(&mut entry, &mut data).is_ok()
+            && let Ok(image) = slint::Image::load_from_data(&data, Some("png"))
+        {
+            return image;
         }
     }
     slint::Image::default()
@@ -573,7 +574,7 @@ fn filter_items(items: &mut Vec<BrokenResourceRef>, filter: &str) {
     });
 }
 
-fn sort_items(items: &mut Vec<BrokenResourceRef>, col: usize, asc: bool) {
+fn sort_items(items: &mut [BrokenResourceRef], col: usize, asc: bool) {
     items.sort_by(|a, b| {
         let va = match col {
             0 => match a.kind {
@@ -620,9 +621,9 @@ fn build_inventory_rows(
         }
         inventory_ui::InventorySortColumn::Usage => {
             if state.sort.descending {
-                assets.sort_by(|a, b| b.uses.len().cmp(&a.uses.len()));
+                assets.sort_by_key(|a| Reverse(a.uses.len()));
             } else {
-                assets.sort_by(|a, b| a.uses.len().cmp(&b.uses.len()));
+                assets.sort_by_key(|a| a.uses.len());
             }
         }
     }
@@ -694,40 +695,40 @@ fn main() {
     if let Some(target) = cli_args.get(1) {
         let path = std::path::PathBuf::from(target);
         // view-texture CLI
-        if target.eq_ignore_ascii_case("view-texture") {
-            if let Some(p) = cli_args.get(2) {
-                let path = std::path::PathBuf::from(p);
-                if path.is_file() {
-                    match std::fs::read(&path) {
-                        Ok(data) => match crate::texture::decode_tgpcdx_to_rgba(&data) {
-                            Ok((w, h, rgba)) => {
-                                let viewer = TextureViewerWindow::new().unwrap();
-                                viewer.set_texture_image(crate::texture::rgba_to_slint_image(
-                                    w, h, &rgba,
-                                ));
-                                viewer.set_texture_orig_width(w as i32);
-                                viewer.set_texture_orig_height(h as i32);
-                                viewer.set_zoom_factor(if w > 640 || h > 480 {
-                                    (640.0 / w as f32).min(480.0 / h as f32)
-                                } else {
-                                    1.0
-                                });
-                                viewer.set_info_text(
-                                    format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display())
-                                        .into(),
-                                );
-                                let _ = viewer.run();
-                                std::process::exit(0);
-                            }
-                            Err(e) => {
-                                crate::external_editor::show_native_error("Ошибка", &e);
-                                std::process::exit(1);
-                            }
-                        },
+        if target.eq_ignore_ascii_case("view-texture")
+            && let Some(p) = cli_args.get(2)
+        {
+            let path = std::path::PathBuf::from(p);
+            if path.is_file() {
+                match std::fs::read(&path) {
+                    Ok(data) => match crate::texture::decode_tgpcdx_to_rgba(&data) {
+                        Ok((w, h, rgba)) => {
+                            let viewer = TextureViewerWindow::new().unwrap();
+                            viewer.set_texture_image(crate::texture::rgba_to_slint_image(
+                                w, h, &rgba,
+                            ));
+                            viewer.set_texture_orig_width(w as i32);
+                            viewer.set_texture_orig_height(h as i32);
+                            viewer.set_zoom_factor(if w > 640 || h > 480 {
+                                (640.0 / w as f32).min(480.0 / h as f32)
+                            } else {
+                                1.0
+                            });
+                            viewer.set_info_text(
+                                format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display())
+                                    .into(),
+                            );
+                            let _ = viewer.run();
+                            std::process::exit(0);
+                        }
                         Err(e) => {
-                            crate::external_editor::show_native_error("Ошибка", &e.to_string());
+                            crate::external_editor::show_native_error("Ошибка", &e);
                             std::process::exit(1);
                         }
+                    },
+                    Err(e) => {
+                        crate::external_editor::show_native_error("Ошибка", &e.to_string());
+                        std::process::exit(1);
                     }
                 }
             }
@@ -835,15 +836,15 @@ fn main() {
     missing_win.on_copy_to_clipboard({
         let clipboard = clipboard.clone();
         move |text| {
-            if let Ok(mut ctx) = clipboard.lock() {
-                if let Err(e) = ctx.set_text(text.to_string()) {
-                    eprintln!("Ошибка копирования в буфер: {:?}", e);
-                }
+            if let Ok(mut ctx) = clipboard.lock()
+                && let Err(e) = ctx.set_text(text.to_string())
+            {
+                eprintln!("Ошибка копирования в буфер: {:?}", e);
             }
         }
     });
     missing_win.on_copy_all_to_clipboard({
-        let clipboard = clipboard.clone();
+        let clipboard = clipboard;
         let missing_handle2 = missing_handle.clone();
         move || {
             if let Some(mw) = missing_handle2.upgrade() {
@@ -877,20 +878,19 @@ fn main() {
                     .as_ref()
                     .map(|r| r.missing_assets.clone())
                     .unwrap_or_default();
-                if let Some(missing) = missing_assets.get(idx as usize).cloned() {
-                    if let Some(repair) = missing.suggested_repair.clone() {
-                        let assets_path =
-                            std::path::PathBuf::from(app.rw_path.trim()).join("Assets");
-                        let replacement = assets_path.join(repair.replace('/', "\\"));
-                        let replacement_relative = repair.clone();
-                        app.start_asset_replacement(
-                            missing,
-                            replacement,
-                            false,
-                            replacement_relative,
-                            std::collections::BTreeMap::new(),
-                        );
-                    }
+                if let Some(missing) = missing_assets.get(idx as usize).cloned()
+                    && let Some(repair) = missing.suggested_repair.clone()
+                {
+                    let assets_path = std::path::PathBuf::from(app.rw_path.trim()).join("Assets");
+                    let replacement = assets_path.join(repair.replace('/', "\\"));
+                    let replacement_relative = repair;
+                    app.start_asset_replacement(
+                        missing,
+                        replacement,
+                        false,
+                        replacement_relative,
+                        std::collections::BTreeMap::new(),
+                    );
                 }
             }
         }
@@ -1073,14 +1073,12 @@ fn main() {
                 .unwrap_or_else(|| "asset.bin".to_owned());
             let temp_file = temp_dir.join(&entry_file_name);
             // extract from archive
-            if let Ok(file) = std::fs::File::open(&archive_path) {
-                if let Ok(mut zip) = zip::ZipArchive::new(file) {
-                    if let Ok(mut member) = zip.by_name(&entry) {
-                        if let Ok(mut out) = std::fs::File::create(&temp_file) {
-                            let _ = std::io::copy(&mut member, &mut out);
-                        }
-                    }
-                }
+            if let Ok(file) = std::fs::File::open(&archive_path)
+                && let Ok(mut zip) = zip::ZipArchive::new(file)
+                && let Ok(mut member) = zip.by_name(&entry)
+                && let Ok(mut out) = std::fs::File::create(&temp_file)
+            {
+                let _ = std::io::copy(&mut member, &mut out);
             }
             let replacement_relative = temp_file
                 .strip_prefix(&assets_path)
@@ -1160,9 +1158,9 @@ fn main() {
                         .unwrap_or_default();
                     if let Ok(mut state) = ap_picker_state.lock() {
                         *state = Some(ApPickerState {
-                            archive_path: replacement.clone(),
-                            missing: missing.clone(),
-                            rw_path: rw_path.clone(),
+                            archive_path: replacement,
+                            missing,
+                            rw_path,
                             entries: entries.clone(),
                         });
                     }
@@ -1176,8 +1174,7 @@ fn main() {
                         pw.set_selected_index(-1);
                         let _ = pw.show();
                     }
-                } else {
-                    if let Ok(mut app) = app_clone7.lock() {
+                } else if let Ok(mut app) = app_clone7.lock() {
                         let replacement_relative = replacement
                             .strip_prefix(&assets_path)
                             .map(|p| p.to_string_lossy().to_string())
@@ -1194,7 +1191,6 @@ fn main() {
                             replacement_relative,
                             std::collections::BTreeMap::new(),
                         );
-                    }
                 }
             }
         }
@@ -1445,12 +1441,12 @@ fn main() {
         }
     });
     let app_clone_reset = app.clone();
-    let ui_handle_reset = ui_handle.clone();
+    let ui_handle_reset = ui_handle;
     ui.on_reset_log(move || {
-        if let Some(ui) = ui_handle_reset.upgrade() {
-            if let Ok(app) = app_clone_reset.lock() {
-                ui.set_check_log(app.check_log.clone().into());
-            }
+        if let Some(ui) = ui_handle_reset.upgrade()
+            && let Ok(app) = app_clone_reset.lock()
+        {
+            ui.set_check_log(app.check_log.clone().into());
         }
     });
     let inventory_win = AssetInventoryWindow::new().unwrap();
@@ -1503,12 +1499,12 @@ fn main() {
         settings_win.set_game_path(app.rw_path.clone().into());
         let langs = ["ru", "en", "de"];
         settings_win.set_language_options(slint::ModelRc::new(slint::VecModel::from(
-            langs.iter().map(|s| (*s).to_string().into()).collect::<Vec<slint::SharedString>>(),
+            langs
+                .iter()
+                .map(|s| (*s).to_string().into())
+                .collect::<Vec<slint::SharedString>>(),
         )));
-        let lang_idx = langs
-            .iter()
-            .position(|&l| l == app.language)
-            .unwrap_or(0);
+        let lang_idx = langs.iter().position(|&l| l == app.language).unwrap_or(0);
         settings_win.set_language_index(lang_idx as i32);
     }
     settings_win.on_pick_locoswap(move || {
@@ -1561,12 +1557,12 @@ fn main() {
     settings_win.on_serz_preset_selected(move |i| {
         if let Some(sw) = settings_handle4.upgrade() {
             let presets = sw.get_serz_presets();
-            if let Some(item) = presets.row_data(i as usize) {
-                if let Ok(limit) = item.to_string().parse::<usize>() {
-                    let _ = sw.set_serz_process_limit(limit as i32);
-                    if let Ok(mut app) = app_clone12.lock() {
-                        app.serz_process_limit = limit;
-                    }
+            if let Some(item) = presets.row_data(i as usize)
+                && let Ok(limit) = item.to_string().parse::<usize>()
+            {
+                sw.set_serz_process_limit(limit as i32);
+                if let Ok(mut app) = app_clone12.lock() {
+                    app.serz_process_limit = limit;
                 }
             }
         }
@@ -1727,7 +1723,7 @@ fn main() {
                     .map(|cc| {
                         cc.vehicles
                             .iter()
-                            .map(|v| format!("{}", v.name).into())
+                            .map(|v| v.name.to_string().into())
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1903,12 +1899,11 @@ fn main() {
     let app_clone_close_scenario = app.clone();
     let ui_handle_close_scenario = ui.as_weak();
     scenario_win.on_open_scenario_folder(move || {
-        if let Ok(app) = app_clone_open_scenario_folder.lock() {
-            if let Some(idx) = app.selected_scenario {
-                if let Some(scenario) = app.scenarios.get(idx) {
-                    let _ = open_in_file_explorer(&scenario.path);
-                }
-            }
+        if let Ok(app) = app_clone_open_scenario_folder.lock()
+            && let Some(idx) = app.selected_scenario
+            && let Some(scenario) = app.scenarios.get(idx)
+        {
+            let _ = open_in_file_explorer(&scenario.path);
         }
     });
     let scenario_handle_close = scenario_win.as_weak();
@@ -1952,10 +1947,10 @@ fn main() {
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     cmd.current_dir(parent);
                 }
-                if let Some(idx) = app.selected_scenario {
-                    if let Some(scenario) = app.scenarios.get(idx) {
-                        cmd.arg(&scenario.path);
-                    }
+                if let Some(idx) = app.selected_scenario
+                    && let Some(scenario) = app.scenarios.get(idx)
+                {
+                    cmd.arg(&scenario.path);
                 }
                 let _ = cmd.spawn();
             }
@@ -2190,12 +2185,11 @@ fn main() {
         }
     });
     ui.on_open_route_folder(move || {
-        if let Ok(app) = app_clone4.lock() {
-            if let Some(idx) = app.selected_route {
-                if let Some(route) = app.routes.get(idx) {
-                    let _ = open_in_file_explorer(&route.path);
-                }
-            }
+        if let Ok(app) = app_clone4.lock()
+            && let Some(idx) = app.selected_route
+            && let Some(route) = app.routes.get(idx)
+        {
+            let _ = open_in_file_explorer(&route.path);
         }
     });
     inventory_win.on_toggle_missing_only(move || {
@@ -2203,12 +2197,12 @@ fn main() {
             let cur = inv.get_show_missing_only();
             inv.set_show_missing_only(!cur);
             let show_missing = !cur;
-            if let Ok(app) = app_clone6.lock() {
-                if let Ok(state) = app.asset_inventory_state.lock() {
-                    let (rows, safe) = build_inventory_rows(&state, show_missing);
-                    inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-                    inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
-                }
+            if let Ok(app) = app_clone6.lock()
+                && let Ok(state) = app.asset_inventory_state.lock()
+            {
+                let (rows, safe) = build_inventory_rows(&state, show_missing);
+                inv.set_inventory_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+                inv.set_inventory_is_safe(slint::ModelRc::new(slint::VecModel::from(safe)));
             }
         }
     });
@@ -2452,7 +2446,7 @@ fn main() {
             return;
         }
         let missing = MissingAsset {
-            path: asset.path.clone(),
+            path: asset.path,
             uses,
             suggested_repair: None,
             is_corrupted_link: false,
@@ -2514,10 +2508,10 @@ fn main() {
     let current_display_items_for_filter = current_display_items.clone();
     let audit_sort_col_for_filter = audit_sort_col.clone();
     let audit_sort_asc_for_filter = audit_sort_asc.clone();
-    let all_audit_items_for_sort = all_audit_items.clone();
+    let all_audit_items_for_sort = all_audit_items;
     let current_display_items_for_sort = current_display_items.clone();
-    let audit_sort_col_for_sort = audit_sort_col.clone();
-    let audit_sort_asc_for_sort = audit_sort_asc.clone();
+    let audit_sort_col_for_sort = audit_sort_col;
+    let audit_sort_asc_for_sort = audit_sort_asc;
     let current_display_items_for_open = current_display_items.clone();
     let app_clone_auditor = app.clone();
     ui.on_open_folder_auditor(move || {
@@ -2574,13 +2568,13 @@ fn main() {
                     .unwrap_or_else(|| path.clone())
             });
         let ap_cache = ApArchiveCache::new();
-        let path_for_thread = path.clone();
-        let window_weak_thread = window_weak.clone();
+        let path_for_thread = path;
+        let window_weak_thread = window_weak;
         let all_store = all_audit_items_for_start.clone();
         let current_store = current_display_items_for_start.clone();
         let sort_col_store = audit_sort_col_for_start.clone();
         let sort_asc_store = audit_sort_asc_for_start.clone();
-        let results_store = all_store.clone();
+        let results_store = all_store;
         std::thread::spawn(move || {
             println!("[Auditor] Starting audit for: {:?}", path_for_thread);
             let progress_cb: std::sync::Arc<dyn Fn(usize, usize) + Send + Sync> = {
@@ -2618,13 +2612,13 @@ fn main() {
                 .upgrade()
                 .map(|w| w.get_active_filter().to_string())
                 .unwrap_or_else(|| "all".to_string());
-            let mut items: Vec<BrokenResourceRef> = report.broken_references.clone();
+            let mut items: Vec<BrokenResourceRef> = report.broken_references;
             filter_items(&mut items, &filter);
             sort_items(&mut items, col, asc);
             if let Ok(mut store) = current_store.lock() {
                 *store = items.clone();
             }
-            let ww = window_weak_thread.clone();
+            let ww = window_weak_thread;
             slint::invoke_from_event_loop(move || {
                 if let Some(w) = ww.upgrade() {
                     let mut rows: Vec<slint::ModelRc<slint::StandardListViewItem>> = Vec::new();
@@ -2675,7 +2669,7 @@ fn main() {
         }
         slint::invoke_from_event_loop(move || {
             if let Some(w) = ww.upgrade() {
-                w.set_active_filter(filter.clone().into());
+                w.set_active_filter(filter.clone());
                 let mut rows: Vec<slint::ModelRc<slint::StandardListViewItem>> = Vec::new();
                 for b in &items {
                     let kind = match b.kind {
@@ -2718,7 +2712,7 @@ fn main() {
         let _ = auditor_weak_for_open;
     });
     let auditor_weak_for_missing = auditor_win.as_weak();
-    let current_display_for_missing = current_display_items_for_open.clone();
+    let current_display_for_missing = current_display_items_for_open;
     auditor_win.on_open_missing_target_folder(move |row| {
         let items = current_display_for_missing
             .lock()
@@ -2733,10 +2727,10 @@ fn main() {
         let _ = auditor_weak_for_missing;
     });
     let auditor_weak_for_sort = auditor_win.as_weak();
-    let all_for_sort = all_audit_items_for_sort.clone();
-    let current_for_sort = current_display_items_for_sort.clone();
-    let sort_col_for_sort = audit_sort_col_for_sort.clone();
-    let sort_asc_for_sort = audit_sort_asc_for_sort.clone();
+    let all_for_sort = all_audit_items_for_sort;
+    let current_for_sort = current_display_items_for_sort;
+    let sort_col_for_sort = audit_sort_col_for_sort;
+    let sort_asc_for_sort = audit_sort_asc_for_sort;
     auditor_win.on_sort_column(move |col| {
         let col = col as usize;
         let mut c = sort_col_for_sort.lock().unwrap();
@@ -2795,7 +2789,7 @@ fn main() {
     });
     let auditor_weak_for_edit = auditor_win.as_weak();
     let current_display_for_edit = current_display_items.clone();
-    let app_clone_edit = app.clone();
+    let app_clone_edit = app;
     auditor_win.on_edit_in_vscode(move |row| {
         let items = current_display_for_edit
             .lock()
@@ -2834,7 +2828,7 @@ fn main() {
             .unwrap_or_default();
         let serz_path = crate::assets::find_serz_path(&asset_path)
             .or_else(|| {
-                let p = crate::preferred_serz_path(std::path::Path::new(&rw_path));
+                let p = crate::preferred_serz_path(Path::new(&rw_path));
                 if p.is_file() { Some(p) } else { None }
             })
             .unwrap_or_else(|| PathBuf::from("serz.exe"));
@@ -2868,16 +2862,14 @@ fn main() {
     });
 
     // Texture viewer integration
-    let current_display_for_preview = current_display_items.clone();
+    let current_display_for_preview = current_display_items;
     let viewer_win = TextureViewerWindow::new().unwrap();
     let viewer_weak = viewer_win.as_weak();
-    let tex_state: std::sync::Arc<
-        std::sync::Mutex<Option<(u32, u32, Vec<u8>, std::path::PathBuf)>>,
-    > = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let tex_state: Arc<Mutex<Option<(u32, u32, Vec<u8>, PathBuf)>>> = Arc::new(Mutex::new(None));
     let tex_state_for_preview = tex_state.clone();
     let tex_state_for_toggle = tex_state.clone();
     let tex_state_for_export = tex_state.clone();
-    let tex_state_for_replace = tex_state.clone();
+    let tex_state_for_replace = tex_state;
     auditor_win.on_preview_texture(move |row| {
         let items = current_display_for_preview
             .lock()
@@ -2910,29 +2902,29 @@ fn main() {
         let tex_state = tex_state_for_preview.clone();
         let viewer_weak = viewer_weak.clone();
         std::thread::spawn(move || {
-            if let Ok(data) = std::fs::read(&path) {
-                if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
-                    if let Ok(mut st) = tex_state.lock() {
-                        *st = Some((w, h, rgba.clone(), path.clone()));
-                    }
-                    let info = format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display());
-                    let vw = viewer_weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(v) = vw.upgrade() {
-                            let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
-                            v.set_texture_image(img);
-                            v.set_texture_orig_width(w as i32);
-                            v.set_texture_orig_height(h as i32);
-                            v.set_zoom_factor(if w > 640 || h > 480 {
-                                (640.0 / w as f32).min(480.0 / h as f32)
-                            } else {
-                                1.0
-                            });
-                            v.set_info_text(info.into());
-                            let _ = v.show();
-                        }
-                    });
+            if let Ok(data) = std::fs::read(&path)
+                && let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data)
+            {
+                if let Ok(mut st) = tex_state.lock() {
+                    *st = Some((w, h, rgba.clone(), path.clone()));
                 }
+                let info = format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display());
+                let vw = viewer_weak;
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(v) = vw.upgrade() {
+                        let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
+                        v.set_texture_image(img);
+                        v.set_texture_orig_width(w as i32);
+                        v.set_texture_orig_height(h as i32);
+                        v.set_zoom_factor(if w > 640 || h > 480 {
+                            (640.0 / w as f32).min(480.0 / h as f32)
+                        } else {
+                            1.0
+                        });
+                        v.set_info_text(info.into());
+                        let _ = v.show();
+                    }
+                });
             }
         });
     });
@@ -2948,7 +2940,7 @@ fn main() {
                 .upgrade()
                 .map(|v| v.get_show_alpha())
                 .unwrap_or(true);
-            let mut data = rgba.clone();
+            let mut data = rgba;
             if !show {
                 for i in (3..data.len()).step_by(4) {
                     data[i] = 255;
@@ -2990,28 +2982,28 @@ fn main() {
                 .pick_file();
             if let Some(input) = input {
                 let _ = crate::texture::convert_dds_to_tgpcdx(&input, &path);
-                if let Ok(data) = std::fs::read(&path) {
-                    if let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data) {
-                        if let Ok(mut s) = tex_state_for_replace.lock() {
-                            *s = Some((w, h, rgba.clone(), path.clone()));
-                        }
-                        let info = format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display());
-                        let vw = viewer_weak_replace.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(v) = vw.upgrade() {
-                                let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
-                                v.set_texture_image(img);
-                                v.set_texture_orig_width(w as i32);
-                                v.set_texture_orig_height(h as i32);
-                                v.set_zoom_factor(if w > 640 || h > 480 {
-                                    (640.0 / w as f32).min(480.0 / h as f32)
-                                } else {
-                                    1.0
-                                });
-                                v.set_info_text(info.into());
-                            }
-                        });
+                if let Ok(data) = std::fs::read(&path)
+                    && let Ok((w, h, rgba)) = crate::texture::decode_tgpcdx_to_rgba(&data)
+                {
+                    if let Ok(mut s) = tex_state_for_replace.lock() {
+                        *s = Some((w, h, rgba.clone(), path.clone()));
                     }
+                    let info = format!("{} x {} px  {}  {}", w, h, "TGPCDX", path.display());
+                    let vw = viewer_weak_replace.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(v) = vw.upgrade() {
+                            let img = crate::texture::rgba_to_slint_image(w, h, &rgba);
+                            v.set_texture_image(img);
+                            v.set_texture_orig_width(w as i32);
+                            v.set_texture_orig_height(h as i32);
+                            v.set_zoom_factor(if w > 640 || h > 480 {
+                                (640.0 / w as f32).min(480.0 / h as f32)
+                            } else {
+                                1.0
+                            });
+                            v.set_info_text(info.into());
+                        }
+                    });
                 }
             }
         }

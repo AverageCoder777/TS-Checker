@@ -208,7 +208,9 @@ pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResou
     // Tag-based classification: any tag ending in "AnimName" resolves to .ban.
     {
         static TAG_RE: OnceLock<Regex> = OnceLock::new();
-        let re = TAG_RE.get_or_init(|| Regex::new(r"(?is)<([A-Za-z0-9_]+)[^>]*>(.*?)</([A-Za-z0-9_]+)>").unwrap());
+        let re = TAG_RE.get_or_init(|| {
+            Regex::new(r"(?is)<([A-Za-z0-9_]+)[^>]*>(.*?)</([A-Za-z0-9_]+)>").unwrap()
+        });
         for cap in re.captures_iter(xml) {
             let tag = cap.get(1).map(|m| m.as_str()).unwrap_or("");
             let close = cap.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -218,29 +220,33 @@ pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResou
             if is_blacklisted_sound_tag(tag) {
                 continue;
             }
-             if !tag.to_lowercase().ends_with("animname")
-                 && !tag.to_lowercase().ends_with("animationname") {
-                 continue;
-             }
-             let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-             if inner.contains('<') {
-                 continue;
-             }
-             let raw = unescape_xml_entities(strip_tags(inner).trim());
-             let clean = raw.lines().next().unwrap_or("").trim().to_string();
+            if !tag.to_lowercase().ends_with("animname")
+                && !tag.to_lowercase().ends_with("animationname")
+            {
+                continue;
+            }
+            let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            if inner.contains('<') {
+                continue;
+            }
+            let raw = unescape_xml_entities(strip_tags(inner).trim());
+            let clean = raw.lines().next().unwrap_or("").trim().to_string();
             if !clean.is_empty() && !is_numeric_token(&clean) {
                 out.push((AssetResourceKind::Animation, clean));
             }
         }
     }
 
-    for sc in regex_tag("ScriptComponent").captures_iter(xml).filter_map(|c| c.get(1)) {
+    for sc in regex_tag("ScriptComponent")
+        .captures_iter(xml)
+        .filter_map(|c| c.get(1))
+    {
         let inner = sc.as_str();
-            let raw = regex_tag("Path")
-                .captures(inner)
-                .and_then(|c| c.get(1))
-                .map(|m| unescape_xml_entities(m.as_str().trim()))
-                .unwrap_or_else(|| unescape_xml_entities(strip_tags(inner).trim()));
+        let raw = regex_tag("Path")
+            .captures(inner)
+            .and_then(|c| c.get(1))
+            .map(|m| unescape_xml_entities(m.as_str().trim()))
+            .unwrap_or_else(|| unescape_xml_entities(strip_tags(inner).trim()));
         if !raw.is_empty() && !is_numeric_token(&raw) {
             out.push((AssetResourceKind::Script, raw));
         }
@@ -249,7 +255,9 @@ pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResou
     // Sound references: only from sound-related tags, never from path substrings.
     {
         static TAG_RE: OnceLock<Regex> = OnceLock::new();
-        let re = TAG_RE.get_or_init(|| Regex::new(r"(?is)<([A-Za-z0-9_]+)[^>]*>(.*?)</([A-Za-z0-9_]+)>").unwrap());
+        let re = TAG_RE.get_or_init(|| {
+            Regex::new(r"(?is)<([A-Za-z0-9_]+)[^>]*>(.*?)</([A-Za-z0-9_]+)>").unwrap()
+        });
         for cap in re.captures_iter(xml) {
             let tag = cap.get(1).map(|m| m.as_str()).unwrap_or("");
             let close = cap.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -266,12 +274,12 @@ pub fn extract_bin_references(xml: &str, product_root: &Path) -> Vec<(AssetResou
             if !is_sound_tag {
                 continue;
             }
-             let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-             if inner.contains('<') {
-                 continue;
-             }
-             let raw = unescape_xml_entities(strip_tags(inner).trim());
-             let clean = raw.lines().next().unwrap_or("").trim().to_string();
+            let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            if inner.contains('<') {
+                continue;
+            }
+            let raw = unescape_xml_entities(strip_tags(inner).trim());
+            let clean = raw.lines().next().unwrap_or("").trim().to_string();
             if !clean.is_empty() && !is_numeric_token(&clean) {
                 out.push((AssetResourceKind::Sound, clean));
             }
@@ -389,7 +397,10 @@ fn material_has_valid_texture(inner: &str) -> bool {
             }
         }
         let raw = unescape_xml_entities(block_inner.trim());
-        if !raw.contains('<') && is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
+        if !raw.contains('<')
+            && is_valid_texture_path(raw.as_str())
+            && has_valid_texture_stem(raw.as_str())
+        {
             return true;
         }
     }
@@ -417,8 +428,8 @@ fn filter_material_blocks(xml: &str) -> String {
                     return String::new();
                 }
                 let visible = tag_text(inner, "Visible").unwrap_or_default();
-                let visible_false = visible.eq_ignore_ascii_case("0")
-                    || visible.eq_ignore_ascii_case("false");
+                let visible_false =
+                    visible.eq_ignore_ascii_case("0") || visible.eq_ignore_ascii_case("false");
                 if visible_false && !material_has_valid_texture(inner) {
                     return String::new();
                 }
@@ -442,7 +453,10 @@ pub fn extract_geo_texture_references(xml: &str) -> Vec<String> {
             }
         }
         let raw = unescape_xml_entities(inner.trim());
-        if !raw.contains('<') && is_valid_texture_path(raw.as_str()) && has_valid_texture_stem(raw.as_str()) {
+        if !raw.contains('<')
+            && is_valid_texture_path(raw.as_str())
+            && has_valid_texture_stem(raw.as_str())
+        {
             out.push(normalize_texture_reference(raw.as_str()));
         }
     }
@@ -545,12 +559,9 @@ fn candidate_relatives(raw: &str, kind: AssetResourceKind) -> Vec<String> {
                         None => cleaned.clone(),
                     }
                 } else {
-                    cleaned.clone()
+                    cleaned
                 };
-            vec![
-                format!("{}.out", stripped),
-                format!("{}.lua", stripped),
-            ]
+            vec![format!("{}.out", stripped), format!("{}.lua", stripped)]
         }
         AssetResourceKind::Texture => {
             let with_ext = ensure_extension(&cleaned, kind);
@@ -573,7 +584,7 @@ fn candidate_relatives(raw: &str, kind: AssetResourceKind) -> Vec<String> {
             vec![
                 format!("{}.ban", stripped),
                 format!("{}.ia", stripped),
-                cleaned.clone(),
+                cleaned,
             ]
         }
         AssetResourceKind::ChildBlueprint => {
@@ -689,9 +700,8 @@ fn candidate_paths(
                 .split(['\\', '/'])
                 .find(|s| !s.is_empty())
                 .unwrap_or("");
-            let assets_first = !first.is_empty()
-                && !first.starts_with('.')
-                && assets_root.join(first).is_dir();
+            let assets_first =
+                !first.is_empty() && !first.starts_with('.') && assets_root.join(first).is_dir();
             if assets_first {
                 cands.push(normalize_path(&assets_root.join(&rel_norm)));
                 cands.push(normalize_path(&parent.join(&rel_norm)));
@@ -719,8 +729,19 @@ fn candidate_paths(
             let assets_candidate_exists = assets_root.join(&rel_norm).exists();
             let local_subfolder = matches!(
                 first_component.to_lowercase().as_str(),
-                "cab" | "cabs" | "textures" | "texture" | "audio" | "sound" | "sounds"
-                    | "scripts" | "script" | "anim" | "anims" | "animation" | "animations"
+                "cab"
+                    | "cabs"
+                    | "textures"
+                    | "texture"
+                    | "audio"
+                    | "sound"
+                    | "sounds"
+                    | "scripts"
+                    | "script"
+                    | "anim"
+                    | "anims"
+                    | "animation"
+                    | "animations"
             );
 
             if is_relative {
@@ -782,7 +803,10 @@ fn ap_member_matches(product_dir: &Path, relative: &str, ap_cache: &ApArchiveCac
     let target = target.trim_start_matches('\\').to_string();
     if let Ok(guard) = ap_cache.inner.lock() {
         for (key, set) in guard.iter() {
-            if !key.to_string_lossy().eq_ignore_ascii_case(&product_dir.to_string_lossy()) {
+            if !key
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&product_dir.to_string_lossy())
+            {
                 continue;
             }
             for member in set {
@@ -816,7 +840,11 @@ fn ap_exists(
             .split(['\\', '/'])
             .find(|s| !s.is_empty())
             .unwrap_or("");
-        if !is_global && !first.is_empty() && !first.starts_with('.') && assets_root.join(first).is_dir() {
+        if !is_global
+            && !first.is_empty()
+            && !first.starts_with('.')
+            && assets_root.join(first).is_dir()
+        {
             is_global = true;
         }
     } else {
@@ -824,7 +852,11 @@ fn ap_exists(
             .split(['\\', '/'])
             .find(|s| !s.is_empty())
             .unwrap_or("");
-        if !is_global && !first.is_empty() && !first.starts_with('.') && assets_root.join(first).is_dir() {
+        if !is_global
+            && !first.is_empty()
+            && !first.starts_with('.')
+            && assets_root.join(first).is_dir()
+        {
             is_global = true;
         }
     }
@@ -837,7 +869,9 @@ fn ap_exists(
             if parts.len() >= 3 {
                 let product_dir = assets_root.join(parts[0]).join(parts[1]);
                 let inner = parts[2..].join("/");
-                if ap_cache.lookup(&product_dir, &inner) || ap_member_matches(&product_dir, &inner, ap_cache) {
+                if ap_cache.lookup(&product_dir, &inner)
+                    || ap_member_matches(&product_dir, &inner, ap_cache)
+                {
                     return true;
                 }
             }
@@ -845,12 +879,16 @@ fn ap_exists(
             let target_loose = normalize_path(&parent.join(&cleaned));
             if let Ok(rel_from_prod) = target_loose.strip_prefix(product_root) {
                 let inner = rel_from_prod.to_string_lossy().replace('\\', "/");
-                if ap_cache.lookup(product_root, &inner) || ap_member_matches(product_root, &inner, ap_cache) {
+                if ap_cache.lookup(product_root, &inner)
+                    || ap_member_matches(product_root, &inner, ap_cache)
+                {
                     return true;
                 }
             }
             let inner_direct = cleaned.trim_start_matches(".\\").replace('\\', "/");
-            if ap_cache.lookup(product_root, &inner_direct) || ap_member_matches(product_root, &inner_direct, ap_cache) {
+            if ap_cache.lookup(product_root, &inner_direct)
+                || ap_member_matches(product_root, &inner_direct, ap_cache)
+            {
                 return true;
             }
         }
@@ -993,10 +1031,11 @@ pub fn audit_folder_with_progress(
             .map(|f| {
                 let r = audit_one_file(f, folder_path, assets_root, serz_path, ap_cache);
                 let done = processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if let Some(cb) = &progress_cb {
-                    if total_files > 0 && (done == total_files || done % 10 == 0) {
-                        cb(done, total_files);
-                    }
+                if let Some(cb) = &progress_cb
+                    && total_files > 0
+                    && (done == total_files || done.is_multiple_of(10))
+                {
+                    cb(done, total_files);
                 }
                 r
             })
@@ -1078,20 +1117,23 @@ mod tests {
             </iBlueprintLibrary-cAbsoluteBlueprintID>
         "#;
         let refs = extract_bin_references(xml, Path::new("Assets/Kuju/RailSimulator"));
-        assert!(refs
-            .iter()
-            .any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh")));
-        assert!(refs
-            .iter()
-            .any(|(k, r)| *k == AssetResourceKind::Animation && r.contains("mg_bremse")));
+        assert!(
+            refs.iter()
+                .any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh"))
+        );
+        assert!(
+            refs.iter()
+                .any(|(k, r)| *k == AssetResourceKind::Animation && r.contains("mg_bremse"))
+        );
         // Убеждаемся, что псевдо-путь AnimationID "do01_l" НЕ попал в ссылки:
         assert!(!refs.iter().any(|(_, r)| r == "do01_l"));
         assert!(refs.iter().any(|(k, _)| *k == AssetResourceKind::Script));
-        assert!(refs
-            .iter()
-            .any(|(k, r)| *k == AssetResourceKind::ChildBlueprint
-                && r.contains("Kuju")
-                && r.contains("bar.bin")));
+        assert!(
+            refs.iter()
+                .any(|(k, r)| *k == AssetResourceKind::ChildBlueprint
+                    && r.contains("Kuju")
+                    && r.contains("bar.bin"))
+        );
     }
 
     #[test]
@@ -1139,14 +1181,21 @@ mod tests {
             .join("GYSEV_470_501");
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::create_dir_all(&provider).unwrap();
-        let raw = r"RWAustria_2\Austria_RailVehicles\Electric\GYSEV_470\GYSEV_470_501\[00]1116_Bleich";
-        let cands = candidate_paths(raw, &source_dir, &assets.join("RWAustria_2").join("Austria_RailVehicles"), &assets, AssetResourceKind::Geometry);
+        let raw =
+            r"RWAustria_2\Austria_RailVehicles\Electric\GYSEV_470\GYSEV_470_501\[00]1116_Bleich";
+        let cands = candidate_paths(
+            raw,
+            &source_dir,
+            &assets.join("RWAustria_2").join("Austria_RailVehicles"),
+            &assets,
+            AssetResourceKind::Geometry,
+        );
         let expected = assets.join(r"RWAustria_2\Austria_RailVehicles\Electric\GYSEV_470\GYSEV_470_501\1116_Bleich.GeoPcDx");
         assert_eq!(cands.first().unwrap(), &normalize_path(&expected));
         // ensure no duplicated source_dir prefix
         for c in &cands {
             assert!(!c.to_string_lossy().contains("GYSEV_470_501\\RWAustria_2"));
-         }
+        }
     }
 
     #[test]
@@ -1170,9 +1219,10 @@ mod tests {
     fn detects_collision_geometry() {
         let xml = r#"<CollisionGeometryID>x\[00]mesh</CollisionGeometryID>"#;
         let refs = extract_bin_references(xml, Path::new("Assets/Kuju/RailSimulator"));
-        assert!(refs
-            .iter()
-            .any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh")));
+        assert!(
+            refs.iter()
+                .any(|(k, r)| *k == AssetResourceKind::Geometry && r.contains("mesh"))
+        );
     }
 
     #[test]
@@ -1181,23 +1231,32 @@ mod tests {
         let assets = temp.join("Assets");
         let dir = assets.join("Kuju").join("RailSimulator");
         std::fs::create_dir_all(&dir).unwrap();
-        let cands = candidate_paths(r"scripts\foo", &dir, &dir, &assets, AssetResourceKind::Script);
+        let cands = candidate_paths(
+            r"scripts\foo",
+            &dir,
+            &dir,
+            &assets,
+            AssetResourceKind::Script,
+        );
         assert_eq!(
             cands.first().unwrap(),
             &normalize_path(&dir.join(r"scripts\foo.out"))
         );
-        assert!(cands.iter().any(|p| p == &normalize_path(&dir.join(r"scripts\foo.lua"))));
+        assert!(
+            cands
+                .iter()
+                .any(|p| p == &normalize_path(&dir.join(r"scripts\foo.lua")))
+        );
     }
 
     #[test]
     fn ap_cache_lookup_is_case_insensitive() {
         let cache = ApArchiveCache::new();
         let product_dir = std::path::PathBuf::from("Assets/Kuju/RailSimulator");
-        cache
-            .inner
-            .lock()
-            .unwrap()
-            .insert(product_dir.clone(), ["Textures\\Foo.TgPcDx".to_string()].into());
+        cache.inner.lock().unwrap().insert(
+            product_dir.clone(),
+            ["Textures\\Foo.TgPcDx".to_string()].into(),
+        );
         assert!(cache.lookup(&product_dir, "textures\\foo.tgpcdx"));
     }
 
