@@ -53,7 +53,8 @@ pub(crate) struct CheckerApp {
     pub(crate) ignored_route_ids: HashSet<String>,
     route_scan: Option<Receiver<Result<RouteScanOutcome, String>>>,
     check: Option<Receiver<CheckMessage>>,
-    pub(crate) asset_replacement: Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
+    pub(crate) asset_replacement:
+        Option<Receiver<(String, Result<AssetReplacementReport, String>)>>,
     pub(crate) asset_replacement_queue: Vec<(MissingAsset, PathBuf, String)>,
     asset_replacement_feedback: Option<Result<String, String>>,
     pub(crate) route_thumbnails_enabled: bool,
@@ -97,10 +98,11 @@ impl Default for CheckerApp {
             Ok(value) => (value, None),
             Err(error) => (false, Some(error)),
         };
-        let (hide_quick_drive_free_roam, hide_scenarios_warning) = match load_hide_quick_drive_free_roam() {
-            Ok(value) => (value, None),
-            Err(error) => (false, Some(error)),
-        };
+        let (hide_quick_drive_free_roam, hide_scenarios_warning) =
+            match load_hide_quick_drive_free_roam() {
+                Ok(value) => (value, None),
+                Err(error) => (false, Some(error)),
+            };
         let language = load_language();
         let (inventory_action_tx, inventory_action_rx) = mpsc::channel();
         if let Some(warning) = settings_warning {
@@ -129,9 +131,9 @@ impl Default for CheckerApp {
             scenarios: Vec::new(),
             scenarios_route: None,
             selected_scenario: None,
-        selected_consist: None,
-        selected_vehicle: None,
-        scenario_window_open: false,
+            selected_consist: None,
+            selected_vehicle: None,
+            scenario_window_open: false,
             scenario_consist_info: None,
             scenario_vehicle_files: None,
             search_query: String::new(),
@@ -310,8 +312,16 @@ impl CheckerApp {
         if self.asset_replacement.is_some() {
             return;
         }
-        if let Some((missing, replacement, replacement_relative)) = self.asset_replacement_queue.pop() {
-            self.start_asset_replacement(missing, replacement, false, replacement_relative, std::collections::BTreeMap::new());
+        if let Some((missing, replacement, replacement_relative)) =
+            self.asset_replacement_queue.pop()
+        {
+            self.start_asset_replacement(
+                missing,
+                replacement,
+                false,
+                replacement_relative,
+                std::collections::BTreeMap::new(),
+            );
         }
     }
 
@@ -332,9 +342,13 @@ impl CheckerApp {
         self.result = None;
         self.status = "Сканирование маршрутов...".to_owned();
         let ignored_route_ids = self.ignored_route_ids.clone();
-        let max_threads = crate::settings::route_scan_max_threads(self.serz_process_limit, self.route_scan_on_hdd);
+        let max_threads = crate::settings::route_scan_max_threads(
+            self.serz_process_limit,
+            self.route_scan_on_hdd,
+        );
         thread::spawn(move || {
-            let result = scan_routes_with_cache(&root, &ignored_route_ids, allow_cache, max_threads);
+            let result =
+                scan_routes_with_cache(&root, &ignored_route_ids, allow_cache, max_threads);
             let _ = tx.send(result);
         });
     }
@@ -413,7 +427,7 @@ impl CheckerApp {
         let due = force
             || self
                 .last_progress_log
-                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(200));
+                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(200));
         if !due {
             return;
         }
@@ -435,11 +449,8 @@ impl CheckerApp {
     }
 
     pub(crate) fn receive_background_results(&mut self) {
-        loop {
-            match self.inventory_action_rx.try_recv() {
-                Ok(InventoryAction::ScanUmlauts) => self.start_inventory_scan(),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while let Ok(InventoryAction::ScanUmlauts) = self.inventory_action_rx.try_recv() {
+            self.start_inventory_scan();
         }
 
         self.flush_progress_log(false);
@@ -576,12 +587,12 @@ impl CheckerApp {
                 }
             }
         }
-            let was_last_inventory_replacement = self.asset_replacement_queue.is_empty();
-            self.start_next_asset_replacement();
-            if was_last_inventory_replacement && self.inventory_replacement_pending_check {
-                self.inventory_replacement_pending_check = false;
-                self.start_check();
-            }
+        let was_last_inventory_replacement = self.asset_replacement_queue.is_empty();
+        self.start_next_asset_replacement();
+        if was_last_inventory_replacement && self.inventory_replacement_pending_check {
+            self.inventory_replacement_pending_check = false;
+            self.start_check();
+        }
 
         let route_result = self.route_scan.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
@@ -629,8 +640,7 @@ impl CheckerApp {
         if let Some(message) = check_message {
             match message {
                 Ok(CheckMessage::Progress(status)) => {
-                    if status.starts_with("Анализ файла:")
-                        || status.starts_with("Анализ файлов:")
+                    if status.starts_with("Анализ файла:") || status.starts_with("Анализ файлов:")
                     {
                         self.progress_pending = Some(status);
                     } else {
@@ -684,10 +694,10 @@ impl CheckerApp {
                             }
                             let inventory = result.asset_inventory.clone();
                             self.result = Some(result);
-                            if let Ok(mut state) = self.asset_inventory_state.lock() {
-                                if state.open {
-                                    state.assets = inventory;
-                                }
+                            if let Ok(mut state) = self.asset_inventory_state.lock()
+                                && state.open
+                            {
+                                state.assets = inventory;
                             }
                             self.inventory_refresh_pending = true;
                         }

@@ -4,9 +4,9 @@ use crate::assets::read_serz_xml;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,10 @@ pub fn open_and_sync_with_vscode(
     serz_path: &Path,
     status_callback: impl Fn(Result<String, String>) + Send + Sync + 'static,
 ) -> Result<(), String> {
-    let sync_dir = if let Some(railworks_root) = binary_asset_path.ancestors().find(|p| p.join("Assets").is_dir()) {
+    let sync_dir = if let Some(railworks_root) = binary_asset_path
+        .ancestors()
+        .find(|p| p.join("Assets").is_dir())
+    {
         railworks_root.join(".tsc_sync")
     } else {
         std::env::temp_dir().join("tsc_sync")
@@ -48,7 +51,7 @@ pub fn open_and_sync_with_vscode(
 
     let binary_path = binary_asset_path.to_path_buf();
     let serz = serz_path.to_path_buf();
-    let xml_path = temp_xml_path.clone();
+    let xml_path = temp_xml_path;
     let cb = std::sync::Arc::new(status_callback);
     let was_modified = Arc::new(AtomicBool::new(false));
     thread::spawn(move || {
@@ -80,13 +83,13 @@ pub fn find_vscode_path() -> Option<PathBuf> {
             }
         }
     }
-    if let Ok(output) = Command::new("cmd").args(["/C", "where", "code"]).output() {
-        if output.status.success() {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let p = PathBuf::from(line.trim());
-                if p.is_file() {
-                    return Some(p);
-                }
+    if let Ok(output) = Command::new("cmd").args(["/C", "where", "code"]).output()
+        && output.status.success()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let p = PathBuf::from(line.trim());
+            if p.is_file() {
+                return Some(p);
             }
         }
     }
@@ -115,14 +118,18 @@ pub fn launch_editor(xml_path: &Path, wait: bool) -> Result<std::process::Child,
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(0x08000000);
             }
-            return cmd.spawn().map_err(|e| format!("Не удалось запустить VS Code: {e}"));
+            return cmd
+                .spawn()
+                .map_err(|e| format!("Не удалось запустить VS Code: {e}"));
         } else {
             let mut c = Command::new(code);
             if wait {
                 c.arg("--wait");
             }
             c.arg("-r").arg("-g").arg(xml_path);
-            return c.spawn().map_err(|e| format!("Не удалось запустить VS Code: {e}"));
+            return c
+                .spawn()
+                .map_err(|e| format!("Не удалось запустить VS Code: {e}"));
         }
     }
     // Fallback: Notepad (never browser)
@@ -134,9 +141,13 @@ pub fn launch_editor(xml_path: &Path, wait: bool) -> Result<std::process::Child,
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x08000000);
         }
-        c.spawn().map_err(|e| format!("Не удалось запустить Блокнот: {e}"))
+        c.spawn()
+            .map_err(|e| format!("Не удалось запустить Блокнот: {e}"))
     } else {
-        Command::new("notepad").arg(xml_path).spawn().map_err(|e| format!("Не удалось запустить редактор: {e}"))
+        Command::new("notepad")
+            .arg(xml_path)
+            .spawn()
+            .map_err(|e| format!("Не удалось запустить редактор: {e}"))
     }
 }
 
@@ -159,8 +170,12 @@ pub fn create_backup_file(target_bin: &Path) -> Result<Option<PathBuf>, String> 
             i += 1;
         }
     }
-    fs::copy(target_bin, &backup_path)
-        .map_err(|e| format!("Не удалось создать резервную копию {}: {e}", backup_path.display()))?;
+    fs::copy(target_bin, &backup_path).map_err(|e| {
+        format!(
+            "Не удалось создать резервную копию {}: {e}",
+            backup_path.display()
+        )
+    })?;
     println!("[Backup] Создана резервная копия: {:?}", backup_path);
     Ok(Some(backup_path))
 }
@@ -193,31 +208,36 @@ pub fn run_headless(target: &Path) -> Result<(), String> {
             return Err(err);
         }
     };
-    let sync_dir = if let Some(railworks_root) = target.ancestors().find(|p| p.join("Assets").is_dir()) {
-        railworks_root.join(".tsc_sync")
-    } else {
-        std::env::temp_dir().join("tsc_sync")
-    };
+    let sync_dir =
+        if let Some(railworks_root) = target.ancestors().find(|p| p.join("Assets").is_dir()) {
+            railworks_root.join(".tsc_sync")
+        } else {
+            std::env::temp_dir().join("tsc_sync")
+        };
     fs::create_dir_all(&sync_dir).map_err(|e| {
         let err = format!("Не удалось создать {}: {e}", sync_dir.display());
         show_native_error("Ошибка", &err);
         err
     })?;
 
-    let file_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("asset");
+    let file_stem = target
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("asset");
     let original_ext = target.extension().and_then(|s| s.to_str()).unwrap_or("bin");
     let temp_xml_path = sync_dir.join(format!("{}.{}.xml", file_stem, original_ext));
 
-    let xml = read_serz_xml(&serz_path, target).or_else(|err| {
-        if let Some(fallback) = crate::assets::fallback_serz_path(&serz_path) {
-            read_serz_xml(&fallback, target).map_err(|e| format!("{err}; {e}"))
-        } else {
-            Err(err)
-        }
-    }).map_err(|e| {
-        show_native_error("Ошибка", &e);
-        e
-    })?;
+    let xml = read_serz_xml(&serz_path, target)
+        .or_else(|err| {
+            if let Some(fallback) = crate::assets::fallback_serz_path(&serz_path) {
+                read_serz_xml(&fallback, target).map_err(|e| format!("{err}; {e}"))
+            } else {
+                Err(err)
+            }
+        })
+        .inspect_err(|e| {
+            show_native_error("Ошибка", e);
+        })?;
     let initial_xml = xml.clone();
     fs::write(&temp_xml_path, &xml).map_err(|e| {
         let err = format!("Не удалось записать {}: {e}", temp_xml_path.display());
@@ -244,10 +264,8 @@ pub fn run_headless(target: &Path) -> Result<(), String> {
         );
     });
 
-    let mut child = launch_editor(&temp_xml_path, true).map_err(|e| {
-        show_native_error("Ошибка", &e);
-        e
-    })?;
+    let mut child =
+        launch_editor(&temp_xml_path, true).inspect_err(|e| show_native_error("Ошибка", e))?;
     child.wait().map_err(|e| {
         let err = format!("Ошибка ожидания редактора: {e}");
         show_native_error("Ошибка", &err);
@@ -263,13 +281,15 @@ pub fn run_headless(target: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let conv = crate::assets::convert_xml_to_bin(&serz_path, &temp_xml_path, target).or_else(|err| {
-        if let Some(fallback) = crate::assets::fallback_serz_path(&serz_path) {
-            crate::assets::convert_xml_to_bin(&fallback, &temp_xml_path, target).map_err(|e| format!("{err}; {e}"))
-        } else {
-            Err(err)
-        }
-    });
+    let conv =
+        crate::assets::convert_xml_to_bin(&serz_path, &temp_xml_path, target).or_else(|err| {
+            if let Some(fallback) = crate::assets::fallback_serz_path(&serz_path) {
+                crate::assets::convert_xml_to_bin(&fallback, &temp_xml_path, target)
+                    .map_err(|e| format!("{err}; {e}"))
+            } else {
+                Err(err)
+            }
+        });
     if let Err(e) = conv {
         show_native_error("Ошибка конвертации Serz", &e);
         return Err(e);
@@ -321,10 +341,10 @@ fn run_watcher(
                 if !is_target {
                     continue;
                 }
-                let is_relevant_event = match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any => true,
-                    _ => false,
-                };
+                let is_relevant_event = matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any
+                );
                 if !is_relevant_event {
                     continue;
                 }
@@ -332,18 +352,15 @@ fn run_watcher(
                 // 400ms debounce
                 let deadline = Instant::now() + Duration::from_millis(400);
                 while Instant::now() < deadline {
-                    match rx.recv_timeout(Duration::from_millis(50)) {
-                        Ok(Ok(e)) => {
-                            let rel = e.paths.iter().any(|p| {
-                                p.file_name()
-                                    .map(|n| n.to_string_lossy().to_lowercase() == watched_str)
-                                    .unwrap_or(false)
-                            });
-                            if rel {
-                                // keep draining
-                            }
+                    if let Ok(Ok(e)) = rx.recv_timeout(Duration::from_millis(50)) {
+                        let rel = e.paths.iter().any(|p| {
+                            p.file_name()
+                                .map(|n| n.to_string_lossy().to_lowercase() == watched_str)
+                                .unwrap_or(false)
+                        });
+                        if rel {
+                            // keep draining
                         }
-                        _ => {}
                     }
                 }
 
@@ -366,7 +383,9 @@ fn run_watcher(
                         thread::sleep(Duration::from_millis(80));
                     }
                 }
-                let Some(xml) = xml_data else { continue; };
+                let Some(xml) = xml_data else {
+                    continue;
+                };
                 let _ = xml;
 
                 was_modified.store(true, Ordering::SeqCst);
@@ -383,17 +402,21 @@ fn run_watcher(
                     binary_path.display()
                 );
                 let serz = serz_path.to_path_buf();
-                let conversion = crate::assets::convert_xml_to_bin(&serz, xml_path, binary_path).or_else(|err| {
-                    if let Some(fallback) = crate::assets::fallback_serz_path(&serz) {
-                        crate::assets::convert_xml_to_bin(&fallback, xml_path, binary_path)
-                            .map_err(|e| format!("{err}; {e}"))
-                    } else {
-                        Err(err)
-                    }
-                });
+                let conversion = crate::assets::convert_xml_to_bin(&serz, xml_path, binary_path)
+                    .or_else(|err| {
+                        if let Some(fallback) = crate::assets::fallback_serz_path(&serz) {
+                            crate::assets::convert_xml_to_bin(&fallback, xml_path, binary_path)
+                                .map_err(|e| format!("{err}; {e}"))
+                        } else {
+                            Err(err)
+                        }
+                    });
                 match conversion {
                     Ok(()) => {
-                        println!("[Sync] ✓ Успешно скомпилировано в {}", binary_path.display());
+                        println!(
+                            "[Sync] ✓ Успешно скомпилировано в {}",
+                            binary_path.display()
+                        );
                         cb(Ok("✓ Изменения скомпилированы в BIN".to_string()));
                     }
                     Err(e) => {

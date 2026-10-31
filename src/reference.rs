@@ -125,10 +125,10 @@ pub(crate) fn find_tagged_value(
         if position >= limit {
             return None;
         }
-        if let Some((range, end)) = parse_tagged_value(haystack, tag, position) {
-            if end <= limit {
-                return Some((range, end));
-            }
+        if let Some((range, end)) = parse_tagged_value(haystack, tag, position)
+            && end <= limit
+        {
+            return Some((range, end));
         }
         cursor = position + 1;
     }
@@ -330,7 +330,6 @@ pub(crate) fn extract_asset_references(xml: &str) -> std::collections::HashSet<S
 }
 /// Прежняя реализация разбора на регулярных выражениях.
 /// /// Оставлена для сверки: ручной разбор обязан давать ровно тот же результат.
-
 pub(crate) fn route_tile_label(route_path: &Path, source_file: &RouteFile) -> String {
     let relative = source_file
         .route_name(route_path)

@@ -66,7 +66,10 @@ pub fn classify_route_asset_type(asset: &str, uses: &[AssetUse]) -> RouteAssetTy
             loft = true;
         } else if source.contains("routeproperties.xml") {
             let asset_lower = asset.to_lowercase();
-            if asset_lower.contains("sky") || asset_lower.contains("weather") || source.contains("weather") {
+            if asset_lower.contains("sky")
+                || asset_lower.contains("weather")
+                || source.contains("weather")
+            {
                 weather = true;
             } else {
                 scenery = true;
@@ -80,7 +83,10 @@ pub fn classify_route_asset_type(asset: &str, uses: &[AssetUse]) -> RouteAssetTy
     }
 
     let asset_lower = asset.to_lowercase();
-    if asset_lower.ends_with(".wav") || asset_lower.ends_with(".ogg") || asset_lower.ends_with(".mp3") {
+    if asset_lower.ends_with(".wav")
+        || asset_lower.ends_with(".ogg")
+        || asset_lower.ends_with(".mp3")
+    {
         audio = true;
     }
 
@@ -215,23 +221,21 @@ pub(crate) fn collect_route_files(
                     let Some(first) = components.next() else {
                         return false;
                     };
-                     let in_route_root = components.next().is_none();
-                     let in_allowed_directory =
-                         first.as_os_str().to_str().is_some_and(|directory| {
-                             is_allowed_route_directory(directory, ignore_scenarios)
-                         });
-                     let in_non_asset_directory = first
-                         .as_os_str()
-                         .to_str()
-                         .is_some_and(|directory| {
-                             matches!(
-                                 directory.to_ascii_lowercase().as_str(),
-                                 "terrain" | "mixmap" | "routeinfo" | "routeinformation"
-                             )
-                         });
-                     (in_route_root || in_allowed_directory)
-                         && !in_non_asset_directory
-                         && entry.path().extension().is_some_and(|extension| {
+                    let in_route_root = components.next().is_none();
+                    let in_allowed_directory =
+                        first.as_os_str().to_str().is_some_and(|directory| {
+                            is_allowed_route_directory(directory, ignore_scenarios)
+                        });
+                    let in_non_asset_directory =
+                        first.as_os_str().to_str().is_some_and(|directory| {
+                            matches!(
+                                directory.to_ascii_lowercase().as_str(),
+                                "terrain" | "mixmap" | "routeinfo" | "routeinformation"
+                            )
+                        });
+                    (in_route_root || in_allowed_directory)
+                        && !in_non_asset_directory
+                        && entry.path().extension().is_some_and(|extension| {
                             extension.eq_ignore_ascii_case("bin")
                                 || extension.eq_ignore_ascii_case("xml")
                         })
@@ -258,42 +262,42 @@ pub(crate) fn collect_archive_members(route_path: &Path) -> Result<Vec<RouteFile
         {
             continue;
         }
-    let file = fs::File::open(&path)
-        .map_err(|error| format!("Не удалось открыть архив {}: {error}", path.display()))?;
-    let zip = zip::ZipArchive::new(file)
-        .map_err(|error| format!("Не удалось прочитать архив {}: {error}", path.display()))?;
-    let archive_stamp = crate::analysis_cache::FileStamp::of(&path);
-    // Индекс имён записей архива строится один раз в памяти: поиск и
-    // дедупликация имён идут через HashSet, а не через линейный обход zip.
-    let mut seen_names: HashSet<String> = HashSet::new();
-    for name_result in zip.file_names() {
-        let Ok(name) = name_result else {
-            continue;
-        };
-        let name = name.into_owned();
-        let normalized_name = name.replace('\\', "/");
-        if !seen_names.insert(normalized_name.to_lowercase()) {
-            continue;
+        let file = fs::File::open(&path)
+            .map_err(|error| format!("Не удалось открыть архив {}: {error}", path.display()))?;
+        let zip = zip::ZipArchive::new(file)
+            .map_err(|error| format!("Не удалось прочитать архив {}: {error}", path.display()))?;
+        let archive_stamp = crate::analysis_cache::FileStamp::of(&path);
+        // Индекс имён записей архива строится один раз в памяти: поиск и
+        // дедупликация имён идут через HashSet, а не через линейный обход zip.
+        let mut seen_names: HashSet<String> = HashSet::new();
+        for name_result in zip.file_names() {
+            let Ok(name) = name_result else {
+                continue;
+            };
+            let name = name.into_owned();
+            let normalized_name = name.replace('\\', "/");
+            if !seen_names.insert(normalized_name.to_lowercase()) {
+                continue;
+            }
+            let relative = Path::new(&name);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                continue;
+            }
+            if !relative.extension().is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("xml")
+            }) {
+                continue;
+            }
+            members.push(RouteFile::Archive {
+                archive: path.clone(),
+                name: name.to_owned(),
+                stamp: archive_stamp,
+            });
         }
-        let relative = Path::new(&name);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            continue;
-        }
-        if !relative.extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("xml")
-        }) {
-            continue;
-        }
-        members.push(RouteFile::Archive {
-            archive: path.clone(),
-            name: name.to_owned(),
-            stamp: archive_stamp,
-        });
-    }
     }
     Ok(members)
 }
@@ -367,29 +371,34 @@ pub(crate) fn find_serz_path(target: &Path) -> Option<PathBuf> {
             .file_name()
             .map(|n| n.eq_ignore_ascii_case("Assets"))
             .unwrap_or(false)
+            && let Some(root) = ancestor.parent()
         {
-            if let Some(root) = ancestor.parent() {
-                for name in ["serz64.exe", "serz.exe"] {
-                    let p = root.join(name);
-                    if p.is_file() {
-                        return Some(p);
-                    }
+            for name in ["serz64.exe", "serz.exe"] {
+                let p = root.join(name);
+                if p.is_file() {
+                    return Some(p);
                 }
             }
         }
     }
-    for start in [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(|x| x.to_path_buf()))] {
-        if let Some(mut dir) = start {
-            loop {
-                for name in ["serz64.exe", "serz.exe"] {
-                    let p = dir.join(name);
-                    if p.is_file() {
-                        return Some(p);
-                    }
+    for mut dir in [
+        std::env::current_dir().ok(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|x| x.to_path_buf())),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        loop {
+            for name in ["serz64.exe", "serz.exe"] {
+                let p = dir.join(name);
+                if p.is_file() {
+                    return Some(p);
                 }
-                if !dir.pop() {
-                    break;
-                }
+            }
+            if !dir.pop() {
+                break;
             }
         }
     }
@@ -485,9 +494,9 @@ fn names_match(expected: &str, candidate: &str) -> bool {
 fn has_corrupted_or_nonascii(value: &str) -> bool {
     !value.is_ascii()
         || has_broken_character(value)
-        || value
-            .chars()
-            .any(|character| matches!(character, '\u{FFFD}' | '?' | '¦' | '¢') || character.is_control())
+        || value.chars().any(|character| {
+            matches!(character, '\u{FFFD}' | '?' | '¦' | '¢') || character.is_control()
+        })
 }
 
 /// Ищет файл ассета по ссылке из маршрута.
@@ -538,13 +547,21 @@ fn glitch_match(query: &[char], candidate: &[char]) -> bool {
         }
         false
     } else {
-        !candidate.is_empty() && query[0] == candidate[0] && glitch_match(&query[1..], &candidate[1..])
+        !candidate.is_empty()
+            && query[0] == candidate[0]
+            && glitch_match(&query[1..], &candidate[1..])
     }
 }
 
 fn fuzzy_match_name(query: &str, candidate: &str) -> bool {
-    let query_digits: String = query.chars().filter(|character| character.is_ascii_digit()).collect();
-    let candidate_digits: String = candidate.chars().filter(|character| character.is_ascii_digit()).collect();
+    let query_digits: String = query
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
+    let candidate_digits: String = candidate
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
     if query_digits != candidate_digits {
         return false;
     }
@@ -578,7 +595,10 @@ fn find_fuzzy_child(parent: &Path, query: &str, want_directory: bool) -> Option<
             if path.is_dir() != want_directory {
                 continue;
             }
-            let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+            let Some(name) = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
                 continue;
             };
             if fuzzy_match_name(query, &name) {
@@ -588,14 +608,21 @@ fn find_fuzzy_child(parent: &Path, query: &str, want_directory: bool) -> Option<
     }
     candidates
         .iter()
-        .find(|path| path.file_name().map(|name| name.to_string_lossy().is_ascii()).unwrap_or(false))
+        .find(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().is_ascii())
+                .unwrap_or(false)
+        })
         .cloned()
         .or_else(|| candidates.into_iter().next())
 }
 
 fn fuzzy_resolve_disk_path(assets_path: &Path, relative_asset: &str) -> Option<(PathBuf, String)> {
     let normalized = relative_asset.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() < 3 {
         return None;
     }
@@ -617,12 +644,8 @@ fn fuzzy_resolve_disk_path(assets_path: &Path, relative_asset: &str) -> Option<(
                 .map(|name| name.to_string_lossy().into_owned())?;
             matched_segments.push(name);
             let disk_path = matched;
-            let relative_repair = format!(
-                "{}/{}/{}",
-                parts[0],
-                parts[1],
-                matched_segments.join("/")
-            );
+            let relative_repair =
+                format!("{}/{}/{}", parts[0], parts[1], matched_segments.join("/"));
             return Some((disk_path, relative_repair));
         }
         let matched = find_fuzzy_child(&current, segment, true)?;
@@ -1102,7 +1125,7 @@ fn asset_chain_umlaut_evidence(
                 return Err(format!(
                     "Не удалось проверить {}: {error}",
                     asset_path.display()
-                ))
+                ));
             }
         };
         if !canonical.starts_with(&scope_root) || !visited.insert(canonical.clone()) {
@@ -1246,10 +1269,10 @@ pub(crate) fn scan_umlaut_assets(
 }
 
 pub(crate) fn decode_xml_bytes(bytes: &[u8]) -> String {
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        if !text.contains('\u{FFFD}') {
-            return text.to_owned();
-        }
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && !text.contains('\u{FFFD}')
+    {
+        return text.to_owned();
     }
     let (decoded, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
     decoded.into_owned()
@@ -1278,7 +1301,11 @@ fn analyze_route_file(
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"));
     let xml_data = if is_binary {
-        if fs::metadata(&file_path).map(|metadata| metadata.len()).unwrap_or(0) < 256 {
+        if fs::metadata(&file_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+            < 256
+        {
             return FileAnalysis {
                 from_cache: false,
                 file: route_file.clone(),
@@ -1319,7 +1346,7 @@ fn analyze_route_file(
                 error: Some(format!("{}: {error}", file_path.display())),
             };
         }
-        let data = match fs::read(xml_path) {
+        match fs::read(xml_path) {
             Ok(data) => data,
             Err(error) => {
                 return FileAnalysis {
@@ -1332,8 +1359,7 @@ fn analyze_route_file(
                     )),
                 };
             }
-        };
-        data
+        }
     } else {
         match fs::read(&file_path) {
             Ok(data) => data,
@@ -1421,10 +1447,10 @@ fn install_route_file(
         RouteFile::Path(path) => Some(path.clone()),
         RouteFile::Archive { .. } => None,
     };
-    if let Some(original) = original {
-        if target == original {
-            return install_converted_asset(&original, converted_path).map(Some);
-        }
+    if let Some(original) = original
+        && target == original
+    {
+        return install_converted_asset(&original, converted_path).map(Some);
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
@@ -1511,7 +1537,7 @@ where
             .map(|name| name.eq_ignore_ascii_case("Networks/Tracks.bin"))
             .unwrap_or(false)
     };
-    route_files.sort_by(|a, b| is_tracks_bin(a).cmp(&is_tracks_bin(b)));
+    route_files.sort_by_key(|a| is_tracks_bin(a));
     let normal_files: Vec<RouteFile> = route_files
         .iter()
         .filter(|file| !is_tracks_bin(file))
@@ -1523,7 +1549,7 @@ where
         .cloned()
         .collect();
     // LPT: тяжёлые файлы (Tracks.bin) ставим первыми, чтобы пул не простаивал.
-    let mut all_files = heavy_files.clone();
+    let mut all_files = heavy_files;
     all_files.extend(normal_files.iter().cloned());
 
     let temp_dir = tempdir()
@@ -1568,15 +1594,15 @@ where
                 .map(|(offset, route_file)| {
                     let name = route_file.route_name(route_path);
                     let stamp = route_file.stamp();
-                    if let (Some(name), Some(stamp)) = (&name, stamp) {
-                        if let Some(cached) = cache.get(name, stamp) {
-                            return FileAnalysis {
-                                from_cache: true,
-                                file: route_file.clone(),
-                                uses: cached.uses.clone(),
-                                error: None,
-                            };
-                        }
+                    if let (Some(name), Some(stamp)) = (&name, stamp)
+                        && let Some(cached) = cache.get(name, stamp)
+                    {
+                        return FileAnalysis {
+                            from_cache: true,
+                            file: route_file.clone(),
+                            uses: cached.uses.clone(),
+                            error: None,
+                        };
                     }
                     analyze_route_file(route_file, start_index + offset, temp_dir.path(), serz_path)
                 })
@@ -1593,16 +1619,16 @@ where
         if !analysis.from_cache {
             // В кэш попадают только заново разобранные файлы: для остальных
             // прежняя запись и так актуальна.
-            if let Some(name) = analysis.file.route_name(route_path) {
-                if let Some(stamp) = analysis.file.stamp() {
-                    cache.put(
-                        name,
-                        crate::analysis_cache::CachedFile {
-                            stamp,
-                            uses: analysis.uses.clone(),
-                        },
-                    );
-                }
+            if let Some(name) = analysis.file.route_name(route_path)
+                && let Some(stamp) = analysis.file.stamp()
+            {
+                cache.put(
+                    name,
+                    crate::analysis_cache::CachedFile {
+                        stamp,
+                        uses: analysis.uses.clone(),
+                    },
+                );
             }
         }
         let tile = route_tile_label(route_path, &analysis.file);
@@ -1629,7 +1655,7 @@ where
                 analysis
                     .file
                     .route_name(route_path)
-                    .unwrap_or_else(|| analysis.file.display().to_string())
+                    .unwrap_or_else(|| analysis.file.display())
             ));
         }
     }
@@ -1672,8 +1698,8 @@ where
         })
         .collect();
 
-    let archive_results: Result<Vec<(PathBuf, HashSet<String>, Vec<String>)>, String> =
-        pool.install(|| {
+    let archive_results: Result<Vec<(PathBuf, HashSet<String>, Vec<String>)>, String> = pool
+        .install(|| {
             product_dirs
                 .par_iter()
                 .map(|product_dir| {
@@ -1794,11 +1820,7 @@ where
             let inner_path = parts[2..].join("\\").to_lowercase();
             let product_path = parts[1..].join("\\").to_lowercase();
             let full_path = relative_asset.replace('/', "\\").to_lowercase();
-            let mut variants = vec![
-                inner_path.clone(),
-                product_path.clone(),
-                full_path.clone(),
-            ];
+            let mut variants = vec![inner_path.clone(), product_path.clone(), full_path.clone()];
             for base in [inner_path, product_path, full_path] {
                 variants.push(replace_broken_characters(&base, "ss"));
                 variants.push(replace_broken_characters(&base, "ß"));
@@ -1814,36 +1836,39 @@ where
                 }
             }
             variants.extend(texture_variants);
-            ap_cache
-                .get(&product_dir)
-                .is_some_and(|files| variants.iter().any(|variant| files.contains(&variant.trim().to_lowercase())))
+            ap_cache.get(&product_dir).is_some_and(|files| {
+                variants
+                    .iter()
+                    .any(|variant| files.contains(&variant.trim().to_lowercase()))
+            })
         } else {
             false
         };
         let is_in_archive = in_archive;
-        let (resolved_disk_path, suggested_repair, is_corrupted) = if let Some(exact_path) = full_asset_path {
-            (Some(exact_path), None, false)
-        } else if is_in_archive {
-            // Exists inside .ap archive - perfectly valid!
-            (None, None, false)
-        } else if let Some((fuzzy_disk_path, relative_repair)) =
-            fuzzy_resolve_disk_path(assets_path, &relative_asset)
-        {
-            // Fuzzy candidates are only auto-repairable corrupted/encoding variants.
-            // Clean ASCII names that merely look similar are genuinely missing.
-            let query_corrupted = has_corrupted_or_nonascii(&relative_asset);
-            let umlaut_folded_equivalent = !relative_asset.is_ascii()
-                && normalize_fuzzy_segment(&relative_asset)
-                    == normalize_fuzzy_segment(&relative_repair);
-            if query_corrupted || umlaut_folded_equivalent {
-                (Some(fuzzy_disk_path), Some(relative_repair), true)
-            } else {
+        let (resolved_disk_path, suggested_repair, is_corrupted) =
+            if let Some(exact_path) = full_asset_path {
+                (Some(exact_path), None, false)
+            } else if is_in_archive {
+                // Exists inside .ap archive - perfectly valid!
                 (None, None, false)
-            }
-        } else {
-            // Genuinely missing
-            (None, None, false)
-        };
+            } else if let Some((fuzzy_disk_path, relative_repair)) =
+                fuzzy_resolve_disk_path(assets_path, &relative_asset)
+            {
+                // Fuzzy candidates are only auto-repairable corrupted/encoding variants.
+                // Clean ASCII names that merely look similar are genuinely missing.
+                let query_corrupted = has_corrupted_or_nonascii(&relative_asset);
+                let umlaut_folded_equivalent = !relative_asset.is_ascii()
+                    && normalize_fuzzy_segment(&relative_asset)
+                        == normalize_fuzzy_segment(&relative_repair);
+                if query_corrupted || umlaut_folded_equivalent {
+                    (Some(fuzzy_disk_path), Some(relative_repair), true)
+                } else {
+                    (None, None, false)
+                }
+            } else {
+                // Genuinely missing
+                (None, None, false)
+            };
 
         let is_missing = !is_in_archive && resolved_disk_path.is_none() && !is_corrupted;
 
@@ -1941,7 +1966,9 @@ pub(crate) fn replace_missing_asset(
     let replacement_xml = read_serz_xml(serz_path, &replacement_path)
         .ok()
         .or_else(|| std::fs::read_to_string(&replacement_path).ok());
-    let root_tag = replacement_xml.as_ref().and_then(|xml| first_blueprint_tag(xml));
+    let root_tag = replacement_xml
+        .as_ref()
+        .and_then(|xml| first_blueprint_tag(xml));
     let extension_ok = replacement_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -1958,7 +1985,9 @@ pub(crate) fn replace_missing_asset(
                 ]
                 .contains(&tag.as_str())
                 {
-                    return Err("Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned());
+                    return Err(
+                        "Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned()
+                    );
                 }
             } else if !extension_ok {
                 return Err("Для scenery-объекта выберите замену из папки Scenery.".to_owned());
@@ -1973,7 +2002,9 @@ pub(crate) fn replace_missing_asset(
                 ]
                 .contains(&tag.as_str())
                 {
-                    return Err("Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned());
+                    return Err(
+                        "Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned()
+                    );
                 }
             } else if !extension_ok {
                 return Err("Для loft-объекта выберите замену из папки Networks.".to_owned());
@@ -1982,7 +2013,9 @@ pub(crate) fn replace_missing_asset(
         RouteAssetType::Road => {
             if let Some(tag) = &root_tag {
                 if tag != "cRoadSectionBlueprint" {
-                    return Err("Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned());
+                    return Err(
+                        "Тип выбранного ассета не совпадает с типом отсутствующего.".to_owned()
+                    );
                 }
             } else if !extension_ok {
                 return Err("Для road-объекта выберите замену из папки Networks.".to_owned());
@@ -2069,9 +2102,7 @@ pub(crate) fn replace_missing_asset(
             RouteFile::Archive { .. } => route_path.to_path_buf(),
         };
         let temp = create_temporary_work_directory(&source_parent)?;
-        let file_path = source_file
-            .materialize(temp.path())
-            .map_err(|error| error.to_string())?;
+        let file_path = source_file.materialize(temp.path())?;
         let xml_path = temp.path().join("source.xml");
         if is_binary {
             let conversion =
@@ -2947,8 +2978,14 @@ pub(crate) fn repair_umlaut_asset_chain(
                 )
             };
             return Err(match restore {
-                Ok(()) => format!("Не удалось установить {}: {error}. Файл восстановлен.{rollback_detail}", staged.target.display()),
-                Err(restore_error) => format!("Не удалось установить {}: {error}; восстановление тоже не удалось: {restore_error}.{rollback_detail}", staged.target.display()),
+                Ok(()) => format!(
+                    "Не удалось установить {}: {error}. Файл восстановлен.{rollback_detail}",
+                    staged.target.display()
+                ),
+                Err(restore_error) => format!(
+                    "Не удалось установить {}: {error}; восстановление тоже не удалось: {restore_error}.{rollback_detail}",
+                    staged.target.display()
+                ),
             });
         }
         committed.push((
@@ -2994,11 +3031,11 @@ fn install_staged_file(staged: &StagedUmlautFile) -> Result<(), String> {
 fn rollback_umlaut_changes(committed: &[(PathBuf, PathBuf, Option<PathBuf>)]) -> Vec<String> {
     let mut errors = Vec::new();
     for (source, target, backup) in committed.iter().rev() {
-        if target.exists() {
-            if let Err(error) = fs::remove_file(target) {
-                errors.push(format!("не удалось удалить {}: {error}", target.display()));
-                continue;
-            }
+        if target.exists()
+            && let Err(error) = fs::remove_file(target)
+        {
+            errors.push(format!("не удалось удалить {}: {error}", target.display()));
+            continue;
         }
         let Some(backup) = backup else {
             continue;
@@ -3081,10 +3118,7 @@ pub(crate) fn convert_bin_to_xml(
         })?;
     }
     let mut args = vec![legacy_windows_path(bin_path).display().to_string()];
-    args.push(format!(
-        "/xml:{}",
-        legacy_windows_path(xml_path).display()
-    ));
+    args.push(format!("/xml:{}", legacy_windows_path(xml_path).display()));
     let output = serz_output(serz_path, &args)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3165,11 +3199,10 @@ pub(crate) fn convert_xml_to_bin(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     println!("[Serz Output] stdout: {}, stderr: {}", stdout, stderr);
-    validate_serz_process(output.status.success(), &stdout, &stderr)
-        .map_err(|error| {
-            let _ = fs::remove_file(&staging_output);
-            format!("{error} (код выхода {})", output.status)
-        })?;
+    validate_serz_process(output.status.success(), &stdout, &stderr).map_err(|error| {
+        let _ = fs::remove_file(&staging_output);
+        format!("{error} (код выхода {})", output.status)
+    })?;
 
     let metadata = fs::metadata(&staging_output).map_err(|error| {
         let _ = fs::remove_file(&staging_output);
@@ -3292,11 +3325,9 @@ pub(crate) fn next_backup_path(source_path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_asset_kind_compatibility, collect_route_files,
-        extract_asset_references_with_locations,
-        has_umlauts,leftover_temporary_work_directories, 
-        referenced_geometry_paths, route_tile_label, AssetKind,
-        AssetUse, TEMP_WORK_DIRECTORY_PREFIX,
+        AssetKind, AssetUse, TEMP_WORK_DIRECTORY_PREFIX, check_asset_kind_compatibility,
+        collect_route_files, extract_asset_references_with_locations, has_umlauts,
+        leftover_temporary_work_directories, referenced_geometry_paths, route_tile_label,
     };
     use crate::RouteFile;
     use std::path::Path;
@@ -3769,16 +3800,20 @@ mod tests {
     /// Замена ассета допустима только на ассет того же типа.
     #[test]
     fn rejects_replacement_with_another_asset_kind() {
-        assert!(check_asset_kind_compatibility(
-            "Provider/Product/Networks/Track.bin",
-            "Provider/Product/Networks/Other.bin"
-        )
-        .is_ok());
-        assert!(check_asset_kind_compatibility(
-            "Provider/Product/Scenery/Building.bin",
-            "Provider/Product/Scenery/Other.bin"
-        )
-        .is_ok());
+        assert!(
+            check_asset_kind_compatibility(
+                "Provider/Product/Networks/Track.bin",
+                "Provider/Product/Networks/Other.bin"
+            )
+            .is_ok()
+        );
+        assert!(
+            check_asset_kind_compatibility(
+                "Provider/Product/Scenery/Building.bin",
+                "Provider/Product/Scenery/Other.bin"
+            )
+            .is_ok()
+        );
         let error = check_asset_kind_compatibility(
             "Provider/Product/Networks/Track.bin",
             "Provider/Product/Scenery/Building.bin",

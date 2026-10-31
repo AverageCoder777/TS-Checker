@@ -1,8 +1,8 @@
 //! Persistent user settings, game path, and ignored-route list.
 
 use super::*;
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 fn default_language() -> String {
     "ru".to_owned()
@@ -158,7 +158,7 @@ pub(crate) fn read_serz_process_limit(path: &Path) -> Result<usize, String> {
             return Err(format!(
                 "Не удалось прочитать настройку Serz {}: {error}",
                 path.display()
-            ))
+            ));
         }
     };
     if value == 0 {
@@ -211,22 +211,32 @@ pub(crate) fn load_route_scan_on_hdd() -> Result<bool, String> {
         Ok(value) => match value.trim() {
             "true" => Ok(true),
             "false" => Ok(false),
-            _ => Err(format!("Некорректное значение настройки HDD в {}.", path.display())),
+            _ => Err(format!(
+                "Некорректное значение настройки HDD в {}.",
+                path.display()
+            )),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("Не удалось прочитать настройку HDD {}: {error}", path.display())),
+        Err(error) => Err(format!(
+            "Не удалось прочитать настройку HDD {}: {error}",
+            path.display()
+        )),
     }
 }
 
 pub(crate) fn save_route_scan_on_hdd(enabled: bool) -> Result<(), String> {
     let path = route_scan_on_hdd_setting_file()
         .ok_or_else(|| "Windows APPDATA не определена; настройку HDD не сохранили.".to_owned())?;
-    let parent = path.parent().ok_or_else(|| "Некорректный путь к настройкам HDD.".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| {
-        format!("Не удалось создать папку настроек: {error}")
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Некорректный путь к настройкам HDD.".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
     fs::write(&path, enabled.to_string()).map_err(|error| {
-        format!("Не удалось сохранить настройку HDD {}: {error}", path.display())
+        format!(
+            "Не удалось сохранить настройку HDD {}: {error}",
+            path.display()
+        )
     })
 }
 
@@ -234,11 +244,7 @@ pub(crate) fn save_route_scan_on_hdd(enabled: bool) -> Result<(), String> {
 /// На HDD — жёстко 4 (I/O-bound, больше потоков только гасят диск).
 /// Иначе — лимит серз-процессов (CPU-bound).
 pub(crate) fn route_scan_max_threads(serz_process_limit: usize, on_hdd: bool) -> usize {
-    if on_hdd {
-        4
-    } else {
-        serz_process_limit.max(1)
-    }
+    if on_hdd { 4 } else { serz_process_limit.max(1) }
 }
 
 pub(crate) fn load_route_thumbnail_setting() -> Result<bool, String> {
@@ -327,11 +333,13 @@ pub(crate) fn save_last_game_path(path: &str) -> Result<(), String> {
     let parent = path_file
         .parent()
         .ok_or_else(|| "Некорректный путь к настройкам игры.".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| {
-        format!("Не удалось создать папку настроек: {error}")
-    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
     fs::write(&path_file, path).map_err(|error| {
-        format!("Не удалось сохранить путь к игре {}: {error}", path_file.display())
+        format!(
+            "Не удалось сохранить путь к игре {}: {error}",
+            path_file.display()
+        )
     })
 }
 
@@ -344,26 +352,40 @@ pub(crate) fn hide_quick_drive_free_roam_setting_file() -> Option<PathBuf> {
 }
 
 pub(crate) fn load_hide_quick_drive_free_roam() -> Result<bool, String> {
-    let path = hide_quick_drive_free_roam_setting_file()
-        .ok_or_else(|| "Windows APPDATA не определена; настройка сценариев недоступна.".to_owned())?;
+    let path = hide_quick_drive_free_roam_setting_file().ok_or_else(|| {
+        "Windows APPDATA не определена; настройка сценариев недоступна.".to_owned()
+    })?;
     match fs::read_to_string(&path) {
         Ok(value) => match value.trim() {
             "true" => Ok(true),
             "false" => Ok(false),
-            _ => Err(format!("Некорректное значение настройки сценариев в {}.", path.display())),
+            _ => Err(format!(
+                "Некорректное значение настройки сценариев в {}.",
+                path.display()
+            )),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("Не удалось прочитать настройку сценариев {}: {error}", path.display())),
+        Err(error) => Err(format!(
+            "Не удалось прочитать настройку сценариев {}: {error}",
+            path.display()
+        )),
     }
 }
 
 pub(crate) fn save_hide_quick_drive_free_roam(enabled: bool) -> Result<(), String> {
-    let path = hide_quick_drive_free_roam_setting_file()
-        .ok_or_else(|| "Windows APPDATA не определена; настройку сценариев не сохранили.".to_owned())?;
-    let parent = path.parent().ok_or_else(|| "Некорректный путь к настройкам сценариев.".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
+    let path = hide_quick_drive_free_roam_setting_file().ok_or_else(|| {
+        "Windows APPDATA не определена; настройку сценариев не сохранили.".to_owned()
+    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Некорректный путь к настройкам сценариев.".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
     fs::write(&path, enabled.to_string()).map_err(|error| {
-        format!("Не удалось сохранить настройку сценариев {}: {error}", path.display())
+        format!(
+            "Не удалось сохранить настройку сценариев {}: {error}",
+            path.display()
+        )
     })
 }
 
@@ -387,14 +409,21 @@ pub(crate) fn load_config() -> AppConfig {
 }
 
 pub(crate) fn save_config(config: &AppConfig) -> Result<(), String> {
-    let path = config_file().ok_or_else(|| "Windows APPDATA не определена; конфигурацию не сохранить.".to_owned())?;
+    let path = config_file()
+        .ok_or_else(|| "Windows APPDATA не определена; конфигурацию не сохранить.".to_owned())?;
     let parent = path
         .parent()
         .ok_or_else(|| "Некорректный путь к конфигурации.".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
     let data = serde_json::to_string_pretty(config)
         .map_err(|error| format!("Не удалось подготовить конфигурацию: {error}"))?;
-    fs::write(&path, data).map_err(|error| format!("Не удалось сохранить конфигурацию {}: {error}", path.display()))
+    fs::write(&path, data).map_err(|error| {
+        format!(
+            "Не удалось сохранить конфигурацию {}: {error}",
+            path.display()
+        )
+    })
 }
 
 pub(crate) fn load_language() -> String {
@@ -430,12 +459,22 @@ pub(crate) fn read_language_setting(path: &Path) -> Result<String, String> {
 }
 
 pub(crate) fn write_language_setting(path: &Path, lang: &str) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| "Некорректный путь к настройкам языка.".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
-    let config = AppConfig { language: lang.to_owned() };
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Некорректный путь к настройкам языка.".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Не удалось создать папку настроек: {error}"))?;
+    let config = AppConfig {
+        language: lang.to_owned(),
+    };
     let data = serde_json::to_string_pretty(&config)
         .map_err(|error| format!("Не удалось подготовить настройку языка: {error}"))?;
-    fs::write(path, data).map_err(|error| format!("Не удалось сохранить настройку языка {}: {error}", path.display()))
+    fs::write(path, data).map_err(|error| {
+        format!(
+            "Не удалось сохранить настройку языка {}: {error}",
+            path.display()
+        )
+    })
 }
 
 pub fn apply_saved_language(lang: &str) {
@@ -461,11 +500,12 @@ mod tests {
             route_id: Some("route-id".to_owned()),
             route_name: Some("Route".to_owned()),
             route_path: Some(temp.path().join("route")),
-            original_files: vec![temp
-                .path()
-                .join("route/Scenery/tile.bin")
-                .display()
-                .to_string()],
+            original_files: vec![
+                temp.path()
+                    .join("route/Scenery/tile.bin")
+                    .display()
+                    .to_string(),
+            ],
             missing_asset: Some("A/B/Scenery/old.bin".to_owned()),
             replacement_asset: Some("A/B/Scenery/new.bin".to_owned()),
             replaced_files: 1,
@@ -493,10 +533,12 @@ mod tests {
         assert_eq!(records[0]["missing_asset"], "A/B/Scenery/old.bin");
         assert_eq!(records[0]["replacement_asset"], "A/B/Scenery/new.bin");
         assert_eq!(records[0]["uses"][0]["tile"], "тайл X=+000001 Z=-000002");
-        assert!(records[0]["backups"][0]
-            .as_str()
-            .unwrap()
-            .ends_with(".bak1"));
+        assert!(
+            records[0]["backups"][0]
+                .as_str()
+                .unwrap()
+                .ends_with(".bak1")
+        );
         assert!(records[0]["timestamp_unix_seconds"].as_u64().unwrap() > 0);
     }
 }

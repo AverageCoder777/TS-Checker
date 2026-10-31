@@ -317,21 +317,23 @@ mod tests {
         std::fs::write(cache_path(route), b"{ this is not json").unwrap();
 
         let cache = AnalysisCache::load(route);
-        assert!(cache
-            .get(
-                "+000000+000000.bin",
-                FileStamp {
-                    modified: 0,
-                    size: 0,
-                    hash: 0,
-                    content_hash: 0,
-                    crc: 0,
-                    content: 0,
-                    digest: 0,
-                    checksum: 0
-                }
-            )
-            .is_none());
+        assert!(
+            cache
+                .get(
+                    "+000000+000000.bin",
+                    FileStamp {
+                        modified: 0,
+                        size: 0,
+                        hash: 0,
+                        content_hash: 0,
+                        crc: 0,
+                        content: 0,
+                        digest: 0,
+                        checksum: 0
+                    }
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -345,21 +347,23 @@ mod tests {
         .unwrap();
 
         let cache = AnalysisCache::load(route);
-        assert!(cache
-            .get(
-                "+000000+000000.bin",
-                FileStamp {
-                    modified: 0,
-                    size: 0,
-                    hash: 0,
-                    content_hash: 0,
-                    crc: 0,
-                    content: 0,
-                    digest: 0,
-                    checksum: 0
-                }
-            )
-            .is_none());
+        assert!(
+            cache
+                .get(
+                    "+000000+000000.bin",
+                    FileStamp {
+                        modified: 0,
+                        size: 0,
+                        hash: 0,
+                        content_hash: 0,
+                        crc: 0,
+                        content: 0,
+                        digest: 0,
+                        checksum: 0
+                    }
+                )
+                .is_none()
+        );
     }
 
     #[test]
